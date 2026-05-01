@@ -1,11 +1,44 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.MobileGsScan" parent="Theme.MaterialComponents.DayNight.NoActionBar">
-        <item name="colorPrimary">@color/brand</item>
+    <!-- Always-dark theme. The studio's design language is dark
+         (the web viewer uses #0B0B0D as its background and the
+         android UI was authored against the same palette in
+         res/values/colors.xml). The previous DayNight parent
+         flipped textColor* defaults to dark when the system
+         was set to light mode, leaving labels rendering near-
+         black on our hardcoded dark window — invisible.
+
+         Pinning to MaterialComponents.NoActionBar (no DayNight)
+         + the explicit textColor / textColorPrimary /
+         textColorSecondary / textColorHint defaults below is
+         what makes programmatic widgets in ServerConfigActivity
+         (TextView/EditText/Button built without explicit
+         setTextColor calls) legible. -->
+    <style name="Theme.MobileGsScan" parent="Theme.MaterialComponents.NoActionBar">
+        <item name="colorPrimary">@color/accent</item>
         <item name="colorPrimaryDark">@color/bg</item>
+        <item name="colorOnPrimary">@android:color/black</item>
         <item name="colorAccent">@color/accent</item>
+        <item name="colorSurface">@color/surface</item>
+        <item name="colorOnSurface">@color/fg</item>
         <item name="android:windowBackground">@color/bg</item>
+        <item name="android:colorBackground">@color/bg</item>
+        <item name="android:textColor">@color/fg</item>
         <item name="android:textColorPrimary">@color/fg</item>
+        <item name="android:textColorSecondary">@color/muted</item>
+        <item name="android:textColorHint">@color/muted</item>
+        <item name="editTextStyle">@style/Widget.MobileGsScan.EditText</item>
+    </style>
+
+    <!-- Default EditText style — keeps the platform underline but
+         tints it with our accent and forces the foreground /
+         hint colors. Otherwise plain `EditText(this)` falls back
+         to the AppCompat default which uses platform colors that
+         vanish against the dark surface. -->
+    <style name="Widget.MobileGsScan.EditText" parent="Widget.AppCompat.EditText">
+        <item name="android:textColor">@color/fg</item>
+        <item name="android:textColorHint">@color/muted</item>
+        <item name="android:backgroundTint">@color/accent</item>
     </style>
 
     <style name="Theme.MobileGsScan.Capture" parent="Theme.MobileGsScan">
