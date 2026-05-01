@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # scripts/android-sdk-bootstrap.sh — unattended Android SDK install.
 #
-# Downloads Google's cmdline-tools to ~/.android-sdk (override with
-# ANDROID_SDK_ROOT), accepts the SDK licenses, and installs the
-# components android/app/build.gradle.kts asks for:
+# Default install location is <repo>/android/.android-sdk so the SDK
+# is bundled with the checkout (gitignored, ~3-5 GB). One install
+# per clone, isolated from any global Android Studio. Override with
+# ANDROID_SDK_ROOT if you'd rather use a system-wide path.
+#
+# Downloads Google's cmdline-tools, accepts the SDK licenses, and
+# installs the components android/app/build.gradle.kts asks for:
 #   - platform-tools          (adb, fastboot)
 #   - platforms;android-35    (compileSdk / targetSdk in build.gradle.kts)
 #   - build-tools;35.0.0      (AGP 8.7.2's expected build-tools rev)
@@ -12,15 +16,19 @@
 # license-accept step.
 #
 # Knobs:
-#   ANDROID_SDK_ROOT — override the install root (default ~/.android-sdk).
-#   PLATFORM_VERSION — Android API level to install (default 35).
-#   BUILD_TOOLS_VERSION — build-tools to install (default 35.0.0).
-#   CMDLINE_TOOLS_VERSION — cmdline-tools build number to download
-#                           (default 13114758, the v17.0 release).
+#   ANDROID_SDK_ROOT      — override the install root (default
+#                           <repo>/android/.android-sdk).
+#   PLATFORM_VERSION      — Android API level (default 35).
+#   BUILD_TOOLS_VERSION   — build-tools to install (default 35.0.0).
+#   CMDLINE_TOOLS_VERSION — cmdline-tools build number (default
+#                           13114758, the v17.0 release).
 
 set -euo pipefail
 
-SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/.android-sdk}}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+
+SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$REPO_ROOT/android/.android-sdk}}"
 PLATFORM_VERSION="${PLATFORM_VERSION:-35}"
 BUILD_TOOLS_VERSION="${BUILD_TOOLS_VERSION:-35.0.0}"
 CMDLINE_TOOLS_VERSION="${CMDLINE_TOOLS_VERSION:-13114758}"
