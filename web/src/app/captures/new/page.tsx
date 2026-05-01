@@ -95,8 +95,8 @@ function PhonePairPanel({ name }: { name: string }) {
     <div className="space-y-3">
       <p className="text-sm text-muted">
         phone capture uses ARCore poses (Android app) or device-motion +
-        SfM (PWA fallback). pick a name above and start the session;
-        we'll mint a pair token + QR.
+        SfM (PWA fallback). pick a name above and start the session,
+        and we&apos;ll mint a pair token + QR.
       </p>
       <button
         onClick={() => m.mutate()}
