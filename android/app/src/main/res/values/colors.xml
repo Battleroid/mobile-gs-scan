@@ -1,6 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="bg">#0B0B0D</color>
+    <!-- Slightly lighter than bg so cards / dialogs / inputs read
+         as a distinct surface against the window background. Used
+         by colorSurface in the theme. -->
+    <color name="surface">#15151A</color>
+    <!-- Subtle divider color for separators between rows. -->
+    <color name="rule">#232328</color>
     <color name="fg">#E7E7E9</color>
     <color name="muted">#8A8A90</color>
     <color name="brand">#0B0B0D</color>
