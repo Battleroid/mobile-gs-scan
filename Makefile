@@ -1,19 +1,34 @@
 # mobile-gs-scan — local dev convenience targets.
 #
-# Default path (`make up`) builds images from source. Pre-built GHCR
-# images are not published yet; once they are, `docker-compose.prebuilt.yml`
-# pins them and `make up` will switch to pulling instead of building.
+# Two ways to bring up the stack:
+#
+#   1. Local-build path:    `make build`  → `make up`
+#      Builds every image from this checkout. Good for hacking on
+#      worker / web / Dockerfile changes.
+#
+#   2. Pull-from-registry:  `make pull`   → `make up-pull`
+#      Pulls pre-built images from ghcr.io (published by the
+#      build-images CI workflow on each push to main / v* tags). Good
+#      for fast first-run on a machine that just needs to use the
+#      studio without rebuilding the CUDA/nerfstudio stack.
+#
+# `make up` itself never rebuilds and never pulls. It just starts what
+# you already have locally — by intent, so a second `make up` after
+# code changes doesn't quietly do a full rebuild on you.
 #
 # Quick reference:
 #   make doctor          — preflight: docker, gpu, nvidia-container-toolkit
-#   make up              — build + start the studio (foreground)
-#   make up-d            — same, but daemonized
+#   make build           — build every image locally (base first, then rest)
+#   make rebuild         — like build, but `--no-cache`
+#   make pull            — pull pre-built images from ghcr.io
+#   make up              — start the stack (assumes images exist locally)
+#   make up-d            — same, daemonized
+#   make up-build        — build then up (chainable convenience)
+#   make up-pull         — pull then up
 #   make up-https        — start over HTTPS via Caddy + mkcert
 #                          (required for phone capture; mobile browsers
 #                          refuse getUserMedia on plain http)
 #   make https-certs     — regenerate the mkcert cert pair on demand
-#   make build           — rebuild every container image (no `up`)
-#   make rebuild         — clean rebuild — drop layer cache + rebuild
 #   make down            — stop + remove containers (keeps volumes)
 #   make logs            — tail logs from every service
 #   make ps              — list running services
@@ -31,10 +46,18 @@
 #   make android-lint      — run android lint (no -Werror)
 
 COMPOSE := $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
+
+# Overlay that flips the `image:` references in docker-compose.yml from
+# the local-build tags (mobile-gs-scan/{base,api,worker-gs,web}:latest)
+# to the ghcr.io paths the CI workflow publishes to. Applied via -f
+# wherever we want the registry path: `make pull` and `make up-pull`.
+PREBUILT := -f docker-compose.yml -f docker-compose.prebuilt.yml
+
 ANDROID_DIR := android
 GRADLEW := $(ANDROID_DIR)/gradlew
 
-.PHONY: help doctor up up-d build rebuild up-https up-https-summary https-certs \
+.PHONY: help doctor build rebuild pull up up-d up-build up-pull \
+        up-https up-https-summary https-certs \
         down logs ps restart clean shell-api shell-gs \
         android-bootstrap apk-debug apk-release apk-install android-clean android-lint
 
@@ -52,30 +75,55 @@ help:
 doctor: ## preflight: check docker, gpu, nvidia-container-toolkit
 	@bash scripts/doctor.sh
 
-up: .env ## build + start (foreground)
-	$(COMPOSE) up --build
+# ─── Build ────────────────────────────────────────────────────────────
+#
+# `base` is profile-gated to `build` so it doesn't run as a service —
+# it only exists as a build target for the shared image that api +
+# worker-gs FROM. We MUST build it explicitly first; if api or
+# worker-gs build before `mobile-gs-scan/base:latest` exists locally,
+# their FROM step will go to docker.io looking for it, hit a 401, and
+# fail with "pull access denied, repository does not exist". The
+# two-step build below is the fix.
 
-up-d: .env ## same as up, but daemonized
-	$(COMPOSE) up -d --build
+build: .env ## build every image locally (base first, then api/worker-gs/web)
+	$(COMPOSE) --profile build build base
+	$(COMPOSE) --profile https build
+
+rebuild: .env ## clean rebuild — drop layer cache
+	$(COMPOSE) --profile build build --no-cache base
+	$(COMPOSE) --profile https build --no-cache
+
+pull: .env ## pull pre-built images from ghcr.io (uses prebuilt overlay)
+	$(COMPOSE) $(PREBUILT) --profile https pull
+
+# ─── Up ───────────────────────────────────────────────────────────────
+
+up: .env ## start the stack (assumes images already built or pulled)
+	$(COMPOSE) up
+
+up-d: .env ## same as up, daemonized
+	$(COMPOSE) up -d
 	@echo "[+] stack started. open http://localhost:3000"
 	@echo "    tail logs: make logs"
 	@echo "    stop:      make down"
 
-build: .env ## (re)build every container image
-	$(COMPOSE) --profile https build
+up-build: .env ## build everything locally + start
+	@$(MAKE) -s build
+	$(COMPOSE) up
 
-rebuild: .env ## clean rebuild — drop layer cache, rebuild everything
-	$(COMPOSE) --profile https build --no-cache
+up-pull: .env ## pull from ghcr.io + start (uses prebuilt image tags)
+	@$(MAKE) -s pull
+	$(COMPOSE) $(PREBUILT) up
 
 # HTTPS via Caddy + a mkcert-issued cert. Required for `getUserMedia`
 # (and thus the /m/<token> mobile-web PWA + the Android cleartext-only
 # fallback) to work from a phone.
 #
 # Single-command path: `make up-https` does everything — bootstraps
-# mkcert + cert pair + root CA, rebuilds the web image with an empty
+# mkcert + cert pair + root CA, builds (locally) with an empty
 # NEXT_PUBLIC_API_BASE so the bundle resolves the api origin from
-# window.location at runtime, brings up the stack with the https
-# profile, and prints the URLs the phone needs to visit.
+# window.location at runtime, and brings up the stack with the https
+# profile. Builds base first for the same reason `make build` does.
 up-https: .env caddy/certs/cert.pem ## start with HTTPS via Caddy + mkcert (one-shot)
 	@# Down with `--profile https` so caddy IS in scope of the
 	@# teardown — without the profile flag, compose v2 treats
@@ -83,13 +131,11 @@ up-https: .env caddy/certs/cert.pem ## start with HTTPS via Caddy + mkcert (one-
 	@# their containers. The `-` prefix makes the command non-fatal
 	@# so a fresh-clone first run (nothing to remove) doesn't error.
 	-$(COMPOSE) --profile https down --remove-orphans 2>/dev/null
+	NEXT_PUBLIC_API_BASE= $(COMPOSE) --profile build build base
 	NEXT_PUBLIC_API_BASE= $(COMPOSE) --profile https build
 	@$(MAKE) -s up-https-summary
 	NEXT_PUBLIC_API_BASE= $(COMPOSE) --profile https up --remove-orphans
 
-# Cert bootstrap. Make picks this up as a prereq for up-https + only
-# runs it when caddy/certs/cert.pem is missing OR older than the
-# bootstrap script (so editing the script forces a regenerate).
 caddy/certs/cert.pem: scripts/mkcert-bootstrap.sh
 	@bash scripts/mkcert-bootstrap.sh
 
@@ -135,6 +181,8 @@ up-https-summary:
 	@echo "════════════════════════════════════════════════════════════════"
 	@echo
 
+# ─── Lifecycle ────────────────────────────────────────────────────────
+
 down: ## stop + remove containers (keeps named volumes)
 	$(COMPOSE) --profile https down
 
@@ -164,6 +212,11 @@ shell-gs: ## exec a bash shell in the worker-gs container
 	$(COMPOSE) exec worker-gs bash
 
 # ─── Android ──────────────────────────────────────────────────────────
+#
+# The repo doesn't ship a Gradle wrapper jar (binary). Run
+# `make android-bootstrap` once on a fresh clone — needs a system
+# `gradle` binary (apt: gradle, brew: gradle).
+
 android-bootstrap: ## generate ./gradlew (one-time, needs system gradle)
 	@if [ -x $(GRADLEW) ]; then \
 	  echo "[+] $(GRADLEW) already exists — skipping"; \
