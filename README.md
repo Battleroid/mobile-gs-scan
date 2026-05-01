@@ -23,7 +23,7 @@ else's cloud.
     SfM → splatfacto training → `.ply` + `.spz` export.
   - *Live phone capture* — start a session in the browser, pair the
     phone via QR, stream frames as you walk around, finalize, view.
-  - *Splat viewer* powered by [`mkkellogg/GaussianSplats3D`][gs3d]
+  - *Splat viewer* powered by [Spark][spark] (`@sparkjsdev/spark`)
     embedded in R3F.
 - **API + worker** (FastAPI + custom polling job queue, mirroring
   lingbot-map-studio's pattern) running on the host GPU via the NVIDIA
@@ -33,16 +33,23 @@ else's cloud.
 - **Android app** (Kotlin + ARCore) for the live capture path. Captures
   RGB frames + per-frame poses + intrinsics, streams them over a single
   WebSocket to the API, shows a minimal AR overlay (frame counter,
-  bounding capture volume, "seen" point cloud).
+  bounding capture volume).
 - **Mobile-web PWA fallback** at `/m/<token>` for phones where you don't
   want to install the Android app — `getUserMedia` + WebSocket frame
   streaming, no AR. Server-side SfM recovers the poses.
 - **Caddy + mkcert** for LAN-only HTTPS so `getUserMedia` works on the
   phone (mobile browsers refuse the camera prompt over plain HTTP).
-- **Make targets** for the entire dev loop:
+- **Make targets** for the entire dev loop — including the Android app:
   `make doctor` → `make up-https` → scan QR on phone → capture → view.
+  `make android-bootstrap` + `make apk-debug` / `apk-install` for the
+  Android side.
+- **GitHub Actions** for CI (lint + build of web / worker / android on
+  every PR), GHCR image publish on `main` + `v*` tags, draft Release
+  on tag, and a branch-name validator that enforces the
+  `feature/` / `fix/` / `chore/` / `docs/` / `refactor/` / `release/`
+  prefix from CONTRIBUTING.md.
 
-[gs3d]: https://github.com/mkkellogg/GaussianSplats3D
+[spark]: https://github.com/sparkjsdev/spark
 
 ## What's deferred (see `docs/roadmap.md`)
 
@@ -53,31 +60,6 @@ else's cloud.
 - iOS native app (ARKit / LiDAR depth supervision).
 - Public-tunnel deployment (Tailscale Funnel / Cloudflare Tunnel).
 - Auth.
-
-## Architecture (one screen)
-
-```
-┌──────────────┐     wss        ┌──────────────────────────────────┐
-│  Android app │ ─frames+poses─►│          api  (FastAPI)          │
-│  ARCore      │                │   • capture-session HTTP+WS      │
-└──────────────┘                │   • job broker (SQLite + events) │
-        ▲                       └────────────────┬─────────────────┘
-        │ QR pair                                │ claim jobs
-        │                                        │  (heartbeat)
-┌──────────────┐                ┌────────────────▼─────────────────┐
-│   web UI     │ ◄─events──     │       worker-gs  (CUDA/4090)     │
-│   Next.js    │                │   Glomap SfM → splatfacto train  │
-│   R3F viewer │                │   → .ply + .spz export           │
-└──────────────┘                └────────────────┬─────────────────┘
-                                                 │ writes
-                                          /data/scenes/<id>/
-                                          ├── ply / spz
-                                          └── thumbs
-
-caddy:443 ─── reverse proxies /api/* → api, /* → web (mkcert TLS)
-```
-
-See [`docs/architecture.md`](docs/architecture.md) for the detail.
 
 ## Quick start (host: Windows + 4090 + WSL2 Ubuntu)
 
@@ -92,19 +74,26 @@ make up-https
 # from your phone (same wifi):
 #   1. scan the rootCA QR, install the cert
 #   2. scan the capture URL → either open in mobile-web PWA, OR
-#      open the Android app from the Play store / sideload .apk and
-#      paste the URL into Settings
+#      open the Android app (sideload .apk) and let it deep-link
 ```
 
-The drag-and-drop happy path doesn't need the phone — visit
+For the drag-and-drop happy path you don't need the phone — visit
 `https://localhost/captures/new` from the host machine, drop a folder
 of images, and you'll see a finished splat in a few minutes.
+
+### Building the Android app
+
+```bash
+make android-bootstrap   # one-time: drops ./gradlew via system gradle
+make apk-debug           # builds the debug APK
+make apk-install         # builds + adb install
+```
 
 ## Layout
 
 ```
-├── docker-compose.yml         # api, worker-gs, web, caddy, (minio)
-├── Makefile                   # up / up-https / shell-* / clean
+├── docker-compose.yml         # api, worker-gs, web, caddy
+├── Makefile                   # up / up-https / shell-* / clean / apk-*
 ├── caddy/                     # reverse proxy config + LAN TLS certs
 ├── scripts/                   # doctor, mkcert-bootstrap
 ├── worker/                    # Python: FastAPI api + worker-gs
@@ -112,8 +101,9 @@ of images, and you'll see a finished splat in a few minutes.
 │   ├── app/jobs/              #   job store / events / runner
 │   ├── app/sessions/          #   capture-session store + ws ingest
 │   └── app/pipeline/          #   sfm / train / export / mesh
-├── web/                       # Next.js 16 + R3F + Tailwind
-└── android/                   # Kotlin + ARCore + WebSocket client
+├── web/                       # Next.js 16 + R3F + Tailwind + Spark
+├── android/                   # Kotlin + ARCore + WebSocket client
+└── .github/workflows/         # ci, build-images, release, branch-name
 ```
 
 ## License
