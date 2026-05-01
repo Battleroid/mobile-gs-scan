@@ -30,13 +30,21 @@ import javax.microedition.khronos.opengles.GL10
  *
  * Lifecycle:
  *   1. Validate ARCore availability + Google Play Services for AR.
- *      Branch on the four meaningful Availability states:
+ *      Branch on the meaningful Availability states:
  *        - SUPPORTED_INSTALLED      → start the AR session
  *        - SUPPORTED_NOT_INSTALLED  → call requestInstall(),
  *          onResume re-runs bootstrapAr() once the user accepts.
  *        - SUPPORTED_APK_TOO_OLD    → same path as NOT_INSTALLED.
- *        - UNSUPPORTED_DEVICE_NOT_CAPABLE → actionable dialog that
- *          deep-links the user to the Play Store entry for
+ *        - UNKNOWN_ERROR            → the IPC into Play Services
+ *          for AR failed terminally. In practice this almost
+ *          always means the APK isn't installed at all (a phone
+ *          that never had Play Services for AR auto-installed,
+ *          or where it was uninstalled). requestInstall() has
+ *          its own install / update flow that recovers from
+ *          "missing entirely" — try it. If it throws, fall back
+ *          to the actionable Play Store dialog.
+ *        - UNSUPPORTED_DEVICE_NOT_CAPABLE → actionable dialog
+ *          that deep-links the user to the Play Store entry for
  *          Google Play Services for AR. The device-support list
  *          lives in that APK, not in our SDK pin, so an out-of-
  *          date Play Services for AR can falsely report newer
@@ -182,14 +190,18 @@ class CaptureActivity : AppCompatActivity() {
             ArCoreApk.Availability.SUPPORTED_INSTALLED -> startArSession()
 
             ArCoreApk.Availability.SUPPORTED_NOT_INSTALLED,
-            ArCoreApk.Availability.SUPPORTED_APK_TOO_OLD -> {
-                // Hardware is supported, but Play Services for AR
-                // isn't installed (or is too old to talk to our SDK
-                // pin). requestInstall hands off to the Play Store /
-                // bundled installer; result is either INSTALLED
-                // (already done by the time we asked) or
-                // INSTALL_REQUESTED (Play Store flow started, we'll
-                // re-bootstrap in onResume).
+            ArCoreApk.Availability.SUPPORTED_APK_TOO_OLD,
+            // UNKNOWN_ERROR after the transient retry path has
+            // given up almost always means Play Services for AR
+            // isn't installed at all — the IPC into it failed
+            // terminally. requestInstall() handles the missing-
+            // entirely case (it can prompt to install fresh, not
+            // just to update an existing copy), so route
+            // UNKNOWN_ERROR through the same path. If it really
+            // is something else (e.g. device incompatible),
+            // requestInstall throws and the catch falls through
+            // to the actionable Play Store dialog.
+            ArCoreApk.Availability.UNKNOWN_ERROR -> {
                 try {
                     val res = ArCoreApk.getInstance()
                         .requestInstall(this, !userRequestedArInstall)
@@ -217,10 +229,11 @@ class CaptureActivity : AppCompatActivity() {
             }
 
             else -> {
-                // UNKNOWN_ERROR / UNKNOWN_TIMED_OUT after the
-                // transient retry path above gave up. Surface the
-                // raw Availability name so a bug report has
-                // something to go on.
+                // UNKNOWN_TIMED_OUT after the transient retry path
+                // above gave up, or any future Availability the
+                // SDK gains that we don't recognize. Surface the
+                // raw enum name so a bug report has something to
+                // point at.
                 Toast.makeText(
                     this,
                     "ARCore check failed (${avail.name})",
