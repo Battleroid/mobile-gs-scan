@@ -29,10 +29,17 @@ import javax.microedition.khronos.opengles.GL10
  * Lifecycle:
  *   1. Validate ARCore is installed (deferred install if not).
  *   2. Request camera permission.
- *   3. Create the ARCore session + the streaming client.
- *   4. Render the camera background on the GLSurfaceView; pull
+ *   3. Resolve capture id + name. Two entry paths:
+ *        - phone-driven (MainActivity → POST /api/captures): id +
+ *          name come in via EXTRA_CAPTURE_ID / EXTRA_CAPTURE_NAME,
+ *          no HTTP round-trip needed here.
+ *        - legacy QR deep-link: only the pair token is in the
+ *          intent, so we GET /api/captures/by-token/<token> to
+ *          resolve the id + name.
+ *   4. Create the ARCore session + the streaming client.
+ *   5. Render the camera background on the GLSurfaceView; pull
  *      pose+image frames in onDrawFrame and ship them to the server.
- *   5. On finish (button or back), call streamer.finalize() and pop
+ *   6. On finish (button or back), call streamer.finalize() and pop
  *      the activity.
  *
  * The render path here is intentionally minimal — no overlay
@@ -44,6 +51,7 @@ class CaptureActivity : AppCompatActivity() {
         const val EXTRA_BASE_URL = "base_url"
         const val EXTRA_PAIR_TOKEN = "pair_token"
         const val EXTRA_CAPTURE_ID = "capture_id"
+        const val EXTRA_CAPTURE_NAME = "capture_name"
         private const val PERM_REQ = 0xC4
     }
 
@@ -154,8 +162,22 @@ class CaptureActivity : AppCompatActivity() {
             return
         }
 
+        // Phone-driven path: MainActivity already POSTed the capture
+        // and handed us the id + name. Skip the by-token resolve.
+        val preCaptureId = intent.getStringExtra(EXTRA_CAPTURE_ID)
+        val preCaptureName = intent.getStringExtra(EXTRA_CAPTURE_NAME).orEmpty()
+
         lifecycleScope.launch {
-            val info = withContext(Dispatchers.IO) { resolveCaptureFromToken() }
+            val info: CaptureInfo? = if (!preCaptureId.isNullOrBlank()) {
+                CaptureInfo(
+                    captureId = preCaptureId,
+                    captureName = preCaptureName.ifBlank { "phone capture" },
+                )
+            } else {
+                // Legacy: came in via /m/<token> deep link. Have to
+                // ask the server to resolve the token for us.
+                withContext(Dispatchers.IO) { resolveCaptureFromToken() }
+            }
             if (info == null) {
                 Toast.makeText(this@CaptureActivity, "pair token invalid", Toast.LENGTH_LONG).show()
                 finish()

@@ -48,6 +48,8 @@ dependencies {
     implementation(libs.constraintlayout)
     implementation(libs.lifecycle.runtime.ktx)
     implementation(libs.preference.ktx)
+    implementation(libs.recyclerview)
+    implementation(libs.swiperefreshlayout)
     implementation(libs.arcore)
     implementation(libs.okhttp)
     implementation(libs.kotlinx.coroutines.android)
