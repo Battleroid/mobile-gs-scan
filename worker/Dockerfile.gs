@@ -10,14 +10,17 @@ FROM ${BASE_IMAGE}
 ENV TORCH_CUDA_ARCH_LIST="8.9" \
     CUDA_HOME=/usr/local/cuda
 
-# Torch matched to the cuDNN-devel CUDA 12.8 base. cu126 wheels run
-# fine on a 12.8 toolkit (CUDA is forward-compatible within 12.x).
-# Pinned combo as of early 2026:
-#   torch 2.6.0 + torchvision 0.21.0 (cu126 wheels)
-#   nerfstudio 1.1.7 (latest 1.1.x, supports torch 2.6)
-#   gsplat 1.5.4
-RUN python -m pip install --extra-index-url https://download.pytorch.org/whl/cu126 \
-        torch==2.6.0 torchvision==0.21.0 && \
+# Pinned to the tested combo as of early 2026:
+#   torch 2.4.1 + torchvision 0.19.1 (cu124 wheels)
+#   nerfstudio 1.1.5 (latest released)
+#   gsplat 1.4.0
+#
+# cu124 wheels run cleanly on a 12.8 toolkit (CUDA is forward-
+# compatible within 12.x), which is why the base image bump to
+# 12.8 doesn't force a torch bump. Going past nerfstudio 1.1.5
+# requires building from source — there's no 1.1.6+ on PyPI.
+RUN python -m pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
+        torch==2.4.1 torchvision==0.19.1 && \
     python -m pip install \
         opencv-python-headless==4.10.0.84 \
         open3d==0.18.0 \
@@ -25,8 +28,8 @@ RUN python -m pip install --extra-index-url https://download.pytorch.org/whl/cu1
         rich==13.9.4 \
         tyro==0.9.5 \
         viser==0.2.7 \
-        nerfstudio==1.1.7 \
-        gsplat==1.5.4
+        nerfstudio==1.1.5 \
+        gsplat==1.4.0
 
 # Glomap from source. Apt doesn't carry it; the nerfstudio docker image
 # uses the same approach. Try the pinned tag first, fall back to main
