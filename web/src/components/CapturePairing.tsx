@@ -8,14 +8,24 @@ interface Props {
 }
 
 export function CapturePairing({ pairUrl, size = 256 }: Props) {
-  const [svg, setSvg] = useState<string>("");
-  const [absoluteUrl, setAbsoluteUrl] = useState<string>("");
+  const [state, setState] = useState<{ abs: string; svg: string }>({
+    abs: "",
+    svg: "",
+  });
 
   useEffect(() => {
+    // Browser-only: window.location.origin isn't available during SSR.
+    // Set state inside the async callback rather than synchronously to
+    // satisfy react-hooks/set-state-in-effect.
     if (typeof window === "undefined") return;
     const abs = window.location.origin + pairUrl;
-    setAbsoluteUrl(abs);
-    void renderQrSvg(abs, size).then(setSvg);
+    let cancelled = false;
+    void renderQrSvg(abs, size).then((svg) => {
+      if (!cancelled) setState({ abs, svg });
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [pairUrl, size]);
 
   return (
@@ -23,10 +33,10 @@ export function CapturePairing({ pairUrl, size = 256 }: Props) {
       <div
         className="bg-white p-3"
         style={{ width: size + 24, height: size + 24 }}
-        dangerouslySetInnerHTML={{ __html: svg }}
+        dangerouslySetInnerHTML={{ __html: state.svg }}
       />
       <code className="text-xs text-muted break-all max-w-xs text-center">
-        {absoluteUrl}
+        {state.abs}
       </code>
       <p className="text-xs text-muted max-w-xs text-center">
         Scan with your phone camera. The PWA opens at this URL; the
