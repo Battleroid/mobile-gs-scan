@@ -1,3 +1,7 @@
-import next from "eslint-config-next";
+import nextConfig from "eslint-config-next";
 
-export default [...next()];
+// `eslint-config-next` exports a flat-config array directly. Spread
+// it; `next-env.d.ts` etc. are already in its `ignores`.
+const config = [...nextConfig];
+
+export default config;
