@@ -8,6 +8,9 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.updatePadding
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -50,6 +53,24 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        // Edge-to-edge handling. With targetSdk=35 (Android 15) the
+        // system draws content behind the status bar + gesture nav
+        // by default; without this the top status row gets eaten by
+        // the system bar and the bottom "new capture" button slides
+        // under the gesture pill. Pad the root with the systemBars
+        // inset so the layout sits inside the safe area on every
+        // device + orientation.
+        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { v, insets ->
+            val sys = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            v.updatePadding(
+                left = sys.left,
+                top = sys.top,
+                right = sys.right,
+                bottom = sys.bottom,
+            )
+            insets
+        }
 
         binding.captures.layoutManager = LinearLayoutManager(this)
         binding.captures.adapter = adapter
