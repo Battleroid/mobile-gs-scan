@@ -1,0 +1,104 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel an in-flight run for the same PR / branch when a new commit
+# arrives. Pull-request events run against `merge` refs, so we key on
+# head_ref where it exists (PRs) and fall back to ref for plain pushes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ─── Web (Next.js) ───────────────────────────────────────────────
+  web:
+    name: web · lint + build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: install
+        # The first commit doesn't ship a lockfile — fall back to a
+        # plain install on fresh PRs, but use ci once the lockfile
+        # exists so production builds are reproducible.
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
+      - name: lint
+        run: npm run lint --if-present
+      - name: build
+        env:
+          NEXT_PUBLIC_API_BASE: ""
+        run: npm run build
+
+  # ─── Worker (Python) ─────────────────────────────────────────────
+  worker:
+    name: worker · type-check + import test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: install lightweight deps
+        # Only the API-tier deps in CI. The CUDA/gsplat stack lives
+        # in worker-gs's Dockerfile and isn't reachable from a
+        # github-hosted runner.
+        run: |
+          python -m pip install --upgrade pip
+          pip install fastapi 'uvicorn[standard]' pydantic pydantic-settings \
+              python-multipart sqlalchemy aiosqlite httpx structlog \
+              pillow numpy websockets ruff
+      - name: ruff (lint)
+        run: ruff check app
+      - name: import smoke test
+        # Confirms the api package imports cleanly — catches the
+        # easy-to-miss circular-import / missing-init-py mistakes
+        # without needing a full pytest suite (lands in PR #2).
+        run: |
+          python -c "import importlib; m = importlib.import_module('app.main'); print('ok:', m.app.title)"
+
+  # ─── Android (Kotlin) ────────────────────────────────────────────
+  android:
+    name: android · assemble debug
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: bootstrap gradle wrapper
+        # Same one-time wrapper bootstrap that `make android-bootstrap`
+        # does locally. Idempotent.
+        run: gradle wrapper --gradle-version 8.10
+      - name: assemble debug
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
+      - name: lint
+        run: ./gradlew :app:lintDebug --no-daemon
+        continue-on-error: true # informational in PR #1; gate later
+      - name: upload debug apk
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug.apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: warn
+          retention-days: 7
