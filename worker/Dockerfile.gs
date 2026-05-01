@@ -34,12 +34,18 @@ RUN python -m pip install --extra-index-url https://download.pytorch.org/whl/cu1
 # Glomap from source. Apt doesn't carry it; the nerfstudio docker image
 # uses the same approach. Try the pinned tag first, fall back to main
 # if the tag isn't there (colmap/glomap occasionally retags releases).
+#
+# -DGUI_ENABLED=OFF skips the COLMAP Qt-based GUI (we're running
+# headless on a server) — without it COLMAP would also need
+# qtbase5-dev + libqt5opengl5-dev installed in the base image, which
+# we'd rather avoid.
 ARG GLOMAP_TAG=1.0.0
 RUN (git clone --depth 1 --branch ${GLOMAP_TAG} https://github.com/colmap/glomap.git /tmp/glomap \
         || git clone --depth 1 https://github.com/colmap/glomap.git /tmp/glomap) && \
     cmake -S /tmp/glomap -B /tmp/glomap/build -GNinja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_CUDA_ARCHITECTURES=89 \
+        -DGUI_ENABLED=OFF \
         -DFETCH_COLMAP=ON \
         -DFETCH_POSELIB=ON && \
     cmake --build /tmp/glomap/build --target install -j $(nproc) && \
