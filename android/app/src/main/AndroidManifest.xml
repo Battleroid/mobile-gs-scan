@@ -9,8 +9,20 @@
          on devices without it rather than degrading silently. -->
     <uses-feature android:name="android.hardware.camera.ar" android:required="true" />
 
-    <!-- Tell Play that this app needs ARCore. -->
-    <meta-data android:name="com.google.ar.core" android:value="required" />
+    <!-- Package visibility for Google Play Services for AR.
+
+         Android 11+ (targetSdk >= 30) restricts which other
+         packages an app can see / IPC with by default — you
+         have to declare each one in <queries>. ArCoreApk's
+         availability check + install flow both bind to the
+         com.google.ar.core service; without this declaration,
+         checkAvailability() returns UNKNOWN_ERROR (the IPC just
+         silently fails) even on devices where Play Services for
+         AR is installed and up to date. Required for Android 11+
+         and only gets stricter on 15 / 16. -->
+    <queries>
+        <package android:name="com.google.ar.core" />
+    </queries>
 
     <application
         android:label="@string/app_name"
@@ -21,6 +33,13 @@
         android:networkSecurityConfig="@xml/network_security_config"
         android:supportsRtl="true"
         android:theme="@style/Theme.MobileGsScan">
+
+        <!-- Tells Play that this app needs ARCore. MUST live inside
+             <application> per ARCore docs — at the manifest root
+             (where it was previously) it's silently ignored, and
+             Play's auto-install of Google Play Services for AR
+             on first launch never gets triggered. -->
+        <meta-data android:name="com.google.ar.core" android:value="required" />
 
         <activity
             android:name=".MainActivity"
