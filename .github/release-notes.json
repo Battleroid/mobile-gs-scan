@@ -1,0 +1,25 @@
+{
+  "categories": [
+    {
+      "title": "## Features",
+      "labels": ["feature"],
+      "rules": [{ "pattern": "^feature/", "on_property": "branch", "flags": "i" }]
+    },
+    {
+      "title": "## Fixes",
+      "labels": ["fix"],
+      "rules": [{ "pattern": "^fix/", "on_property": "branch", "flags": "i" }]
+    },
+    {
+      "title": "## Chores",
+      "labels": ["chore"],
+      "rules": [{ "pattern": "^chore/", "on_property": "branch", "flags": "i" }]
+    },
+    {
+      "title": "## Other",
+      "labels": []
+    }
+  ],
+  "ignore_labels": ["dependencies"],
+  "template": "#{{CHANGELOG}}\n\n**Full Changelog**: https://github.com/#{{OWNER}}/#{{REPO}}/compare/#{{FROM_TAG}}...#{{TO_TAG}}"
+}
