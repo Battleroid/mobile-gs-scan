@@ -1,0 +1,27 @@
+# Overlay applied via `-f docker-compose.yml -f docker-compose.prebuilt.yml`
+# (see `PREBUILT` in the Makefile) when we want to use images pulled
+# from the GitHub Container Registry instead of building locally.
+#
+# Layered on top of docker-compose.yml — only the `image:` keys are
+# overridden, and the local `build:` blocks are dropped so compose
+# never tries to fall back to a build when the pull fails. (If you
+# want a fallback build, run `make up-build` instead of `make up-pull`.)
+#
+# These tags are produced by .github/workflows/build-images.yml on
+# push to main / v* tags. After the first publish, pin a specific
+# version here (or set the ghcr.io tag explicitly via env) for
+# reproducibility — `latest` floats with the default branch.
+
+services:
+  base:
+    image: ghcr.io/battleroid/mobile-gs-scan-base:latest
+    build: !reset null
+  api:
+    image: ghcr.io/battleroid/mobile-gs-scan-api:latest
+    build: !reset null
+  worker-gs:
+    image: ghcr.io/battleroid/mobile-gs-scan-worker-gs:latest
+    build: !reset null
+  web:
+    image: ghcr.io/battleroid/mobile-gs-scan-web:latest
+    build: !reset null
