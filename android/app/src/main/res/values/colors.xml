@@ -6,4 +6,10 @@
     <color name="brand">#0B0B0D</color>
     <color name="accent">#66CCFF</color>
     <color name="danger">#FF6666</color>
+
+    <!-- Subtle 1-step-up-from-bg surface for cards / dialogs and a
+         border tone for outlines. Mirrors the web UI's
+         var(--rule) / muted surface palette. -->
+    <color name="surface">#15151A</color>
+    <color name="rule">#232328</color>
 </resources>
