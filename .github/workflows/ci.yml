@@ -2,9 +2,12 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    # Accept both `main` and `master` so CI runs whether the repo's
+    # default branch has been renamed yet or not. After a rename
+    # the dead entry is harmless.
+    branches: [main, master]
   pull_request:
-    branches: [main]
+    branches: [main, master]
 
 # Cancel an in-flight run for the same PR / branch when a new commit
 # arrives. Pull-request events run against `merge` refs, so we key on
