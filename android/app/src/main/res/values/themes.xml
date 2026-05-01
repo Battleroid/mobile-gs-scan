@@ -1,11 +1,55 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.MobileGsScan" parent="Theme.MaterialComponents.DayNight.NoActionBar">
-        <item name="colorPrimary">@color/brand</item>
+    <!-- App theme — dark, monospace, terminal-y.
+         We do NOT use DayNight: layouts hardcode @color/bg /
+         @color/fg / @color/muted, and DayNight's Day variant flips
+         Material widget defaults to light fills (so a Button comes
+         in white, an EditText comes in black-on-white, etc) which
+         then collide with our hardcoded dark window background —
+         producing the "white button + white text" + "black labels
+         on dark bg" we saw on a phone in Light mode.
+         Pinning to the dark Material parent keeps Material widget
+         defaults (Button colors, AlertDialog, ProgressIndicator)
+         in lockstep with our palette.
+
+         Material widget defaults the theme cares about:
+           materialButtonStyle  → secondary buttons (no override)
+                                  render as a flat TextButton in fg,
+                                  not a same-color-as-bg invisible
+                                  filled rect.
+           colorPrimary/onPrimary → ripples + selection states.
+           colorSurface/onSurface → AlertDialog body. -->
+    <style name="Theme.MobileGsScan" parent="Theme.MaterialComponents.NoActionBar">
+        <item name="colorPrimary">@color/accent</item>
         <item name="colorPrimaryDark">@color/bg</item>
+        <item name="colorOnPrimary">@android:color/black</item>
         <item name="colorAccent">@color/accent</item>
+        <item name="colorSurface">@color/surface</item>
+        <item name="colorOnSurface">@color/fg</item>
+        <item name="colorBackground">@color/bg</item>
+        <item name="colorOnBackground">@color/fg</item>
+
         <item name="android:windowBackground">@color/bg</item>
+        <item name="android:colorBackground">@color/bg</item>
+
+        <item name="android:textColor">@color/fg</item>
         <item name="android:textColorPrimary">@color/fg</item>
+        <item name="android:textColorSecondary">@color/muted</item>
+        <item name="android:textColorHint">@color/muted</item>
+
+        <!-- Default style for Material Buttons in our layouts: a
+             low-key text button so a button without explicit
+             styling (Settings, future secondary actions) renders
+             as visible text on the dark bg instead of a same-
+             color-as-bg filled rect. Prominent CTAs (the
+             "+ new capture" button) explicitly opt back into the
+             filled style via `style="@style/Widget.MaterialComponents.Button"`. -->
+        <item name="materialButtonStyle">@style/Widget.MobileGsScan.Button.TextButton</item>
+    </style>
+
+    <style name="Widget.MobileGsScan.Button.TextButton" parent="Widget.MaterialComponents.Button.TextButton">
+        <item name="android:textColor">@color/fg</item>
+        <item name="rippleColor">@color/accent</item>
     </style>
 
     <style name="Theme.MobileGsScan.Capture" parent="Theme.MobileGsScan">
