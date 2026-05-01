@@ -5,8 +5,8 @@
     android:layout_height="match_parent"
     android:background="@color/bg">
 
-    <!-- Top bar: status dot + URL + settings gear. The status dot is
-         driven by /api/health polling; URL comes from
+    <!-- Top bar: status dot + URL + settings button. The status dot
+         is driven by /api/health polling; URL comes from
          ServerConfig.studioUrl. -->
     <LinearLayout
         android:orientation="horizontal"
@@ -47,6 +47,9 @@
                 android:layout_height="wrap_content" />
         </LinearLayout>
 
+        <!-- Inherits theme's Widget.MobileGsScan.Button.TextButton
+             style (no fill, fg text). The accent ripple visually
+             indicates the tap target on dark bg. -->
         <Button
             android:id="@+id/btnSettings"
             android:text="@string/action_settings"
@@ -88,9 +91,15 @@
 
     <!-- New capture: starts a session via POST /api/captures and
          hands off to CaptureActivity. Disabled until the studio URL
-         is set + the health probe sees the server up. -->
+         is set + the health probe sees the server up.
+
+         Explicit `style="@style/Widget.MaterialComponents.Button"`
+         opts back into the filled-button surface (the theme default
+         is TextButton — see themes.xml) so backgroundTint=accent
+         actually paints. -->
     <Button
         android:id="@+id/btnNewCapture"
+        style="@style/Widget.MaterialComponents.Button"
         android:text="@string/action_new_capture"
         android:layout_margin="16dp"
         android:padding="16dp"
