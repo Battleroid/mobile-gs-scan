@@ -1,0 +1,32 @@
+name: release
+
+# Cuts a GitHub Release whenever a `v*` tag is pushed. Tagging the same
+# commit triggers `build-images.yml` in parallel, so the release notes
+# can reference the newly-published image tags by version.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # changelog generator walks back to previous tag
+
+      - id: notes
+        uses: mikepenz/release-changelog-builder-action@v5
+        with:
+          configuration: ".github/release-notes.json"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          body: ${{ steps.notes.outputs.changelog }}
+          generate_release_notes: true
