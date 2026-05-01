@@ -1,0 +1,36 @@
+# Caddy reverse proxy: terminates LAN HTTPS via mkcert + proxies
+# /api/* to FastAPI and /* to the Next.js web container. Same host
+# for both so the capture WebSocket stays same-origin.
+
+:80 {
+	@rootca_crt path /mkcert-rootCA.crt
+	handle @rootca_crt {
+		header Content-Type "application/x-x509-ca-cert"
+		header Content-Disposition "attachment; filename=mkcert-rootCA.crt"
+		root * /certs
+		rewrite * /rootCA.crt
+		file_server
+	}
+	@rootca_pem path /mkcert-rootCA.pem
+	handle @rootca_pem {
+		root * /certs
+		rewrite * /rootCA.pem
+		file_server
+	}
+	handle {
+		redir https://{host}{uri} permanent
+	}
+}
+
+:443 {
+	tls /certs/cert.pem /certs/key.pem
+
+	request_body /api/captures/*/upload {
+		max_size 4GB
+	}
+
+	reverse_proxy /api/* api:8000 {
+		flush_interval -1
+	}
+	reverse_proxy * web:3000
+}

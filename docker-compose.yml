@@ -1,0 +1,126 @@
+services:
+  base:
+    image: mobile-gs-scan/base:latest
+    build:
+      context: ./worker
+      dockerfile: Dockerfile.base
+    profiles: ["build"]
+
+  api:
+    image: mobile-gs-scan/api:latest
+    build:
+      context: ./worker
+      dockerfile: Dockerfile.api
+      args:
+        BASE_IMAGE: mobile-gs-scan/base:latest
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      DATA_DIR: /data
+      MODELS_DIR: /models
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      GS_CAPTURE_MAX_FRAMES: ${GS_CAPTURE_MAX_FRAMES:-2000}
+      GS_PAIR_TOKEN_TTL_SECONDS: ${GS_PAIR_TOKEN_TTL_SECONDS:-600}
+      GS_TRAIN_ITERS: ${GS_TRAIN_ITERS:-15000}
+      GS_SFM_BACKEND: ${GS_SFM_BACKEND:-glomap}
+    volumes:
+      - ./data:/data
+      - models:/models
+    ports:
+      - "8000:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: "8gb"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/health',timeout=2).status==200 else 1)"]
+      interval: 3s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
+    ulimits:
+      memlock: -1
+      stack: 67108864
+      nofile:
+        soft: 65536
+        hard: 1048576
+
+  worker-gs:
+    image: mobile-gs-scan/worker-gs:latest
+    build:
+      context: ./worker
+      dockerfile: Dockerfile.gs
+      args:
+        BASE_IMAGE: mobile-gs-scan/base:latest
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      DATA_DIR: /data
+      MODELS_DIR: /models
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      GS_TRAIN_ITERS: ${GS_TRAIN_ITERS:-15000}
+      GS_SFM_BACKEND: ${GS_SFM_BACKEND:-glomap}
+      WORKER_CLASS: gs
+      API_BASE_URL: http://api:8000
+    volumes:
+      - ./data:/data
+      - models:/models
+    depends_on:
+      api:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: "8gb"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+      nofile:
+        soft: 65536
+        hard: 1048576
+
+  web:
+    build:
+      context: ./web
+      args:
+        NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE-http://localhost:8000}
+    environment:
+      NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE-http://localhost:8000}
+    ports:
+      - "3000:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["https"]
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${STUDIO_TLS_DIR:-./caddy/certs}:/certs:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  models:
+  caddy-data:
+  caddy-config:
