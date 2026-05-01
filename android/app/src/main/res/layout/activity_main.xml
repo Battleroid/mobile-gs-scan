@@ -3,31 +3,102 @@
     android:orientation="vertical"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:padding="24dp"
-    android:gravity="center">
+    android:background="@color/bg">
 
-    <TextView
-        android:id="@+id/title"
-        android:text="@string/app_name"
-        android:textSize="22sp"
-        android:textStyle="bold"
-        android:textColor="@color/fg"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:paddingBottom="12dp" />
-
-    <TextView
-        android:id="@+id/status"
-        android:text="@string/status_idle"
-        android:textColor="@color/muted"
-        android:gravity="center"
+    <!-- Top bar: status dot + URL + settings gear. The status dot is
+         driven by /api/health polling; URL comes from
+         ServerConfig.studioUrl. -->
+    <LinearLayout
+        android:orientation="horizontal"
+        android:padding="16dp"
+        android:gravity="center_vertical"
+        android:background="@color/bg"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:paddingBottom="32dp" />
+        android:layout_height="wrap_content">
 
+        <View
+            android:id="@+id/statusDot"
+            android:layout_width="12dp"
+            android:layout_height="12dp"
+            android:layout_marginEnd="12dp"
+            android:background="@drawable/dot_offline" />
+
+        <LinearLayout
+            android:orientation="vertical"
+            android:layout_weight="1"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content">
+
+            <TextView
+                android:id="@+id/statusText"
+                android:text="@string/status_no_url"
+                android:textColor="@color/fg"
+                android:textSize="14sp"
+                android:fontFamily="monospace"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+
+            <TextView
+                android:id="@+id/statusUrl"
+                android:textColor="@color/muted"
+                android:textSize="12sp"
+                android:fontFamily="monospace"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <Button
+            android:id="@+id/btnSettings"
+            android:text="@string/action_settings"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+    </LinearLayout>
+
+    <!-- Captures list. Pull-to-refresh wraps a RecyclerView and a
+         centered empty-state TextView; the activity toggles
+         visibility based on list length. -->
+    <androidx.swiperefreshlayout.widget.SwipeRefreshLayout
+        android:id="@+id/refresh"
+        android:layout_weight="1"
+        android:layout_width="match_parent"
+        android:layout_height="0dp">
+
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="match_parent">
+
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/captures"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent" />
+
+            <TextView
+                android:id="@+id/empty"
+                android:text="@string/empty_no_captures"
+                android:textColor="@color/muted"
+                android:gravity="center"
+                android:padding="32dp"
+                android:fontFamily="monospace"
+                android:textSize="13sp"
+                android:visibility="gone"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent" />
+        </FrameLayout>
+    </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
+
+    <!-- New capture: starts a session via POST /api/captures and
+         hands off to CaptureActivity. Disabled until the studio URL
+         is set + the health probe sees the server up. -->
     <Button
-        android:id="@+id/btnSettings"
-        android:text="@string/action_settings"
-        android:layout_width="wrap_content"
+        android:id="@+id/btnNewCapture"
+        android:text="@string/action_new_capture"
+        android:layout_margin="16dp"
+        android:padding="16dp"
+        android:textSize="16sp"
+        android:textStyle="bold"
+        android:backgroundTint="@color/accent"
+        android:textColor="@android:color/black"
+        android:enabled="false"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content" />
 </LinearLayout>
