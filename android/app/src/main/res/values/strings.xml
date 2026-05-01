@@ -6,6 +6,8 @@
     <string name="action_start_capture">Start capture</string>
     <string name="action_finish">Finish</string>
     <string name="action_new_capture">+ new capture</string>
+    <string name="action_open_play_store">Open Play Store</string>
+    <string name="action_cancel">Cancel</string>
 
     <!-- Settings: studio URL field. Hint reflects the auto-prefix
          behaviour in ServerConfig.normalize — bare hostname or IP
@@ -24,4 +26,13 @@
     <!-- home screen empty states -->
     <string name="empty_no_url">tap settings and enter your studio URL to get started</string>
     <string name="empty_no_captures">no captures yet — tap \"new capture\" to start</string>
+
+    <!-- ARCore unsupported-device dialog. Triggered when
+         ArCoreApk.checkAvailability returns
+         UNSUPPORTED_DEVICE_NOT_CAPABLE — almost always because
+         the user\'s Google Play Services for AR is too old to
+         know about their phone (the device-support list lives
+         in that APK, not in our SDK pin). -->
+    <string name="arcore_unsupported_title">ARCore reports unsupported</string>
+    <string name="arcore_unsupported_body">Your phone hardware should support ARCore, but the system component that gates it (\"Google Play Services for AR\") is reporting otherwise. This usually means it\'s missing or out of date — its bundled device list is what tells ARCore which phones are capable, and a copy from before your phone\'s launch won\'t recognize it.\n\nTap \"Open Play Store\" to install or update Google Play Services for AR, then come back to this screen and try again.</string>
 </resources>
