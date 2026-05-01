@@ -7,6 +7,7 @@ import android.net.Uri
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.os.Bundle
+import android.view.View
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
@@ -30,42 +31,24 @@ import javax.microedition.khronos.opengles.GL10
  *
  * Lifecycle:
  *   1. Validate ARCore availability + Google Play Services for AR.
- *      Branch on the meaningful Availability states:
- *        - SUPPORTED_INSTALLED      → start the AR session
- *        - SUPPORTED_NOT_INSTALLED  → call requestInstall(),
- *          onResume re-runs bootstrapAr() once the user accepts.
- *        - SUPPORTED_APK_TOO_OLD    → same path as NOT_INSTALLED.
- *        - UNKNOWN_ERROR            → the IPC into Play Services
- *          for AR failed terminally. In practice this almost
- *          always means the APK isn't installed at all (a phone
- *          that never had Play Services for AR auto-installed,
- *          or where it was uninstalled). requestInstall() has
- *          its own install / update flow that recovers from
- *          "missing entirely" — try it. If it throws, fall back
- *          to the actionable Play Store dialog.
- *        - UNSUPPORTED_DEVICE_NOT_CAPABLE → actionable dialog
- *          that deep-links the user to the Play Store entry for
- *          Google Play Services for AR. The device-support list
- *          lives in that APK, not in our SDK pin, so an out-of-
- *          date Play Services for AR can falsely report newer
- *          hardware (Pixel 10 family, etc) as unsupported.
  *   2. Request camera permission.
- *   3. Resolve capture id + name. Two entry paths:
- *        - phone-driven (MainActivity → POST /api/captures): id +
- *          name come in via EXTRA_CAPTURE_ID / EXTRA_CAPTURE_NAME,
- *          no HTTP round-trip needed here.
- *        - legacy QR deep-link: only the pair token is in the
- *          intent, so we GET /api/captures/by-token/<token> to
- *          resolve the id + name.
- *   4. Create the ARCore session + the streaming client.
- *   5. Render the camera background on the GLSurfaceView; pull
- *      pose+image frames in onDrawFrame and ship them to the server.
- *   6. On finish (button or back), call streamer.finalize() and pop
- *      the activity.
- *
- * The render path here is intentionally minimal — no overlay
- * geometry, just the camera background. PR #2 lands the proper
- * coverage-cone visualization.
+ *   3. Resolve capture id + name (from extras for the phone-driven
+ *      path, or via /api/captures/by-token for the legacy QR deep
+ *      link path). Done in startArSession's coroutine; doesn't gate
+ *      the GL preview.
+ *   4. Render: every frame, advance ARCore, paint the camera quad
+ *      via BackgroundRenderer so the user sees what they're aiming
+ *      at. This loop runs from the moment the GL surface is ready,
+ *      independent of whether the user has tapped Start.
+ *   5. Streaming gate: frame ingestion is OFF until the user taps
+ *      "Start capture". This lets them aim and frame the subject
+ *      first. Tapping Start opens the WebSocket, sends the session
+ *      header, kicks off the heartbeat loop, and flips the
+ *      captureGateActive flag so subsequent draws extract +
+ *      transmit JPEG/pose data.
+ *   6. On Finish (button or back after start), call
+ *      streamer.finalize() and pop the activity to the web for
+ *      progress tracking.
  */
 class CaptureActivity : AppCompatActivity() {
     companion object {
@@ -79,12 +62,14 @@ class CaptureActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityCaptureBinding
     private var arSession: ARCaptureSession? = null
+    private val background = BackgroundRenderer()
     private var streamer: StreamingClient? = null
     private var heartbeatJob: Job? = null
 
     private var baseUrl: String = ""
     private var pairToken: String = ""
     private var captureId: String? = null
+    private var captureName: String? = null
     private var sceneId: String? = null
 
     private var receivedCount = 0
@@ -94,6 +79,11 @@ class CaptureActivity : AppCompatActivity() {
     // than once per Activity lifetime. requestInstall takes a flag
     // for this — we flip it after the first prompt.
     private var userRequestedArInstall = false
+
+    // Streaming gate. Off until the user taps Start; the renderer
+    // checks this every frame. AR session + preview run regardless
+    // so the user can aim before recording.
+    @Volatile private var captureGateActive = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -109,6 +99,12 @@ class CaptureActivity : AppCompatActivity() {
         }
 
         binding.btnFinish.setOnClickListener { finishCapture() }
+        binding.btnStart.setOnClickListener { onStartCaptureTapped() }
+        // Disabled until we've resolved the capture record. Re-enabled
+        // by startArSession's coroutine once captureId is known.
+        binding.btnStart.isEnabled = false
+        binding.frameCounter.text = getString(R.string.capture_idle)
+
         binding.glSurface.setEGLContextClientVersion(2)
         binding.glSurface.setRenderer(Renderer())
         binding.glSurface.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
@@ -118,10 +114,6 @@ class CaptureActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        // If we kicked the user out to Play Store to install / update
-        // Google Play Services for AR, re-check availability when we
-        // come back into focus instead of trying to resume a session
-        // that was never created.
         if (arSession == null && userRequestedArInstall) {
             bootstrapAr()
             return
@@ -181,8 +173,6 @@ class CaptureActivity : AppCompatActivity() {
     private fun bootstrapAr() {
         val avail = ArCoreApk.getInstance().checkAvailability(this)
         if (avail.isTransient) {
-            // Play Services for AR is mid-query — poll. No state
-            // change needed, we're just waiting for the IPC to settle.
             binding.glSurface.postDelayed({ bootstrapAr() }, 200)
             return
         }
@@ -190,18 +180,7 @@ class CaptureActivity : AppCompatActivity() {
             ArCoreApk.Availability.SUPPORTED_INSTALLED -> startArSession()
 
             ArCoreApk.Availability.SUPPORTED_NOT_INSTALLED,
-            ArCoreApk.Availability.SUPPORTED_APK_TOO_OLD,
-            // UNKNOWN_ERROR after the transient retry path has
-            // given up almost always means Play Services for AR
-            // isn't installed at all — the IPC into it failed
-            // terminally. requestInstall() handles the missing-
-            // entirely case (it can prompt to install fresh, not
-            // just to update an existing copy), so route
-            // UNKNOWN_ERROR through the same path. If it really
-            // is something else (e.g. device incompatible),
-            // requestInstall throws and the catch falls through
-            // to the actionable Play Store dialog.
-            ArCoreApk.Availability.UNKNOWN_ERROR -> {
+            ArCoreApk.Availability.SUPPORTED_APK_TOO_OLD -> {
                 try {
                     val res = ArCoreApk.getInstance()
                         .requestInstall(this, !userRequestedArInstall)
@@ -218,22 +197,10 @@ class CaptureActivity : AppCompatActivity() {
             }
 
             ArCoreApk.Availability.UNSUPPORTED_DEVICE_NOT_CAPABLE -> {
-                // Play Services for AR's bundled device list says no.
-                // For 2025-era flagships (Pixel 10 family, etc) this
-                // almost always means the user's Play Services for
-                // AR is from before the device launched and just
-                // hasn't auto-updated yet. Hand them a one-tap
-                // shortcut to update it manually instead of dead-
-                // ending on a Toast.
                 showArUnsupportedDialog(null)
             }
 
             else -> {
-                // UNKNOWN_TIMED_OUT after the transient retry path
-                // above gave up, or any future Availability the
-                // SDK gains that we don't recognize. Surface the
-                // raw enum name so a bug report has something to
-                // point at.
                 Toast.makeText(
                     this,
                     "ARCore check failed (${avail.name})",
@@ -266,10 +233,6 @@ class CaptureActivity : AppCompatActivity() {
     }
 
     private fun openPlayServicesForArInPlayStore() {
-        // market:// resolves inside the Play Store app on devices
-        // where it's installed (effectively all consumer Android).
-        // Fall back to the https URL for the rare device without a
-        // Play Store app installed (sideloaded, F-Droid-only, etc).
         val marketIntent = Intent(
             Intent.ACTION_VIEW,
             Uri.parse("market://details?id=$PLAY_SERVICES_FOR_AR_PKG"),
@@ -296,9 +259,15 @@ class CaptureActivity : AppCompatActivity() {
             finish()
             return
         }
+        // Texture binding belt-and-braces: if the GL surface came up
+        // before the AR session was ready, the renderer's
+        // arSession?.setTextureName call no-op'd. Re-bind here so
+        // session.update() has a valid OES target. Both code paths
+        // (surface-first, session-first) end up with the same wiring.
+        if (background.textureId >= 0) {
+            arSession?.setTextureName(background.textureId)
+        }
 
-        // Phone-driven path: MainActivity already POSTed the capture
-        // and handed us the id + name. Skip the by-token resolve.
         val preCaptureId = intent.getStringExtra(EXTRA_CAPTURE_ID)
         val preCaptureName = intent.getStringExtra(EXTRA_CAPTURE_NAME).orEmpty()
 
@@ -309,8 +278,6 @@ class CaptureActivity : AppCompatActivity() {
                     captureName = preCaptureName.ifBlank { "phone capture" },
                 )
             } else {
-                // Legacy: came in via /m/<token> deep link. Have to
-                // ask the server to resolve the token for us.
                 withContext(Dispatchers.IO) { resolveCaptureFromToken() }
             }
             if (info == null) {
@@ -319,32 +286,52 @@ class CaptureActivity : AppCompatActivity() {
                 return@launch
             }
             captureId = info.captureId
+            captureName = info.captureName
             binding.sessionLabel.text = info.captureName
+            // Resolved — now the user can actually start capture.
+            binding.btnStart.isEnabled = true
+        }
+    }
 
-            streamer = StreamingClient(
-                scope = lifecycleScope,
-                baseUrl = baseUrl,
-                captureId = info.captureId,
-                pairToken = pairToken,
-            ).also { s ->
-                s.connect()
-                lifecycleScope.launch {
-                    s.events.collect(::handleStreamEvent)
-                }
-                s.sendSession(
-                    deviceLabel = android.os.Build.MODEL,
-                    intrinsics = Intrinsics(0f, 0f, 0f, 0f, 0, 0),
-                    hasPose = true,
-                )
+    private fun onStartCaptureTapped() {
+        val cap = captureId
+        if (cap.isNullOrBlank()) {
+            // Defensive — button shouldn't be enabled before resolve
+            // completes, but if a user manages to double-tap during
+            // the flip, just no-op.
+            return
+        }
+        if (captureGateActive) return
+
+        streamer = StreamingClient(
+            scope = lifecycleScope,
+            baseUrl = baseUrl,
+            captureId = cap,
+            pairToken = pairToken,
+        ).also { s ->
+            s.connect()
+            lifecycleScope.launch {
+                s.events.collect(::handleStreamEvent)
             }
+            s.sendSession(
+                deviceLabel = android.os.Build.MODEL,
+                intrinsics = Intrinsics(0f, 0f, 0f, 0f, 0, 0),
+                hasPose = true,
+            )
+        }
 
-            heartbeatJob = lifecycleScope.launch {
-                while (true) {
-                    kotlinx.coroutines.delay(5_000)
-                    streamer?.heartbeat()
-                }
+        heartbeatJob = lifecycleScope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(5_000)
+                streamer?.heartbeat()
             }
         }
+
+        captureGateActive = true
+        binding.startHint.visibility = View.GONE
+        binding.btnStart.visibility = View.GONE
+        binding.btnFinish.visibility = View.VISIBLE
+        binding.frameCounter.text = "0 frames"
     }
 
     private data class CaptureInfo(val captureId: String, val captureName: String)
@@ -395,6 +382,11 @@ class CaptureActivity : AppCompatActivity() {
     }
 
     private fun finishCapture() {
+        if (!captureGateActive) {
+            // Never started — just back out without poking the server.
+            finish()
+            return
+        }
         streamer?.finalize("user")
         binding.glSurface.postDelayed({
             if (sceneId == null) openProgressInBrowser()
@@ -409,17 +401,15 @@ class CaptureActivity : AppCompatActivity() {
     }
 
     private inner class Renderer : GLSurfaceView.Renderer {
-        private var textureId: Int = 0
-
         override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
             GLES20.glClearColor(0f, 0f, 0f, 1f)
-            val handles = IntArray(1)
-            GLES20.glGenTextures(1, handles, 0)
-            textureId = handles[0]
-            GLES20.glBindTexture(0x8D65 /* GL_TEXTURE_EXTERNAL_OES */, textureId)
-            GLES20.glTexParameteri(0x8D65, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
-            GLES20.glTexParameteri(0x8D65, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
-            arSession?.setTextureName(textureId)
+            background.createOnGlThread()
+            // First half of the texture-binding handshake. If the
+            // session was created first, this connects the freshly-
+            // generated texture id to it. If the session is created
+            // later (permission flow async path), startArSession will
+            // handle the second half.
+            arSession?.setTextureName(background.textureId)
         }
 
         override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
@@ -430,9 +420,14 @@ class CaptureActivity : AppCompatActivity() {
         override fun onDrawFrame(gl: GL10?) {
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
             val ar = arSession ?: return
-            val captured = ar.pollFrame() ?: return
-            // Drawing the camera background quad + overlay geometry
-            // lands in PR #2 alongside the coverage cones.
+            val frame = ar.update() ?: return
+            background.updateTexCoords(frame)
+            background.draw()
+            // Streaming gate: only extract + transmit JPEG/pose data
+            // when the user has tapped Start. Preview keeps running
+            // either way — they need to see what they're aiming at.
+            if (!captureGateActive) return
+            val captured = ar.pollFrameData(frame) ?: return
             streamer?.sendFrame(
                 idx = captured.idx,
                 jpeg = captured.jpeg,

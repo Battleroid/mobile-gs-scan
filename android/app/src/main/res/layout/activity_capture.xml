@@ -9,19 +9,9 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
-    <!-- Minimal AR overlay: a frame counter + a "finish" button.
-         Coverage cones / heatmap land in PR #2. -->
-    <TextView
-        android:id="@+id/frameCounter"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="top|end"
-        android:layout_margin="20dp"
-        android:textColor="@android:color/white"
-        android:textSize="14sp"
-        android:fontFamily="monospace"
-        android:text="0 frames" />
-
+    <!-- Top-left: capture name (resolved from /api/captures or
+         passed in via EXTRA_CAPTURE_NAME). Empty until resolve
+         completes. -->
     <TextView
         android:id="@+id/sessionLabel"
         android:layout_width="wrap_content"
@@ -33,6 +23,56 @@
         android:fontFamily="monospace"
         android:text="" />
 
+    <!-- Top-right: streaming state. "idle — tap Start" while the
+         gate is closed; flips to live frame counts after Start is
+         tapped. -->
+    <TextView
+        android:id="@+id/frameCounter"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|end"
+        android:layout_margin="20dp"
+        android:textColor="@android:color/white"
+        android:textSize="14sp"
+        android:fontFamily="monospace"
+        android:text="@string/capture_idle" />
+
+    <!-- Pre-Start hint sitting in the middle of the preview. Goes
+         away once the user taps Start. The translucent background
+         keeps it readable on a bright camera image. -->
+    <TextView
+        android:id="@+id/startHint"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:padding="16dp"
+        android:gravity="center"
+        android:background="#80000000"
+        android:textColor="@android:color/white"
+        android:textSize="14sp"
+        android:fontFamily="monospace"
+        android:text="@string/hint_start_capture" />
+
+    <!-- Initial primary action. Disabled until the capture record
+         resolves. Hidden once tapped — Finish takes its place. -->
+    <Button
+        android:id="@+id/btnStart"
+        android:text="@string/action_start_capture"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginBottom="48dp"
+        android:paddingStart="32dp"
+        android:paddingEnd="32dp"
+        android:paddingTop="16dp"
+        android:paddingBottom="16dp"
+        android:backgroundTint="@color/accent"
+        android:textColor="@android:color/black"
+        android:textSize="16sp"
+        android:textStyle="bold" />
+
+    <!-- Finish: hidden until the user taps Start. Same anchor /
+         bottom margin as btnStart so they swap in place visually. -->
     <Button
         android:id="@+id/btnFinish"
         android:text="@string/action_finish"
@@ -41,5 +81,6 @@
         android:layout_gravity="bottom|center_horizontal"
         android:layout_marginBottom="48dp"
         android:backgroundTint="@color/danger"
-        android:textColor="@android:color/white" />
+        android:textColor="@android:color/white"
+        android:visibility="gone" />
 </FrameLayout>

@@ -17,11 +17,14 @@ import java.io.ByteArrayOutputStream
 /**
  * Thin wrapper over an ARCore [Session] that:
  *   - configures the session for fastest CPU image access (the GPU
- *     image pipeline is too involved for PR #1's overlay; we keep the
- *     overlay minimal and read CPU-side YUV instead).
- *   - exposes [pollFrame] which returns the most recent tracked
- *     pose + intrinsics + JPEG-encoded RGB image, throttled to a
- *     target frame rate.
+ *     image pipeline is too involved for the current overlay; we
+ *     keep the overlay minimal and read CPU-side YUV instead).
+ *   - exposes [update] which advances the session by one frame and
+ *     returns the resulting [Frame], so callers can run their own
+ *     rendering against ARCore's camera-feed texture.
+ *   - exposes [pollFrameData] which extracts the most recent tracked
+ *     pose + intrinsics + JPEG-encoded RGB image from a Frame,
+ *     throttled to a target frame rate.
  *
  * Designed to be driven from the `GLSurfaceView` render thread.
  */
@@ -52,17 +55,28 @@ class ARCaptureSession(
         session.setDisplayGeometry(rotation, width, height)
 
     /**
-     * Pull the next frame from ARCore, encode it to JPEG when enough
-     * time has elapsed since the last emit, and hand the result back.
-     * Returns null when ARCore is still warming up or we're being
-     * rate-limited by [targetIntervalMs].
+     * Advance the ARCore session by one frame. Returns null on the
+     * MissingGlContextException / texture-not-bound class of errors
+     * so the caller can keep polling without crashing.
      */
-    fun pollFrame(): CapturedFrame? {
-        val frame: Frame = try {
-            session.update()
-        } catch (e: Exception) {
-            return null
-        }
+    fun update(): Frame? = try {
+        session.update()
+    } catch (e: Exception) {
+        null
+    }
+
+    /**
+     * Extract pose + intrinsics + JPEG from a Frame returned by
+     * [update], if and only if:
+     *   - ARCore is currently TRACKING (so the pose is meaningful)
+     *   - enough time has elapsed since the last emit to honour the
+     *     [targetIntervalMs] rate limit
+     *   - acquireCameraImage actually has a frame ready (NotYet on
+     *     the first few calls is normal).
+     *
+     * Returns null in any of those cases.
+     */
+    fun pollFrameData(frame: Frame): CapturedFrame? {
         val camera: Camera = frame.camera
         if (camera.trackingState != TrackingState.TRACKING) return null
 

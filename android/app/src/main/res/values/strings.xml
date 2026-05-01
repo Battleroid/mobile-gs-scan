@@ -27,6 +27,13 @@
     <string name="empty_no_url">tap settings and enter your studio URL to get started</string>
     <string name="empty_no_captures">no captures yet — tap \"new capture\" to start</string>
 
+    <!-- Capture screen overlay copy. Frame-counter starts at
+         capture_idle and flips to live counts ("42 frames") once
+         the user taps Start. The hint sits in the centre of the
+         preview to nudge them toward the Start button. -->
+    <string name="capture_idle">idle — tap Start</string>
+    <string name="hint_start_capture">aim the camera at your subject\nthen tap Start when ready</string>
+
     <!-- ARCore unsupported-device dialog. Triggered when
          ArCoreApk.checkAvailability returns
          UNSUPPORTED_DEVICE_NOT_CAPABLE — almost always because
