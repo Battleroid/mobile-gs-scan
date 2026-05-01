@@ -21,12 +21,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 # System deps. ffmpeg for video frame extraction, libgl1 for opencv,
 # libgomp1 for Open3D, git for installing nerfstudio / gsplat from
-# source in Dockerfile.gs. cmake + ninja are needed by glomap (which
-# is not in apt and is built from source in the gs image).
+# source in Dockerfile.gs. ninja is the build driver glomap uses.
+#
+# Note: we DON'T install cmake from apt — Ubuntu 22.04 ships CMake
+# 3.22, and recent glomap requires ≥ 3.28. We pip-install a current
+# cmake below; it lands at /usr/local/bin/cmake which precedes
+# /usr/bin in PATH, so the pip version wins for downstream builds.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3.11 python3.11-dev python3-pip python3.11-venv \
         ffmpeg libgl1 libglib2.0-0 libgomp1 \
-        git cmake ninja-build pkg-config build-essential curl ca-certificates \
+        git ninja-build pkg-config build-essential curl ca-certificates \
         libeigen3-dev libceres-dev libboost-all-dev libsuitesparse-dev \
         libgflags-dev libgoogle-glog-dev \
     && rm -rf /var/lib/apt/lists/* \
@@ -36,11 +40,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Install just the lightweight Python deps shared by api + worker-gs
-# in this base. Heavy CUDA-bound packages (torch, gsplat, nerfstudio)
-# go in Dockerfile.gs only — the api doesn't need to pay for them.
+# in this base, plus a current CMake (≥ 3.28 required by glomap).
+# Heavy CUDA-bound packages (torch, gsplat, nerfstudio) go in
+# Dockerfile.gs only — the api doesn't need to pay for them.
 COPY pyproject.toml /app/pyproject.toml
 RUN python -m pip install --upgrade pip && \
     python -m pip install \
+        "cmake>=3.28" \
         fastapi uvicorn[standard] pydantic pydantic-settings \
         python-multipart sqlalchemy aiosqlite httpx structlog \
         pillow numpy websockets
