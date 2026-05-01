@@ -7,7 +7,11 @@
     <string name="action_finish">Finish</string>
     <string name="action_new_capture">+ new capture</string>
 
-    <string name="hint_studio_url">https://studio.local</string>
+    <!-- Settings: studio URL field. Hint reflects the auto-prefix
+         behaviour in ServerConfig.normalize — bare hostname or IP
+         is fine; we prepend https:// on save. -->
+    <string name="hint_studio_url">192.168.1.42 or studio.local</string>
+    <string name="hint_studio_url_help">scheme optional — we\'ll prepend https:// for you. type http:// explicitly if your studio runs without TLS.</string>
     <string name="label_studio_url">Studio URL</string>
 
     <!-- home screen status indicator -->
