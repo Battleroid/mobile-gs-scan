@@ -30,6 +30,9 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/captures", tags=["captures"])
 
 
+# ─── DTOs ─────────────────────────────────────────────────────────
+
+
 class CaptureCreate(BaseModel):
     name: str
     source: CaptureSource = CaptureSource.mobile_native
@@ -72,6 +75,9 @@ def _to_view(cap: Capture, scene_id: str | None = None) -> CaptureView:
         created_at=cap.created_at.isoformat(),
         updated_at=cap.updated_at.isoformat(),
     )
+
+
+# ─── HTTP ─────────────────────────────────────────────────────────
 
 
 @router.get("")
