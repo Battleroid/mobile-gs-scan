@@ -1,0 +1,44 @@
+# Shared base image for the api + worker-gs containers.
+#
+# CUDA 12.4 + Ubuntu 22.04 + Python 3.11 + the chunky native deps
+# (Glomap, Open3D, ffmpeg, ImageMagick) all live here. The downstream
+# Dockerfiles FROM this image and only add their own service-specific
+# Python deps + entrypoint, which keeps both images well under 10 GB
+# despite the gsplat / nerfstudio stack.
+FROM nvidia/cuda:12.4.0-cudnn-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# System deps. ffmpeg for video frame extraction, libgl1 for opencv,
+# libgomp1 for Open3D, git for installing nerfstudio / gsplat from
+# source in Dockerfile.gs. cmake + ninja are needed by glomap (which
+# is not in apt and is built from source in the gs image).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 python3.11-dev python3-pip python3.11-venv \
+        ffmpeg libgl1 libglib2.0-0 libgomp1 \
+        git cmake ninja-build pkg-config build-essential curl ca-certificates \
+        libeigen3-dev libceres-dev libboost-all-dev libsuitesparse-dev \
+        libgflags-dev libgoogle-glog-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python3
+
+WORKDIR /app
+
+# Install just the lightweight Python deps shared by api + worker-gs
+# in this base. Heavy CUDA-bound packages (torch, gsplat, nerfstudio)
+# go in Dockerfile.gs only — the api doesn't need to pay for them.
+COPY pyproject.toml /app/pyproject.toml
+RUN python -m pip install --upgrade pip && \
+    python -m pip install \
+        fastapi uvicorn[standard] pydantic pydantic-settings \
+        python-multipart sqlalchemy aiosqlite httpx structlog \
+        pillow numpy websockets
+
+COPY app /app/app
+
+CMD ["bash"]

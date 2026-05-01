@@ -1,0 +1,46 @@
+data/
+models/
+!data/.gitkeep
+!models/.gitkeep
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# node
+node_modules/
+.next/
+out/
+.turbo/
+*.log
+.pnpm-store/
+*.tsbuildinfo
+
+# android — keep build artifacts out of the repo. The wrapper jar is
+# intentionally NOT excluded (see android/gradle/wrapper/).
+android/build/
+android/.gradle/
+android/app/build/
+android/app/release/
+android/app/debug/
+android/local.properties
+android/captures/
+android/.idea/
+*.iml
+
+# editor
+.vscode/
+.idea/
+.DS_Store
+
+# local secrets + tls
+.env
+.env.local
+caddy/certs/*.pem
+caddy/certs/*.crt
+caddy/certs/.env.bootstrap

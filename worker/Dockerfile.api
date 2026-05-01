@@ -1,0 +1,15 @@
+ARG BASE_IMAGE=mobile-gs-scan/base:latest
+FROM ${BASE_IMAGE}
+
+# api-only deps: keep this thin. Heavy CUDA + nerfstudio + glomap
+# stays in Dockerfile.gs. The api process needs nothing besides what
+# the base image already installs.
+
+WORKDIR /app
+
+EXPOSE 8000
+
+CMD ["python", "-m", "uvicorn", "app.main:app", \
+     "--host", "0.0.0.0", "--port", "8000", \
+     "--proxy-headers", "--forwarded-allow-ips=*", \
+     "--ws-max-size", "67108864"]
