@@ -48,6 +48,10 @@ function SplatScene({ url }: { url: string }) {
     let spark: THREE.Object3D | null = null;
     let splat: THREE.Object3D | null = null;
     let fallbackPoints: THREE.Points | null = null;
+    // Snapshot the ref so the cleanup callback uses the same group node
+    // it added children to (groupRef.current may be null by then if the
+    // component unmounted).
+    const groupAtMount = groupRef.current;
 
     (async () => {
       try {
@@ -70,7 +74,7 @@ function SplatScene({ url }: { url: string }) {
               color: geom.hasAttribute("color") ? 0xffffff : 0x66ccff,
             }),
           );
-          groupRef.current?.add(fallbackPoints);
+          groupAtMount?.add(fallbackPoints);
           return null;
         });
         if (!mod || cancelled) return;
@@ -84,7 +88,7 @@ function SplatScene({ url }: { url: string }) {
         scene.add(spark);
 
         splat = new SplatMesh({ url });
-        groupRef.current?.add(splat);
+        groupAtMount?.add(splat);
       } catch (e) {
         setError((e as Error).message);
       }
@@ -93,7 +97,9 @@ function SplatScene({ url }: { url: string }) {
     return () => {
       cancelled = true;
       if (splat) {
-        groupRef.current?.remove(splat);
+        groupAtMount?.remove(splat);
+        // SplatMesh exposes .dispose() — guarded since the type isn't
+        // known at compile time after the dynamic import.
         const maybeDispose = (splat as unknown as { dispose?: () => void }).dispose;
         try { maybeDispose?.(); } catch { /* ignore */ }
       }
@@ -103,7 +109,7 @@ function SplatScene({ url }: { url: string }) {
         try { maybeDispose?.(); } catch { /* ignore */ }
       }
       if (fallbackPoints) {
-        groupRef.current?.remove(fallbackPoints);
+        groupAtMount?.remove(fallbackPoints);
         fallbackPoints.geometry.dispose();
         (fallbackPoints.material as THREE.Material).dispose();
       }
