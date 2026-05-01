@@ -216,6 +216,16 @@ shell-gs: ## exec a bash shell in the worker-gs container
 # The repo doesn't ship a Gradle wrapper jar (binary). Run
 # `make android-bootstrap` once on a fresh clone — needs a system
 # `gradle` binary (apt: gradle, brew: gradle).
+#
+# AGP 8.x requires Java 17. Most Linux hosts default to Java 11 or
+# Java 21, so we run scripts/jdk17.sh once per apk-* invocation to
+# discover a side-installed JDK 17 and set JAVA_HOME for the gradle
+# call without touching update-alternatives. Exporting JDK17_HOME=
+# in your shell short-circuits the search.
+#
+# Cached at $(JDK17_HOME) when Make recurses, so multiple targets
+# in one invocation only run the probe once.
+JDK17_HOME ?= $(shell bash scripts/jdk17.sh 2>/dev/null)
 
 android-bootstrap: ## generate ./gradlew (one-time, needs system gradle)
 	@if [ -x $(GRADLEW) ]; then \
@@ -229,12 +239,21 @@ android-bootstrap: ## generate ./gradlew (one-time, needs system gradle)
 	  echo "[+] wrapper bootstrapped — apk-* targets will use $(GRADLEW)"; \
 	fi
 
-apk-debug: $(GRADLEW) ## build debug APK (android/app/build/outputs/apk/debug/)
-	cd $(ANDROID_DIR) && ./gradlew :app:assembleDebug
+# Internal: fail-fast if scripts/jdk17.sh couldn't find a JDK 17. We
+# print the script's stderr so the user sees the install hint
+# without having to re-run anything.
+_require_jdk17:
+	@if [ -z "$(JDK17_HOME)" ]; then \
+	  bash scripts/jdk17.sh; exit 1; \
+	fi
+	@echo "[+] JDK 17 at $(JDK17_HOME)"
+
+apk-debug: $(GRADLEW) _require_jdk17 ## build debug APK (android/app/build/outputs/apk/debug/)
+	cd $(ANDROID_DIR) && JAVA_HOME=$(JDK17_HOME) PATH=$(JDK17_HOME)/bin:$$PATH ./gradlew :app:assembleDebug
 	@echo "[+] APK at $(ANDROID_DIR)/app/build/outputs/apk/debug/app-debug.apk"
 
-apk-release: $(GRADLEW) ## build release APK (unsigned)
-	cd $(ANDROID_DIR) && ./gradlew :app:assembleRelease
+apk-release: $(GRADLEW) _require_jdk17 ## build release APK (unsigned)
+	cd $(ANDROID_DIR) && JAVA_HOME=$(JDK17_HOME) PATH=$(JDK17_HOME)/bin:$$PATH ./gradlew :app:assembleRelease
 	@echo "[+] APK at $(ANDROID_DIR)/app/build/outputs/apk/release/"
 
 apk-install: apk-debug ## build + install debug APK on an attached device via adb
@@ -247,8 +266,8 @@ android-clean: ## clean android build outputs
 	@if [ -x $(GRADLEW) ]; then cd $(ANDROID_DIR) && ./gradlew clean; \
 	else rm -rf $(ANDROID_DIR)/build $(ANDROID_DIR)/app/build $(ANDROID_DIR)/.gradle; fi
 
-android-lint: $(GRADLEW) ## run android lint (no -Werror)
-	cd $(ANDROID_DIR) && ./gradlew :app:lintDebug
+android-lint: $(GRADLEW) _require_jdk17 ## run android lint (no -Werror)
+	cd $(ANDROID_DIR) && JAVA_HOME=$(JDK17_HOME) PATH=$(JDK17_HOME)/bin:$$PATH ./gradlew :app:lintDebug
 
 $(GRADLEW):
 	@echo "[!] $(GRADLEW) is missing. run \`make android-bootstrap\` first."
