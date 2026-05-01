@@ -8,6 +8,9 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.updatePadding
 
 class ServerConfigActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -47,5 +50,21 @@ class ServerConfigActivity : AppCompatActivity() {
         root.addView(input)
         root.addView(save)
         setContentView(root)
+
+        // Same edge-to-edge handling MainActivity gets: pad the root
+        // with the systemBars insets ON TOP of the existing 24dp
+        // baseline padding so the form fields don't slide under the
+        // status bar / gesture nav on Android 15+.
+        val basePad = padding
+        ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
+            val sys = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            v.updatePadding(
+                left = basePad + sys.left,
+                top = basePad + sys.top,
+                right = basePad + sys.right,
+                bottom = basePad + sys.bottom,
+            )
+            insets
+        }
     }
 }
