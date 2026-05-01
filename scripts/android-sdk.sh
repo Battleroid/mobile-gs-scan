@@ -2,23 +2,30 @@
 # scripts/android-sdk.sh — print the path to an installed Android
 # SDK, or exit non-zero with an install hint.
 #
-# Used by the Makefile's `android/local.properties` rule. We probe a
-# bunch of common locations because there's no single canonical
-# install path: Android Studio drops one at ~/Android/Sdk on Linux
-# and ~/Library/Android/sdk on macOS, the cmdline-tools approach
-# typically lands at ~/.android-sdk, and CI / containers often set
-# $ANDROID_SDK_ROOT or $ANDROID_HOME explicitly.
+# Used by the Makefile's `android/local.properties` rule. Probe
+# order:
 #
-# An SDK is considered valid here if it has BOTH:
-#   - cmdline-tools/latest    (so `sdkmanager` is reachable)
-#   - platforms/              (so at least one API level is installed)
+#   1. <repo>/android/.android-sdk    (the repo-local install that
+#      `make android-sdk-bootstrap` writes; gitignored. Wins so a
+#      user with Android Studio installed system-wide still gets a
+#      reproducible per-repo SDK.)
+#   2. $ANDROID_SDK_ROOT / $ANDROID_HOME (explicit overrides)
+#   3. ~/Android/Sdk    (Android Studio Linux default)
+#   4. ~/Library/Android/sdk    (Android Studio macOS default)
+#   5. ~/.android-sdk   (older user-wide cmdline-tools install)
+#   6. /opt/android-sdk, /usr/local/lib/android/sdk, /usr/lib/android-sdk
 #
-# If nothing matches, exits 1 with a hint pointing at
-# `make android-sdk-bootstrap`.
+# An SDK is "valid" if it has BOTH cmdline-tools/latest (so
+# sdkmanager is reachable) and platforms/ (so at least one API
+# level is installed).
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+
 candidates=(
+    "$REPO_ROOT/android/.android-sdk"
     "${ANDROID_SDK_ROOT:-}"
     "${ANDROID_HOME:-}"
     "$HOME/Android/Sdk"
@@ -42,7 +49,7 @@ done
     echo
     echo "    Pick one of:"
     echo "      • run \`make android-sdk-bootstrap\` (unattended install"
-    echo "        to ~/.android-sdk via Google's cmdline-tools)"
+    echo "        to android/.android-sdk in this repo, gitignored)"
     echo "      • install Android Studio — drops a usable SDK at"
     echo "        ~/Android/Sdk (Linux) or ~/Library/Android/sdk (macOS)"
     echo "      • export ANDROID_SDK_ROOT=<path> if you already have"
