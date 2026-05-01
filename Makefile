@@ -40,7 +40,10 @@
 #   make android-sdk-bootstrap — install Android SDK into android/.android-sdk
 #   make apk-debug             — build debug APK
 #   make apk-release           — build release APK (unsigned)
-#   make apk-install           — build debug APK + install on attached device
+#   make apk-install           — build + install on attached device
+#                                (auto-picks Windows adb on WSL2 hosts)
+#   make apk-install-windows   — explicit: install via Windows adb.exe
+#                                from inside WSL2 (errors elsewhere)
 #   make android-clean         — clean android build outputs
 #   make android-lint          — run android lint (no -Werror)
 
@@ -59,7 +62,8 @@ GRADLEW := $(ANDROID_DIR)/gradlew
         up-https up-https-summary https-certs \
         down logs ps restart clean shell-api shell-gs \
         android-bootstrap android-sdk-bootstrap _require_android_sdk \
-        apk-debug apk-release apk-install android-clean android-lint
+        apk-debug apk-release apk-install apk-install-windows \
+        android-clean android-lint
 
 help:
 	@awk 'BEGIN{FS=":.*##"; printf "mobile-gs-scan targets:\n"} \
@@ -227,6 +231,12 @@ shell-gs: ## exec a bash shell in the worker-gs container
 # `?=` so an explicit env override (ANDROID_SDK_ROOT=/opt/...) wins.
 ANDROID_SDK_ROOT ?= $(shell bash scripts/android-sdk.sh 2>/dev/null)
 
+# WSL2 detection — `microsoft` appears in /proc/version when running
+# under either WSL1 or WSL2. Combined with `command -v adb.exe` this
+# tells us whether the Windows-side adb path is even available.
+ON_WSL := $(shell grep -qi microsoft /proc/version 2>/dev/null && echo yes)
+HAS_WIN_ADB := $(shell command -v adb.exe >/dev/null 2>&1 && echo yes)
+
 android-bootstrap: ## generate ./gradlew (one-time, needs system gradle)
 	@if [ -x $(GRADLEW) ]; then \
 	  echo "[+] $(GRADLEW) already exists — skipping"; \
@@ -265,27 +275,63 @@ apk-release: $(GRADLEW) $(ANDROID_DIR)/local.properties ## build release APK (un
 	cd $(ANDROID_DIR) && ./gradlew :app:assembleRelease
 	@echo "[+] APK at $(ANDROID_DIR)/app/build/outputs/apk/release/"
 
-# adb resolution: prefer system adb (faster path, common case on
-# Android Studio hosts), fall back to the SDK's bundled adb at
-# $(ANDROID_SDK_ROOT)/platform-tools/adb. The bundled one is what
-# `make android-sdk-bootstrap` installs alongside the platforms /
-# build-tools, so it's always there on a freshly-bootstrapped clone
-# even if the user never installed `android-platform-tools`.
-apk-install: apk-debug ## build + install debug APK on an attached device via adb
-	@bundled="$(ANDROID_SDK_ROOT)/platform-tools/adb"; \
-	 if command -v adb >/dev/null 2>&1; then \
-	   adb_bin="$$(command -v adb)"; \
+# adb resolution priority:
+#   1. WSL2 host + `adb.exe` reachable     → Windows adb.exe via wslpath
+#      Why: WSL2's Linux adb daemon hangs on connect-to-localhost in
+#      common configurations (IPv6/loopback weirdness, port 5037
+#      conflicts with a Windows-side adb leaking through interop).
+#      Building in WSL2 + installing from Windows side-steps the
+#      whole mess. The Linux APK file is reachable via the
+#      \\wsl$\<distro>\... UNC share that wslpath -w produces.
+#   2. System adb on $PATH                 → Linux/macOS native path
+#   3. Bundled $(ANDROID_SDK_ROOT)/platform-tools/adb (the in-repo SDK)
+#
+# Set FORCE_LINUX_ADB=1 to skip the WSL2 → Windows fast-path even
+# on a WSL2 host (e.g. when usbipd is set up correctly and you'd
+# rather use the Linux adb).
+apk-install: apk-debug ## build + install on attached device (auto-picks adb)
+	@apk_linux="$(ANDROID_DIR)/app/build/outputs/apk/debug/app-debug.apk"; \
+	 bundled="$(ANDROID_SDK_ROOT)/platform-tools/adb"; \
+	 if [ "$(ON_WSL)" = "yes" ] && [ "$(HAS_WIN_ADB)" = "yes" ] && [ -z "$$FORCE_LINUX_ADB" ]; then \
+	   apk_win="$$(wslpath -w "$$apk_linux")"; \
+	   echo "[+] using Windows adb.exe (WSL2 host, side-steps Linux adb daemon)"; \
+	   echo "    set FORCE_LINUX_ADB=1 to override"; \
+	   echo "    APK: $$apk_win"; \
+	   adb.exe install -r "$$apk_win"; \
+	 elif command -v adb >/dev/null 2>&1; then \
+	   echo "[+] using system adb at $$(command -v adb)"; \
+	   adb install -r "$$apk_linux"; \
 	 elif [ -x "$$bundled" ]; then \
-	   adb_bin="$$bundled"; \
+	   echo "[+] using bundled adb at $$bundled"; \
+	   "$$bundled" install -r "$$apk_linux"; \
 	 else \
 	   echo "[!] adb missing — neither on \$$PATH nor in the SDK at"; \
 	   echo "    $$bundled"; \
-	   echo "    run \`make android-sdk-bootstrap\` to populate the bundled SDK,"; \
-	   echo "    or install android-platform-tools system-wide."; \
+	   echo "    options:"; \
+	   echo "      • run \`make android-sdk-bootstrap\` to populate the bundled SDK"; \
+	   echo "      • install android-platform-tools system-wide (apt/brew)"; \
+	   echo "      • on Windows: \`winget install Google.PlatformTools\`"; \
 	   exit 1; \
-	 fi; \
-	 echo "[+] using $$adb_bin"; \
-	 "$$adb_bin" install -r $(ANDROID_DIR)/app/build/outputs/apk/debug/app-debug.apk
+	 fi
+
+# Explicit Windows-adb path. Builds the APK then shells out to
+# adb.exe regardless of FORCE_LINUX_ADB. Errors out cleanly if not
+# on a WSL2 host or adb.exe isn't reachable.
+apk-install-windows: apk-debug ## install via Windows adb.exe (WSL2 only)
+	@if [ "$(ON_WSL)" != "yes" ]; then \
+	  echo "[!] not on a WSL2 host — \`make apk-install\` is what you want"; \
+	  exit 1; \
+	fi
+	@if [ "$(HAS_WIN_ADB)" != "yes" ]; then \
+	  echo "[!] adb.exe not found on the Windows side."; \
+	  echo "    install on Windows: \`winget install Google.PlatformTools\`"; \
+	  echo "    then ensure the platform-tools dir is on the Windows PATH."; \
+	  exit 1; \
+	fi
+	@apk_linux="$(ANDROID_DIR)/app/build/outputs/apk/debug/app-debug.apk"; \
+	 apk_win="$$(wslpath -w "$$apk_linux")"; \
+	 echo "[+] adb.exe install -r $$apk_win"; \
+	 adb.exe install -r "$$apk_win"
 
 android-clean: ## clean android build outputs
 	@if [ -x $(GRADLEW) ]; then cd $(ANDROID_DIR) && ./gradlew clean; \
