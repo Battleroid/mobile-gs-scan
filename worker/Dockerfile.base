@@ -1,11 +1,17 @@
 # Shared base image for the api + worker-gs containers.
 #
-# CUDA 12.4 + Ubuntu 22.04 + Python 3.11 + the chunky native deps
+# CUDA 12.8 + Ubuntu 22.04 + Python 3.11 + the chunky native deps
 # (Glomap, Open3D, ffmpeg, ImageMagick) all live here. The downstream
 # Dockerfiles FROM this image and only add their own service-specific
 # Python deps + entrypoint, which keeps both images well under 10 GB
 # despite the gsplat / nerfstudio stack.
-FROM nvidia/cuda:12.4.0-cudnn-devel-ubuntu22.04
+#
+# Pinning notes: NVIDIA does not publish `cudnn-devel` variants for
+# every CUDA point release — `12.4.0-cudnn-devel-ubuntu22.04` was
+# never built, for example. 12.8.0 has the cudnn-devel tag and pairs
+# cleanly with cuDNN 9.x and the cu126/cu128 torch wheels we install
+# in Dockerfile.gs.
+FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \

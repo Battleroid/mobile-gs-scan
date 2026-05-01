@@ -12,6 +12,12 @@ name: build-images
 #   ghcr.io/<owner>/mobile-gs-scan-api
 #   ghcr.io/<owner>/mobile-gs-scan-worker-gs
 #   ghcr.io/<owner>/mobile-gs-scan-web
+#
+# `${{ github.repository }}` preserves the case of the user/org login
+# (e.g. `Battleroid/mobile-gs-scan`). ghcr.io is case-sensitive on
+# image refs in some flows (notably `FROM` in downstream images), so
+# we lowercase it once at the top of each job and use the lowered
+# value in the tag list.
 
 on:
   push:
@@ -33,6 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
+      repo:    ${{ steps.r.outputs.repo }}
     steps:
       - id: v
         run: |
@@ -41,10 +48,14 @@ jobs:
           else
             echo "version=edge" >> "$GITHUB_OUTPUT"
           fi
+      - id: r
+        env: { REPO: "${{ github.repository }}" }
+        run: echo "repo=${REPO,,}" >> "$GITHUB_OUTPUT"
 
   # Base image FIRST — api / worker-gs FROM it via ghcr at build time.
   base:
     name: build · base
+    needs: meta
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -57,7 +68,7 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}-base
+          images: ghcr.io/${{ needs.meta.outputs.repo }}-base
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}
@@ -74,7 +85,7 @@ jobs:
 
   api:
     name: build · api
-    needs: base
+    needs: [meta, base]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -87,7 +98,7 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}-api
+          images: ghcr.io/${{ needs.meta.outputs.repo }}-api
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}
@@ -100,13 +111,13 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            BASE_IMAGE=ghcr.io/${{ github.repository }}-base:latest
+            BASE_IMAGE=ghcr.io/${{ needs.meta.outputs.repo }}-base:latest
           cache-from: type=gha,scope=api
           cache-to: type=gha,scope=api,mode=max
 
   worker-gs:
     name: build · worker-gs
-    needs: base
+    needs: [meta, base]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -119,7 +130,7 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}-worker-gs
+          images: ghcr.io/${{ needs.meta.outputs.repo }}-worker-gs
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}
@@ -132,12 +143,13 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            BASE_IMAGE=ghcr.io/${{ github.repository }}-base:latest
+            BASE_IMAGE=ghcr.io/${{ needs.meta.outputs.repo }}-base:latest
           cache-from: type=gha,scope=worker-gs
           cache-to: type=gha,scope=worker-gs,mode=max
 
   web:
     name: build · web
+    needs: meta
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -150,7 +162,7 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}-web
+          images: ghcr.io/${{ needs.meta.outputs.repo }}-web
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}
@@ -176,5 +188,5 @@ jobs:
           echo "## published images (${{ needs.meta.outputs.version }})" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           for img in base api worker-gs web; do
-            echo "- \`ghcr.io/${{ github.repository }}-$img\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "- \`ghcr.io/${{ needs.meta.outputs.repo }}-$img\`" >> "$GITHUB_STEP_SUMMARY"
           done
