@@ -8,6 +8,18 @@ Single SQLite db at $DATA_DIR/studio.sqlite. Three tables:
 
 Events (the in-memory pub/sub for live progress) are *not* persisted;
 they're only useful to clients connected at the moment a step runs.
+
+DateTime columns: every datetime column uses ``DateTime(timezone=True)``.
+We write timezone-aware UTC values via ``_utcnow()``
+(``datetime.now(timezone.utc)``) and need them to round-trip aware so
+comparisons like ``cap.pair_token_expires_at < _utcnow()`` don't blow
+up with "can't compare offset-naive and offset-aware datetimes".
+
+SQLite has no native timezone storage — SQLAlchemy handles this by
+normalizing aware values to UTC on write and reattaching
+``timezone.utc`` on read when ``timezone=True`` is set on the column.
+Without that flag, the dialect strips tzinfo on write and the read
+returns a naive datetime that won't compare against ``_utcnow()``.
 """
 from __future__ import annotations
 
@@ -84,7 +96,9 @@ class Capture(Base):
     # Random opaque token the phone presents to claim the WS. Cleared
     # after the WS connects so it's a strict one-shot.
     pair_token: Mapped[str | None] = mapped_column(String, nullable=True)
-    pair_token_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    pair_token_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # Tracked while frames are streaming.
     frame_count: Mapped[int] = mapped_column(Integer, default=0)
@@ -97,9 +111,11 @@ class Capture(Base):
 
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=_utcnow, onupdate=_utcnow
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
     )
 
     scene: Mapped["Scene | None"] = relationship(
@@ -125,8 +141,12 @@ class Scene(Base):
     spz_path: Mapped[str | None] = mapped_column(String, nullable=True)
     thumbnail_path: Mapped[str | None] = mapped_column(String, nullable=True)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     capture: Mapped[Capture] = relationship(back_populates="scene")
     jobs: Mapped[list["Job"]] = relationship(back_populates="scene")
@@ -148,7 +168,9 @@ class Job(Base):
     # claim with a heartbeat older than 60s is considered stale and
     # gets reaped back to `queued` so another worker can pick it up.
     claimed_by: Mapped[str | None] = mapped_column(String, nullable=True)
-    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     progress: Mapped[float] = mapped_column(default=0.0)  # 0..1
     progress_msg: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -158,12 +180,18 @@ class Job(Base):
     result: Mapped[dict] = mapped_column(JSON, default=dict)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=_utcnow, onupdate=_utcnow
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
     )
-    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     scene: Mapped[Scene] = relationship(back_populates="jobs")
 
