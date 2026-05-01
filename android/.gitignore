@@ -10,3 +10,9 @@
 /app/debug
 *.apk
 *.aab
+
+# Repo-local Android SDK install (~3-5 GB), written by
+# `make android-sdk-bootstrap`. Gitignored so each clone gets its
+# own. Override the install location with ANDROID_SDK_ROOT in env
+# if you'd rather use a system-wide one.
+/.android-sdk/
