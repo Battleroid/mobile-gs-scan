@@ -2,7 +2,7 @@ name: build-images
 
 # Builds + publishes the docker images to ghcr.io. Two trigger shapes:
 #
-#   1. push to main           → tag `latest` + `sha-<short>`
+#   1. push to main / master  → tag `latest` + `sha-<short>`
 #   2. push of a v* tag       → tag `<version>` + `latest` + `sha-<short>`
 #
 # Four images, all sharing the same trigger to keep registry version
@@ -12,14 +12,11 @@ name: build-images
 #   ghcr.io/<owner>/mobile-gs-scan-api
 #   ghcr.io/<owner>/mobile-gs-scan-worker-gs
 #   ghcr.io/<owner>/mobile-gs-scan-web
-#
-# We don't publish on PRs — that would burn registry quota for every
-# review iteration. Use the `ci` workflow's `web` job for in-place
-# build verification on PRs.
 
 on:
   push:
-    branches: [main]
+    # Both `main` and `master` for the same reason ci.yml does.
+    branches: [main, master]
     tags: ["v*"]
   workflow_dispatch:
 
