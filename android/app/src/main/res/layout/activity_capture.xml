@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/black">
+
+    <android.opengl.GLSurfaceView
+        android:id="@+id/glSurface"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <!-- Minimal AR overlay: a frame counter + a "finish" button.
+         Coverage cones / heatmap land in PR #2. -->
+    <TextView
+        android:id="@+id/frameCounter"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|end"
+        android:layout_margin="20dp"
+        android:textColor="@android:color/white"
+        android:textSize="14sp"
+        android:fontFamily="monospace"
+        android:text="0 frames" />
+
+    <TextView
+        android:id="@+id/sessionLabel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|start"
+        android:layout_margin="20dp"
+        android:textColor="@android:color/white"
+        android:textSize="14sp"
+        android:fontFamily="monospace"
+        android:text="" />
+
+    <Button
+        android:id="@+id/btnFinish"
+        android:text="@string/action_finish"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginBottom="48dp"
+        android:backgroundTint="@color/danger"
+        android:textColor="@android:color/white" />
+</FrameLayout>
