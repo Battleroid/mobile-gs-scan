@@ -3,10 +3,12 @@ package dev.battleroid.mobilegsscan
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.os.Bundle
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -27,7 +29,18 @@ import javax.microedition.khronos.opengles.GL10
  * The capture screen.
  *
  * Lifecycle:
- *   1. Validate ARCore is installed (deferred install if not).
+ *   1. Validate ARCore availability + Google Play Services for AR.
+ *      Branch on the four meaningful Availability states:
+ *        - SUPPORTED_INSTALLED      → start the AR session
+ *        - SUPPORTED_NOT_INSTALLED  → call requestInstall(),
+ *          onResume re-runs bootstrapAr() once the user accepts.
+ *        - SUPPORTED_APK_TOO_OLD    → same path as NOT_INSTALLED.
+ *        - UNSUPPORTED_DEVICE_NOT_CAPABLE → actionable dialog that
+ *          deep-links the user to the Play Store entry for
+ *          Google Play Services for AR. The device-support list
+ *          lives in that APK, not in our SDK pin, so an out-of-
+ *          date Play Services for AR can falsely report newer
+ *          hardware (Pixel 10 family, etc) as unsupported.
  *   2. Request camera permission.
  *   3. Resolve capture id + name. Two entry paths:
  *        - phone-driven (MainActivity → POST /api/captures): id +
@@ -53,6 +66,7 @@ class CaptureActivity : AppCompatActivity() {
         const val EXTRA_CAPTURE_ID = "capture_id"
         const val EXTRA_CAPTURE_NAME = "capture_name"
         private const val PERM_REQ = 0xC4
+        private const val PLAY_SERVICES_FOR_AR_PKG = "com.google.ar.core"
     }
 
     private lateinit var binding: ActivityCaptureBinding
@@ -67,6 +81,11 @@ class CaptureActivity : AppCompatActivity() {
 
     private var receivedCount = 0
     private var droppedCount = 0
+
+    // Avoid prompting the user to install Play Services for AR more
+    // than once per Activity lifetime. requestInstall takes a flag
+    // for this — we flip it after the first prompt.
+    private var userRequestedArInstall = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -91,6 +110,14 @@ class CaptureActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        // If we kicked the user out to Play Store to install / update
+        // Google Play Services for AR, re-check availability when we
+        // come back into focus instead of trying to resume a session
+        // that was never created.
+        if (arSession == null && userRequestedArInstall) {
+            bootstrapAr()
+            return
+        }
         try {
             arSession?.resume()
         } catch (e: Exception) {
@@ -146,14 +173,109 @@ class CaptureActivity : AppCompatActivity() {
     private fun bootstrapAr() {
         val avail = ArCoreApk.getInstance().checkAvailability(this)
         if (avail.isTransient) {
+            // Play Services for AR is mid-query — poll. No state
+            // change needed, we're just waiting for the IPC to settle.
             binding.glSurface.postDelayed({ bootstrapAr() }, 200)
             return
         }
-        if (!avail.isSupported) {
-            Toast.makeText(this, "ARCore not supported on this device", Toast.LENGTH_LONG).show()
-            finish()
-            return
+        when (avail) {
+            ArCoreApk.Availability.SUPPORTED_INSTALLED -> startArSession()
+
+            ArCoreApk.Availability.SUPPORTED_NOT_INSTALLED,
+            ArCoreApk.Availability.SUPPORTED_APK_TOO_OLD -> {
+                // Hardware is supported, but Play Services for AR
+                // isn't installed (or is too old to talk to our SDK
+                // pin). requestInstall hands off to the Play Store /
+                // bundled installer; result is either INSTALLED
+                // (already done by the time we asked) or
+                // INSTALL_REQUESTED (Play Store flow started, we'll
+                // re-bootstrap in onResume).
+                try {
+                    val res = ArCoreApk.getInstance()
+                        .requestInstall(this, !userRequestedArInstall)
+                    when (res) {
+                        ArCoreApk.InstallStatus.INSTALL_REQUESTED -> {
+                            userRequestedArInstall = true
+                        }
+                        ArCoreApk.InstallStatus.INSTALLED -> startArSession()
+                        null -> startArSession()
+                    }
+                } catch (e: Exception) {
+                    showArUnsupportedDialog(e.message)
+                }
+            }
+
+            ArCoreApk.Availability.UNSUPPORTED_DEVICE_NOT_CAPABLE -> {
+                // Play Services for AR's bundled device list says no.
+                // For 2025-era flagships (Pixel 10 family, etc) this
+                // almost always means the user's Play Services for
+                // AR is from before the device launched and just
+                // hasn't auto-updated yet. Hand them a one-tap
+                // shortcut to update it manually instead of dead-
+                // ending on a Toast.
+                showArUnsupportedDialog(null)
+            }
+
+            else -> {
+                // UNKNOWN_ERROR / UNKNOWN_TIMED_OUT after the
+                // transient retry path above gave up. Surface the
+                // raw Availability name so a bug report has
+                // something to go on.
+                Toast.makeText(
+                    this,
+                    "ARCore check failed (${avail.name})",
+                    Toast.LENGTH_LONG,
+                ).show()
+                finish()
+            }
         }
+    }
+
+    private fun showArUnsupportedDialog(extra: String?) {
+        val msg = buildString {
+            append(getString(R.string.arcore_unsupported_body))
+            if (!extra.isNullOrBlank()) {
+                append("\n\n(")
+                append(extra)
+                append(")")
+            }
+        }
+        AlertDialog.Builder(this)
+            .setTitle(R.string.arcore_unsupported_title)
+            .setMessage(msg)
+            .setCancelable(false)
+            .setPositiveButton(R.string.action_open_play_store) { _, _ ->
+                openPlayServicesForArInPlayStore()
+                finish()
+            }
+            .setNegativeButton(R.string.action_cancel) { _, _ -> finish() }
+            .show()
+    }
+
+    private fun openPlayServicesForArInPlayStore() {
+        // market:// resolves inside the Play Store app on devices
+        // where it's installed (effectively all consumer Android).
+        // Fall back to the https URL for the rare device without a
+        // Play Store app installed (sideloaded, F-Droid-only, etc).
+        val marketIntent = Intent(
+            Intent.ACTION_VIEW,
+            Uri.parse("market://details?id=$PLAY_SERVICES_FOR_AR_PKG"),
+        ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+        try {
+            startActivity(marketIntent)
+        } catch (_: Exception) {
+            startActivity(
+                Intent(
+                    Intent.ACTION_VIEW,
+                    Uri.parse(
+                        "https://play.google.com/store/apps/details?id=$PLAY_SERVICES_FOR_AR_PKG",
+                    ),
+                ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) },
+            )
+        }
+    }
+
+    private fun startArSession() {
         try {
             arSession = ARCaptureSession(this)
         } catch (e: Exception) {
