@@ -265,13 +265,27 @@ apk-release: $(GRADLEW) $(ANDROID_DIR)/local.properties ## build release APK (un
 	cd $(ANDROID_DIR) && ./gradlew :app:assembleRelease
 	@echo "[+] APK at $(ANDROID_DIR)/app/build/outputs/apk/release/"
 
+# adb resolution: prefer system adb (faster path, common case on
+# Android Studio hosts), fall back to the SDK's bundled adb at
+# $(ANDROID_SDK_ROOT)/platform-tools/adb. The bundled one is what
+# `make android-sdk-bootstrap` installs alongside the platforms /
+# build-tools, so it's always there on a freshly-bootstrapped clone
+# even if the user never installed `android-platform-tools`.
 apk-install: apk-debug ## build + install debug APK on an attached device via adb
-	@if ! command -v adb >/dev/null 2>&1; then \
-	  echo "[!] adb missing — install android-platform-tools, or use the SDK's:"; \
-	  echo "    $(ANDROID_SDK_ROOT)/platform-tools/adb"; \
-	  exit 1; \
-	fi
-	adb install -r $(ANDROID_DIR)/app/build/outputs/apk/debug/app-debug.apk
+	@bundled="$(ANDROID_SDK_ROOT)/platform-tools/adb"; \
+	 if command -v adb >/dev/null 2>&1; then \
+	   adb_bin="$$(command -v adb)"; \
+	 elif [ -x "$$bundled" ]; then \
+	   adb_bin="$$bundled"; \
+	 else \
+	   echo "[!] adb missing — neither on \$$PATH nor in the SDK at"; \
+	   echo "    $$bundled"; \
+	   echo "    run \`make android-sdk-bootstrap\` to populate the bundled SDK,"; \
+	   echo "    or install android-platform-tools system-wide."; \
+	   exit 1; \
+	 fi; \
+	 echo "[+] using $$adb_bin"; \
+	 "$$adb_bin" install -r $(ANDROID_DIR)/app/build/outputs/apk/debug/app-debug.apk
 
 android-clean: ## clean android build outputs
 	@if [ -x $(GRADLEW) ]; then cd $(ANDROID_DIR) && ./gradlew clean; \
