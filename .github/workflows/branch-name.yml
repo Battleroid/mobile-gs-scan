@@ -1,0 +1,31 @@
+name: branch-name
+
+# Light-touch enforcement of the branch naming convention from
+# CONTRIBUTING.md. Fails the PR check when the source branch isn't
+# prefixed with one of the agreed types: `feature/`, `fix/`,
+# `chore/`, `docs/`, `refactor/`, `release/`, or `claude/`
+# (Claude-authored autobranches).
+#
+# We don't enforce this on direct pushes to main — the convention
+# is for branches feeding into PRs.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: validate branch prefix
+        run: |
+          branch="${{ github.head_ref }}"
+          allowed='^(feature|fix|chore|docs|refactor|release|claude)/.+'
+          if [[ "$branch" =~ $allowed ]]; then
+            echo "[+] $branch matches $allowed"
+            exit 0
+          fi
+          echo "::error::branch '$branch' must be prefixed with one of:"
+          echo "::error::  feature/  fix/  chore/  docs/  refactor/  release/"
+          echo "::error::see CONTRIBUTING.md."
+          exit 1
