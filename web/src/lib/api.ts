@@ -94,6 +94,15 @@ export const api = {
   // safe to refetchInterval at 2 s while the job is running.
   getJobLog: (id: string, tailBytes = 8192) =>
     jsonReq<JobLogResponse>(`/api/jobs/${id}/log?tail_bytes=${tailBytes}`),
+  // Cancel an in-flight job. Idempotent: returns canceled=false if
+  // the job was already in a terminal state. The worker that owns
+  // the job notices the cancel on its next heartbeat (~5 s) and
+  // SIGKILLs any registered subprocess.
+  cancelJob: (id: string) =>
+    jsonReq<{ ok: boolean; canceled: boolean; status: string }>(
+      `/api/jobs/${id}/cancel`,
+      { method: "POST" },
+    ),
 };
 
 export function wsUrl(path: string): string {

@@ -1,4 +1,4 @@
-"""Job query endpoints (read-only; the worker uses store directly)."""
+"""Job query, log, and cancel endpoints."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query
 
 from app.config import get_settings
-from app.jobs import store
+from app.jobs import events, store
 from app.jobs.schema import JobKind
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
@@ -42,14 +42,7 @@ async def get_job_log(
     Polled by the web UI's collapsible per-step log panel while the
     job is running, so the user gets a live view of glomap /
     splatfacto / ns-export output without `docker exec` into the
-    worker container. Capped at `tail_bytes` (default 8 KB,
-    user-overridable up to 1 MB) to keep responses small at the
-    fast poll interval the UI uses.
-
-    The mesh job kind doesn't shell out to a subprocess in PR #1
-    (it's a no-op stub), so its log path resolves to None and the
-    response carries `available: False` so the UI can render a
-    "no log" placeholder.
+    worker container.
     """
     job = await store.get_job(job_id)
     if job is None:
@@ -84,6 +77,31 @@ async def get_job_log(
     }
 
 
+@router.post("/{job_id}/cancel")
+async def cancel_job_endpoint(job_id: str) -> dict:
+    """Request cancellation of an in-flight job.
+
+    Marks the row ``status=canceled`` if it's still queued /
+    claimed / running. The worker that owns the job notices on its
+    next heartbeat (~5 s), SIGKILLs any registered subprocess, and
+    cancels the dispatch coroutine. Idempotent; calling again on
+    an already-canceled / completed / failed job returns
+    ``canceled: false``.
+    """
+    job = await store.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "job not found")
+    canceled = await store.cancel_job(job_id)
+    if canceled:
+        await events.publish_job(job_id, "job.canceled")
+    refreshed = await store.get_job(job_id)
+    return {
+        "ok": True,
+        "canceled": canceled,
+        "status": refreshed.status.value if refreshed else "unknown",
+    }
+
+
 def _log_path_for_kind(kind: JobKind, scene_dir: Path) -> Path | None:
     """Map a JobKind to the log file the corresponding pipeline step
     writes. SfM has two backends; pick whichever exists, falling
@@ -100,5 +118,4 @@ def _log_path_for_kind(kind: JobKind, scene_dir: Path) -> Path | None:
         return scene_dir / "train" / "train.log"
     if kind == JobKind.export:
         return scene_dir / "export" / "export.log"
-    # mesh: no subprocess, no log.
     return None

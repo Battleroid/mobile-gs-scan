@@ -21,7 +21,7 @@ from pydantic import BaseModel
 
 from app.config import get_settings
 from app.jobs import events, store
-from app.jobs.schema import Capture, CaptureSource, CaptureStatus
+from app.jobs.schema import Capture, CaptureSource, CaptureStatus, JobStatus
 from app.pipeline.dispatch import enqueue_pipeline
 from app.sessions.ingest import run_stream_session
 
@@ -30,7 +30,7 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/captures", tags=["captures"])
 
 
-# ─── DTOs ─────────────────────────────────────────────────────────
+# ─── DTOs ───────────────────────────────────────────
 
 
 class CaptureCreate(BaseModel):
@@ -77,7 +77,7 @@ def _to_view(cap: Capture, scene_id: str | None = None) -> CaptureView:
     )
 
 
-# ─── HTTP ─────────────────────────────────────────────────────────
+# ─── HTTP ───────────────────────────────────────────
 
 
 @router.get("")
@@ -179,14 +179,37 @@ async def upload_to_capture(
 
 @router.delete("/{capture_id}")
 async def delete_capture(capture_id: str) -> dict:
+    """Delete a capture: cancel any in-flight pipeline jobs first
+    (so the worker stops chewing on data we're about to delete),
+    then mark the capture as canceled and tear down the on-disk
+    capture + scene directories.
+    """
     settings = get_settings()
     cap = await store.get_capture(capture_id)
     if cap is None:
         raise HTTPException(404, "capture not found")
+
+    scene = await store.get_scene_for_capture(cap.id)
+    if scene is not None:
+        for j in await store.list_jobs_for_scene(scene.id):
+            if j.status in (
+                JobStatus.queued,
+                JobStatus.claimed,
+                JobStatus.running,
+            ):
+                if await store.cancel_job(j.id):
+                    await events.publish_job(j.id, "job.canceled")
+
     await store.set_capture_status(cap.id, CaptureStatus.canceled)
+
     cap_dir = settings.captures_dir() / cap.id
     if cap_dir.exists():
         shutil.rmtree(cap_dir, ignore_errors=True)
+    if scene is not None:
+        scene_dir = settings.scenes_dir() / scene.id
+        if scene_dir.exists():
+            shutil.rmtree(scene_dir, ignore_errors=True)
+
     return {"ok": True}
 
 
