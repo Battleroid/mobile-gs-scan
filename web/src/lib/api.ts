@@ -45,6 +45,13 @@ async function jsonReq<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
+export interface JobLogResponse {
+  log: string;
+  size: number;
+  path: string | null;
+  available: boolean;
+}
+
 export const api = {
   base: apiBase,
   listCaptures: () => jsonReq<Capture[]>("/api/captures"),
@@ -81,6 +88,12 @@ export const api = {
   getScene: (id: string) => jsonReq<Scene>(`/api/scenes/${id}`),
   artifactUrl: (sceneId: string, kind: "ply" | "spz") =>
     `${apiBase()}/api/scenes/${sceneId}/artifacts/${kind}`,
+  // Tail of the subprocess log for a given job. Polled by the
+  // collapsible per-step log panel on the capture-detail page.
+  // tailBytes caps server-side at 1 MB (default 8 KB), so this is
+  // safe to refetchInterval at 2 s while the job is running.
+  getJobLog: (id: string, tailBytes = 8192) =>
+    jsonReq<JobLogResponse>(`/api/jobs/${id}/log?tail_bytes=${tailBytes}`),
 };
 
 export function wsUrl(path: string): string {
