@@ -2,17 +2,31 @@
 //
 // The base URL is resolved in this order:
 //   1. NEXT_PUBLIC_API_BASE if non-empty (set at build time).
-//   2. Otherwise window.location.origin — which is what we want
-//      under https/Caddy where the api lives at /api/* on the same
-//      origin as the web ui.
-//   3. Server-side rendering on Next: localhost:8000 fallback so
-//      the build doesn't crash.
+//   2. Browser, http://<host>:3000 — the Next dev port that the web
+//      container also publishes alongside Caddy. Hitting it directly
+//      bypasses the reverse proxy, so /api/* on the same origin lands
+//      on Next (which has no such routes) instead of FastAPI. Rewrite
+//      to the api container's published port directly so this access
+//      path works for desktop dev. The api ships CORSMiddleware so
+//      cross-origin from :3000 → :8000 is allowed.
+//   3. Otherwise window.location.origin — what we want under
+//      https/Caddy where /api/* is reverse-proxied same-origin.
+//   4. Server-side rendering: localhost:8000 fallback so the build
+//      doesn't crash.
 import type { Capture, CaptureSource, Scene } from "./types";
 
 function apiBase(): string {
   const baked = process.env.NEXT_PUBLIC_API_BASE;
   if (baked && baked !== "") return baked.replace(/\/$/, "");
-  if (typeof window !== "undefined") return window.location.origin;
+  if (typeof window !== "undefined") {
+    if (
+      window.location.protocol === "http:" &&
+      window.location.port === "3000"
+    ) {
+      return `http://${window.location.hostname}:8000`;
+    }
+    return window.location.origin;
+  }
   return "http://localhost:8000";
 }
 

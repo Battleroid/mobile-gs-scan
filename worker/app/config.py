@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     worker_class: str = Field(default="gs", validation_alias="WORKER_CLASS")
     api_base_url: str = Field(default="http://api:8000", validation_alias="API_BASE_URL")
 
+    cors_origins: list[str] = Field(default=["*"], validation_alias="CORS_ORIGINS")
+
     @property
     def db_url(self) -> str:
         return f"sqlite+aiosqlite:///{self.data_dir / self.db_filename}"
