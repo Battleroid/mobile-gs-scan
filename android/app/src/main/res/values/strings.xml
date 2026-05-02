@@ -26,6 +26,17 @@
     <string name="hint_capture_jpeg_quality">image quality of streamed frames. higher = sharper input for splatting but more bandwidth per frame. 85%% is the default.</string>
     <string name="capture_jpeg_quality_fmt">%1$d%%</string>
 
+    <!-- Settings: training-fidelity preset. Three buttons that
+         pick a per-capture splatfacto iter count, sent to the
+         worker via capture.meta.train_iters. Server fallback if
+         meta isn\'t set is GS_TRAIN_ITERS env (15000 by default). -->
+    <string name="label_train_fidelity">Training fidelity</string>
+    <string name="hint_train_fidelity">how long the splatfacto trainer runs per capture. higher = sharper splats but longer wait. on a 4090 expect ~3 min for low, ~10 min for standard, ~25 min for high.</string>
+    <string name="preset_train_low">Low (5k)</string>
+    <string name="preset_train_standard">Standard (15k)</string>
+    <string name="preset_train_high">High (30k)</string>
+    <string name="selected_train_iters_fmt">selected: %1$d iterations</string>
+
     <!-- home screen status indicator -->
     <string name="status_online">studio: online</string>
     <string name="status_offline">studio: offline</string>

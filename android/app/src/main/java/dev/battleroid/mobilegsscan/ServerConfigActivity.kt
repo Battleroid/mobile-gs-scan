@@ -33,7 +33,7 @@ class ServerConfigActivity : AppCompatActivity() {
         }
         val urlHelper = mutedHelper(getString(R.string.hint_studio_url_help))
 
-        // ── capture-rate slider ───────────────────────────────────
+        // ── capture-rate slider ─────────────────────────────────
         val fpsSection = sectionHeader(getString(R.string.label_capture_fps))
         val fpsValueLabel = TextView(this).apply {
             text = getString(
@@ -57,7 +57,7 @@ class ServerConfigActivity : AppCompatActivity() {
         }
         val fpsHelper = mutedHelper(getString(R.string.hint_capture_fps))
 
-        // ── jpeg-quality slider ──────────────────────────────────
+        // ── jpeg-quality slider ─────────────────────────────────
         val qSection = sectionHeader(getString(R.string.label_capture_jpeg_quality))
         val qValueLabel = TextView(this).apply {
             text = getString(
@@ -81,7 +81,58 @@ class ServerConfigActivity : AppCompatActivity() {
         }
         val qHelper = mutedHelper(getString(R.string.hint_capture_jpeg_quality))
 
-        // ── save ───────────────────────────────────────────────
+        // ── training fidelity preset ────────────────────────────
+        // Three buttons: Low (5k iters / ~3 min), Standard (15k /
+        // ~10 min, app default), High (30k / ~25 min). The selected
+        // preset is highlighted via alpha; tapping a button selects
+        // and deselects the others. Persisted on Save.
+        val tiSection = sectionHeader(getString(R.string.label_train_fidelity))
+        var selectedIters = ServerConfig.captureTrainIters(this)
+        val tiValueLabel = TextView(this).apply {
+            text = getString(R.string.selected_train_iters_fmt, selectedIters)
+            setTextColor(getColor(R.color.fg))
+        }
+        val btnLow = Button(this).apply {
+            text = getString(R.string.preset_train_low)
+        }
+        val btnStandard = Button(this).apply {
+            text = getString(R.string.preset_train_standard)
+        }
+        val btnHigh = Button(this).apply {
+            text = getString(R.string.preset_train_high)
+        }
+        val tiButtons = listOf(
+            btnLow to ServerConfig.TRAIN_ITERS_LOW,
+            btnStandard to ServerConfig.TRAIN_ITERS_STANDARD,
+            btnHigh to ServerConfig.TRAIN_ITERS_HIGH,
+        )
+        fun refreshPresetSelection() {
+            tiButtons.forEach { (btn, value) ->
+                btn.alpha = if (value == selectedIters) 1.0f else 0.55f
+            }
+        }
+        tiButtons.forEach { (btn, value) ->
+            btn.setOnClickListener {
+                selectedIters = value
+                tiValueLabel.text = getString(R.string.selected_train_iters_fmt, selectedIters)
+                refreshPresetSelection()
+            }
+        }
+        refreshPresetSelection()
+        val presetRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        val gap = (8 * resources.displayMetrics.density).toInt()
+        val one = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        val withMarginEnd = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+            marginEnd = gap
+        }
+        presetRow.addView(btnLow, withMarginEnd)
+        presetRow.addView(btnStandard, withMarginEnd)
+        presetRow.addView(btnHigh, one)
+        val tiHelper = mutedHelper(getString(R.string.hint_train_fidelity))
+
+        // ── save ──────────────────────────────────────────────
         val save = Button(this).apply {
             text = getString(R.string.action_save)
             setOnClickListener {
@@ -98,6 +149,9 @@ class ServerConfigActivity : AppCompatActivity() {
                 ServerConfig.setCaptureFps(this@ServerConfigActivity, fpsSlider.progress)
                 ServerConfig.setCaptureJpegQuality(
                     this@ServerConfigActivity, qSlider.progress,
+                )
+                ServerConfig.setCaptureTrainIters(
+                    this@ServerConfigActivity, selectedIters,
                 )
                 val saved = ServerConfig.studioUrl(this@ServerConfigActivity).orEmpty()
                 if (saved != raw) {
@@ -122,6 +176,10 @@ class ServerConfigActivity : AppCompatActivity() {
         root.addView(qValueLabel)
         root.addView(qSlider)
         root.addView(qHelper)
+        root.addView(tiSection)
+        root.addView(tiValueLabel)
+        root.addView(presetRow)
+        root.addView(tiHelper)
         root.addView(save)
         setContentView(root)
 
@@ -129,14 +187,14 @@ class ServerConfigActivity : AppCompatActivity() {
         // params are the LinearLayout-owned ones (they're
         // ViewGroup.LayoutParams during the apply{} call above and
         // don't have topMargin / bottomMargin fields).
-        listOf(urlHelper, fpsHelper, qHelper).forEach { v ->
+        listOf(urlHelper, fpsHelper, qHelper, tiHelper).forEach { v ->
             (v.layoutParams as LinearLayout.LayoutParams).apply {
                 topMargin = (4 * resources.displayMetrics.density).toInt()
                 bottomMargin = (16 * resources.displayMetrics.density).toInt()
                 v.layoutParams = this
             }
         }
-        listOf(fpsSection, qSection).forEach { v ->
+        listOf(fpsSection, qSection, tiSection).forEach { v ->
             (v.layoutParams as LinearLayout.LayoutParams).apply {
                 topMargin = (16 * resources.displayMetrics.density).toInt()
                 v.layoutParams = this

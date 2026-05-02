@@ -5,6 +5,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -108,11 +109,18 @@ class StudioClient(private val baseUrl: String) {
         val available: Boolean = false,
     )
 
+    // Request DTO: no defaults on any field (see comment on the
+    // ``json`` instance above; encodeDefaults=false would silently
+    // drop them otherwise). ``meta`` is a JsonObject so callers can
+    // pass arbitrary key/value pairs (currently just
+    // ``train_iters``) without us having to invent a typed shape
+    // every time we add an optional knob.
     @Serializable
     private data class CaptureCreate(
         val name: String,
         val source: String,
         val has_pose: Boolean,
+        val meta: JsonObject,
     )
 
     suspend fun health(): Boolean = withContext(Dispatchers.IO) {
@@ -178,14 +186,26 @@ class StudioClient(private val baseUrl: String) {
             }
         }
 
+    /**
+     * Create a new capture session. ``meta`` is a free-form bag of
+     * per-capture overrides the worker's dispatch step reads to
+     * specialize the pipeline — currently the only key is
+     * ``train_iters`` (per-capture splatfacto iter count override).
+     */
     suspend fun createCapture(
         name: String,
         hasPose: Boolean = true,
         source: String = "mobile_native",
+        meta: JsonObject = JsonObject(emptyMap()),
     ): Capture = withContext(Dispatchers.IO) {
         val payload = json.encodeToString(
             CaptureCreate.serializer(),
-            CaptureCreate(name = name, source = source, has_pose = hasPose),
+            CaptureCreate(
+                name = name,
+                source = source,
+                has_pose = hasPose,
+                meta = meta,
+            ),
         )
         val req = Request.Builder()
             .url("$baseUrl/api/captures")

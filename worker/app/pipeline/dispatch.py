@@ -15,15 +15,26 @@ has_pose through the SfM job with a different backend is the
 narrowest fix that keeps the dispatch shape (sfm → train → export
 → mesh) consistent across both paths.
 
+Per-capture training-iter override: the train job's iters payload
+is taken from ``capture.meta['train_iters']`` if the capture’s
+meta dict carries an integer there — the Android Settings preset
+(Low / Standard / High) sends this when creating a phone-driven
+capture. Falls back to ``settings.train_iters`` (server-wide env
+``GS_TRAIN_ITERS``) when meta doesn't carry an override.
+
 PR #1 always enqueues a `mesh` job too, but worker-gs treats it as
 a no-op so the pipeline still completes. PR #2 fills it in with the
 2DGS + TSDF + Poisson path.
 """
 from __future__ import annotations
 
+import logging
+
 from app.config import get_settings
 from app.jobs import store
 from app.jobs.schema import CaptureSource, JobKind
+
+log = logging.getLogger(__name__)
 
 
 async def enqueue_pipeline(
@@ -37,12 +48,6 @@ async def enqueue_pipeline(
 
     backend: str | None
     if has_pose:
-        # Phone capture with ARCore poses. The SfM job runs the
-        # arcore_native handler in app/pipeline/sfm.py, which
-        # converts poses.jsonl into a COLMAP-shaped workspace train
-        # can ingest, instead of running a real feature-based
-        # solver on a small handful of phone frames (which usually
-        # fails).
         backend = "arcore_native"
     elif settings.sfm_backend != "none":
         backend = settings.sfm_backend
@@ -55,8 +60,9 @@ async def enqueue_pipeline(
         )
         job_ids.append(sfm.id)
 
+    train_iters = await _resolve_train_iters(scene_id, settings.train_iters)
     train = await store.enqueue_job(
-        scene_id, JobKind.train, payload={"iters": settings.train_iters}
+        scene_id, JobKind.train, payload={"iters": train_iters}
     )
     job_ids.append(train.id)
 
@@ -72,3 +78,25 @@ async def enqueue_pipeline(
     job_ids.append(mesh.id)
 
     return job_ids
+
+
+async def _resolve_train_iters(scene_id: str, fallback: int) -> int:
+    """Look up the capture's meta dict for a per-capture iter
+    override. Validates that the value is a positive int; on any
+    weirdness (missing, wrong type, non-positive) silently falls
+    back to the server-wide default so a malformed meta doesn't
+    block training.
+    """
+    scene = await store.get_scene(scene_id)
+    if scene is None:
+        return fallback
+    cap = await store.get_capture(scene.capture_id)
+    if cap is None or not isinstance(cap.meta, dict):
+        return fallback
+    raw = cap.meta.get("train_iters")
+    if not isinstance(raw, int) or raw <= 0:
+        return fallback
+    log.info(
+        "using per-capture train_iters=%d (fallback was %d)", raw, fallback,
+    )
+    return raw

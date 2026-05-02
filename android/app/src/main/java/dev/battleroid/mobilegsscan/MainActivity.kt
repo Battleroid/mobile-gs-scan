@@ -19,6 +19,8 @@ import dev.battleroid.mobilegsscan.databinding.ItemCaptureBinding
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 
 /**
  * Home screen.
@@ -52,13 +54,6 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        // Edge-to-edge handling. With targetSdk=35 (Android 15) the
-        // system draws content behind the status bar + gesture nav
-        // by default; without this the top status row gets eaten by
-        // the system bar and the bottom "new capture" button slides
-        // under the gesture pill. Pad the root with the systemBars
-        // inset so the layout sits inside the safe area on every
-        // device + orientation.
         ViewCompat.setOnApplyWindowInsetsListener(binding.root) { v, insets ->
             val sys = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             v.updatePadding(
@@ -86,8 +81,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Legacy: if the user got here from a QR scan, route into
-        // CaptureActivity directly.
         handleDeepLink(intent)
     }
 
@@ -114,8 +107,6 @@ class MainActivity : AppCompatActivity() {
         pollJob?.cancel()
         pollJob = null
     }
-
-    // ── status / list rendering ──────────────────────────────
 
     private fun renderNoUrl() {
         binding.statusText.text = getString(R.string.status_no_url)
@@ -146,8 +137,6 @@ class MainActivity : AppCompatActivity() {
         binding.empty.text = getString(R.string.empty_no_captures)
     }
 
-    // ── polling ────────────────────────────────────────
-
     private fun startPolling() {
         pollJob?.cancel()
         pollJob = lifecycleScope.launch {
@@ -166,23 +155,30 @@ class MainActivity : AppCompatActivity() {
         try {
             renderCaptures(c.listCaptures())
         } catch (e: Exception) {
-            // Health said yes but list crashed — treat as a soft
-            // offline. Status text shows the error so the user sees
-            // why the list isn't refreshing.
             binding.statusText.text = "${getString(R.string.status_offline)}: ${e.message}"
             binding.statusDot.setBackgroundResource(R.drawable.dot_offline)
         }
     }
 
-    // ── actions ────────────────────────────────────────
-
     private fun createNewCapture() {
         val c = client ?: return
         val name = "Capture ${System.currentTimeMillis() / 1000}"
+        val iters = ServerConfig.captureTrainIters(this)
         binding.btnNewCapture.isEnabled = false
         lifecycleScope.launch {
             try {
-                val capture = c.createCapture(name = name, hasPose = true)
+                // Send the user's chosen training-fidelity preset
+                // through capture.meta so the worker's dispatch step
+                // can override its env-default GS_TRAIN_ITERS for
+                // this capture only.
+                val meta = buildJsonObject {
+                    put("train_iters", JsonPrimitive(iters))
+                }
+                val capture = c.createCapture(
+                    name = name,
+                    hasPose = true,
+                    meta = meta,
+                )
                 val token = capture.pair_token
                     ?: error("server returned no pair_token")
                 val baseUrl = ServerConfig.studioUrl(this@MainActivity)
@@ -204,9 +200,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun onCaptureClicked(c: StudioClient.Capture) {
         val baseUrl = ServerConfig.studioUrl(this) ?: return
-        // Native session-detail screen replaces the previous
-        // AlertDialog. Status / frames / pipeline jobs / artifacts
-        // all live there now.
         startActivity(
             Intent(this, CaptureDetailActivity::class.java).apply {
                 putExtra(CaptureDetailActivity.EXTRA_BASE_URL, baseUrl)
@@ -222,8 +215,6 @@ class MainActivity : AppCompatActivity() {
             .setPositiveButton("ok", null)
             .show()
     }
-
-    // ── legacy deep-link (https://<studio>/m/<token>) ─────────────
 
     private fun handleDeepLink(intent: Intent?) {
         val data: Uri = intent?.data ?: return
@@ -252,8 +243,6 @@ class CaptureAdapter(
 
     fun submit(list: List<StudioClient.Capture>) {
         items = list
-        // Cheap & correct for a list this small. Switch to DiffUtil
-        // if scroll performance becomes an issue.
         notifyDataSetChanged()
     }
 
