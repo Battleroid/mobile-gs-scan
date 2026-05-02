@@ -9,6 +9,7 @@ import androidx.core.content.edit
  *   - studio URL (which server to talk to)
  *   - capture rate + JPEG quality (frame-streaming knobs)
  *   - training-fidelity preset (per-capture splatfacto iter count)
+ *   - coverage-overlay opacity (translucency of the AR dots)
  *
  * Single-user, single-server — there's no list of saved servers,
  * just the most recent one.
@@ -19,6 +20,7 @@ object ServerConfig {
     private const val KEY_FPS = "capture_fps"
     private const val KEY_JPEG_QUALITY = "capture_jpeg_quality"
     private const val KEY_TRAIN_ITERS = "train_iters"
+    private const val KEY_OVERLAY_ALPHA = "overlay_alpha"
 
     // Capture-rate defaults. The previous hardcoded
     // ``targetIntervalMs = 200`` (5 fps) in ARCaptureSession was too
@@ -44,6 +46,14 @@ object ServerConfig {
     const val TRAIN_ITERS_STANDARD = 15_000
     const val TRAIN_ITERS_HIGH = 30_000
     const val DEFAULT_TRAIN_ITERS = TRAIN_ITERS_STANDARD
+
+    // Coverage-overlay opacity, persisted as integer percent so the
+    // SeekBar maps 1:1. Floor at 20% so the user can't accidentally
+    // make the overlay invisible and think it's broken; cap at 100%
+    // so they can still get fully-opaque dots if they want them.
+    const val DEFAULT_OVERLAY_ALPHA_PCT = 70
+    const val MIN_OVERLAY_ALPHA_PCT = 20
+    const val MAX_OVERLAY_ALPHA_PCT = 100
 
     fun prefs(ctx: Context): SharedPreferences =
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -83,6 +93,24 @@ object ServerConfig {
     fun setCaptureTrainIters(ctx: Context, iters: Int) {
         prefs(ctx).edit { putInt(KEY_TRAIN_ITERS, iters.coerceAtLeast(1)) }
     }
+
+    fun coverageOverlayAlphaPct(ctx: Context): Int =
+        prefs(ctx)
+            .getInt(KEY_OVERLAY_ALPHA, DEFAULT_OVERLAY_ALPHA_PCT)
+            .coerceIn(MIN_OVERLAY_ALPHA_PCT, MAX_OVERLAY_ALPHA_PCT)
+
+    fun setCoverageOverlayAlphaPct(ctx: Context, pct: Int) {
+        prefs(ctx).edit {
+            putInt(
+                KEY_OVERLAY_ALPHA,
+                pct.coerceIn(MIN_OVERLAY_ALPHA_PCT, MAX_OVERLAY_ALPHA_PCT),
+            )
+        }
+    }
+
+    /** Convenience for CoverageRenderer.setAlpha — same value, [0, 1]. */
+    fun coverageOverlayAlphaFloat(ctx: Context): Float =
+        coverageOverlayAlphaPct(ctx) / 100f
 
     /**
      * Translate the user-facing "fps" prefs to the per-frame interval
