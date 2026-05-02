@@ -23,8 +23,11 @@ import kotlinx.serialization.json.JsonElement
  * card. Auto-opens for jobs that are currently running so the user
  * gets a live tail without interaction; closes itself when the job
  * lands but stays openable for postmortem inspection. Mirrors the
- * web's JobLogPanel behavior exactly. Polled at the same 3s tick as
- * the job-detail fetch when open + running.
+ * web's JobLogPanel behavior (live tail, manual re-open) with one
+ * deliberate difference: on a phone there's no easy way to detect
+ * "user is reading older output, don't scroll-jack me", so we
+ * unconditionally pin to the latest log line on every poll. The
+ * user can simply hide the log if they want it out of the way.
  *
  * The result blob is intentionally rendered as pretty-printed JSON
  * — it's worker-specific (sfm output, train metrics, export paths)
@@ -169,6 +172,14 @@ class JobDetailActivity : AppCompatActivity() {
             return
         }
         binding.logValue.text = res.log.ifBlank { getString(R.string.detail_log_empty) }
+        // Pin to the latest line on every successful render. The
+        // log lives at the bottom of the activity's NestedScrollView
+        // (binding.root *is* the NestedScrollView), so a fullScroll
+        // to FOCUS_DOWN brings the newest output into view. Posted
+        // so the scroll runs after the layout pass that sized the
+        // updated TextView — calling fullScroll synchronously would
+        // use the pre-update height and miss the new content.
+        binding.root.post { binding.root.fullScroll(View.FOCUS_DOWN) }
     }
 
     private fun renderJob(j: StudioClient.JobDetail) {

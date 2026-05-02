@@ -17,8 +17,9 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from app import words
 from app.config import get_settings
 from app.jobs import events, store
 from app.jobs.schema import Capture, CaptureSource, CaptureStatus, JobStatus
@@ -34,10 +35,19 @@ router = APIRouter(prefix="/api/captures", tags=["captures"])
 
 
 class CaptureCreate(BaseModel):
-    name: str
+    # Optional now: when missing or blank, the server picks a
+    # memorable random name (see app.words.random_name). This lets
+    # the phone / web "+ new capture" flows skip the naming dialog
+    # entirely; the user can rename later via PATCH.
+    name: str | None = None
     source: CaptureSource = CaptureSource.mobile_native
     has_pose: bool = False
     meta: dict[str, Any] = {}
+
+
+class CaptureRename(BaseModel):
+    # Trimmed by the handler; must be non-empty after trim.
+    name: str = Field(min_length=1, max_length=200)
 
 
 class CaptureView(BaseModel):
@@ -92,8 +102,14 @@ async def list_captures() -> list[CaptureView]:
 
 @router.post("")
 async def create_capture(body: CaptureCreate) -> CaptureView:
+    # Strip + auto-name in one place so every entrypoint that
+    # creates a capture (web new-capture button, phone-native
+    # "+ new capture", future local-record upload flow) gets the
+    # same default-name treatment without each having to mirror
+    # the logic.
+    name = (body.name or "").strip() or words.random_name()
     cap = await store.create_capture(
-        name=body.name,
+        name=name,
         source=body.source,
         has_pose=body.has_pose,
         meta=body.meta,
@@ -107,6 +123,25 @@ async def get_capture(capture_id: str) -> CaptureView:
     if cap is None:
         raise HTTPException(404, "capture not found")
     scene = await store.get_scene_for_capture(cap.id)
+    return _to_view(cap, scene_id=scene.id if scene else None)
+
+
+@router.patch("/{capture_id}")
+async def rename_capture(capture_id: str, body: CaptureRename) -> CaptureView:
+    """Rename a capture. The capture id stays the same — this only
+    updates the human-facing label shown on the home / detail
+    screens. Used by the rename UI on web + android."""
+    cap = await store.get_capture(capture_id)
+    if cap is None:
+        raise HTTPException(404, "capture not found")
+    new_name = body.name.strip()
+    if not new_name:
+        raise HTTPException(422, "name must be non-empty after trimming")
+    await store.set_capture_name(cap.id, new_name)
+    cap = await store.get_capture(capture_id)
+    assert cap is not None  # re-read; row exists per the check above
+    scene = await store.get_scene_for_capture(cap.id)
+    await events.publish_capture(cap.id, "capture.renamed", name=new_name)
     return _to_view(cap, scene_id=scene.id if scene else None)
 
 

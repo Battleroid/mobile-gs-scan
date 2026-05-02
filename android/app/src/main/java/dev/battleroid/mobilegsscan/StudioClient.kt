@@ -19,15 +19,16 @@ import java.util.concurrent.TimeUnit
  *   1. Health check (`GET /api/health`) so the home screen can show
  *      an online/offline indicator.
  *   2. Capture-session lifecycle:
- *        GET  /api/captures            — list for the home screen
- *        POST /api/captures            — start a phone-driven session
- *        GET  /api/captures/{id}       — detail for the native
- *                                       session screen
- *        GET  /api/scenes/{id}         — scene + embedded jobs list
- *        GET  /api/jobs/{id}           — single-job detail
- *        GET  /api/jobs/{id}/log       — tail of the subprocess log
- *                                       (sfm: glomap.log; train:
- *                                       train.log; export: export.log)
+ *        GET    /api/captures            — list for the home screen
+ *        POST   /api/captures            — start a phone-driven session
+ *        GET    /api/captures/{id}       — detail for the native
+ *                                         session screen
+ *        PATCH  /api/captures/{id}       — rename a capture
+ *        GET    /api/scenes/{id}         — scene + embedded jobs list
+ *        GET    /api/jobs/{id}           — single-job detail
+ *        GET    /api/jobs/{id}/log       — tail of the subprocess log
+ *                                         (sfm: glomap.log; train:
+ *                                         train.log; export: export.log)
  *
  * The WebSocket frame ingest is handled by StreamingClient. This
  * class is HTTP-only.
@@ -115,13 +116,21 @@ class StudioClient(private val baseUrl: String) {
     // pass arbitrary key/value pairs (currently just
     // ``train_iters``) without us having to invent a typed shape
     // every time we add an optional knob.
+    //
+    // ``name`` is now nullable: when null the server picks a
+    // memorable random name. Phone callers that want the
+    // auto-generated name pass null; if they ever surface a "name
+    // your capture" UI they pass the user's text.
     @Serializable
     private data class CaptureCreate(
-        val name: String,
+        val name: String?,
         val source: String,
         val has_pose: Boolean,
         val meta: JsonObject,
     )
+
+    @Serializable
+    private data class CaptureRename(val name: String)
 
     suspend fun health(): Boolean = withContext(Dispatchers.IO) {
         runCatching {
@@ -149,6 +158,24 @@ class StudioClient(private val baseUrl: String) {
                 json.decodeFromString<Capture>(res.body?.string().orEmpty())
             }
     }
+
+    suspend fun renameCapture(id: String, name: String): Capture =
+        withContext(Dispatchers.IO) {
+            val payload = json.encodeToString(
+                CaptureRename.serializer(),
+                CaptureRename(name = name),
+            )
+            val req = Request.Builder()
+                .url("$baseUrl/api/captures/$id")
+                .patch(payload.toRequestBody("application/json".toMediaType()))
+                .build()
+            http.newCall(req).execute().use { res ->
+                if (!res.isSuccessful) {
+                    error("HTTP ${res.code}: ${res.body?.string().orEmpty()}")
+                }
+                json.decodeFromString<Capture>(res.body?.string().orEmpty())
+            }
+        }
 
     suspend fun getScene(id: String): Scene = withContext(Dispatchers.IO) {
         http.newCall(Request.Builder().url("$baseUrl/api/scenes/$id").build())
@@ -187,13 +214,15 @@ class StudioClient(private val baseUrl: String) {
         }
 
     /**
-     * Create a new capture session. ``meta`` is a free-form bag of
-     * per-capture overrides the worker's dispatch step reads to
+     * Create a new capture session. ``name`` is now optional —
+     * pass null to let the server assign a memorable random name
+     * (`<adjective> <color> <noun>`). ``meta`` is a free-form bag
+     * of per-capture overrides the worker's dispatch step reads to
      * specialize the pipeline — currently the only key is
      * ``train_iters`` (per-capture splatfacto iter count override).
      */
     suspend fun createCapture(
-        name: String,
+        name: String? = null,
         hasPose: Boolean = true,
         source: String = "mobile_native",
         meta: JsonObject = JsonObject(emptyMap()),
