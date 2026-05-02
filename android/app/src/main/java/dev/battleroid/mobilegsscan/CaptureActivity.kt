@@ -38,14 +38,17 @@ import javax.microedition.khronos.opengles.GL10
  *      [MainActivity] before launching us). Bail with a toast if it
  *      no longer exists on disk.
  *   4. Render: every frame, advance ARCore, paint the camera quad
- *      via BackgroundRenderer, then draw the [CoverageRenderer]
- *      overlay so the user sees Scaniverse-style colored dots on
- *      the actual surfaces showing how thoroughly each region has
- *      been captured.
+ *      via BackgroundRenderer, then draw the active overlay
+ *      ([CoverageRenderer] for Phase 1 surface points, or
+ *      [DepthMeshRenderer] for the Phase 3 depth-mesh prototype).
+ *      Which one is picked from [ServerConfig.overlayStyle] at
+ *      activity-create time and held immutable for the session.
+ *      Depth mesh on a non-supporting device falls back to points
+ *      without warning.
  *   5. Recording gate: frame writes are OFF until the user taps
- *      "Start capture". Until then the preview runs, the coverage
- *      overlay accumulates points (so the user can see ARCore
- *      tracking the scene), but we don't commit anything to disk.
+ *      "Start capture". Until then the preview runs, the overlay
+ *      accumulates state (so the user can see ARCore tracking the
+ *      scene), but we don't commit anything to disk.
  *      Tapping Start flips the captureGateActive flag.
  *   6. On Finish: show a three-way dialog —
  *        - Upload now → finalize draft, route to [DraftDetailActivity]
@@ -56,8 +59,9 @@ import javax.microedition.khronos.opengles.GL10
  *          shows up in the home-screen drafts list.
  *        - Discard → delete the draft directory, route home.
  *
- * Capture rate, JPEG quality, and overlay-alpha settings are read
- * once at activity start from ServerConfig, same as before.
+ * Capture rate, JPEG quality, overlay-alpha, and overlay-style
+ * settings are read once at activity start from ServerConfig, same
+ * as before.
  */
 class CaptureActivity : AppCompatActivity() {
     companion object {
@@ -75,14 +79,20 @@ class CaptureActivity : AppCompatActivity() {
     private lateinit var binding: ActivityCaptureBinding
     private var arSession: ARCaptureSession? = null
     private val background = BackgroundRenderer()
-    private val coverage = CoverageRenderer()
+
+    // Phase 1 vs Phase 3 overlays. Exactly one is non-null per
+    // session, picked at onCreate time from ServerConfig +
+    // (eventually) the device's depth-support flag.
+    private var coverage: CoverageRenderer? = null
+    private var depthMesh: DepthMeshRenderer? = null
+    private var resolvedStyle: ServerConfig.OverlayStyle = ServerConfig.OverlayStyle.POINTS
 
     private var baseUrl: String = ""
     private var draftId: String = ""
     private var draft: Draft? = null
 
     private var overlayAlpha: Float = 0.7f
-    private var coverageHudCounter = 0
+    private var hudThrottleCounter = 0
 
     private var userRequestedArInstall = false
 
@@ -108,7 +118,20 @@ class CaptureActivity : AppCompatActivity() {
         }
 
         overlayAlpha = ServerConfig.coverageOverlayAlphaFloat(this)
-        coverage.setAlpha(overlayAlpha)
+        // Pick the overlay renderer from settings. Whether the
+        // device actually supports DEPTH_MESH (depth-mode-supported)
+        // is checked once arSession comes up; we may downgrade to
+        // POINTS at that point. For now, instantiate based on the
+        // user's preference and we'll swap if needed.
+        resolvedStyle = ServerConfig.overlayStyle(this)
+        when (resolvedStyle) {
+            ServerConfig.OverlayStyle.POINTS -> {
+                coverage = CoverageRenderer().also { it.setAlpha(overlayAlpha) }
+            }
+            ServerConfig.OverlayStyle.DEPTH_MESH -> {
+                depthMesh = DepthMeshRenderer().also { it.setAlpha(overlayAlpha) }
+            }
+        }
 
         binding.btnFinish.setOnClickListener { onFinishTapped() }
         binding.btnStart.setOnClickListener { onStartCaptureTapped() }
@@ -302,7 +325,30 @@ class CaptureActivity : AppCompatActivity() {
         if (background.textureId >= 0) {
             arSession?.setTextureName(background.textureId)
         }
+        // Downgrade DEPTH_MESH → POINTS if the device doesn't
+        // actually support depth (best-effort: the user's choice
+        // was honoured if the hardware can do it; otherwise we
+        // fall back silently). Leave the alpha alone — same value
+        // applies regardless of which renderer is active.
+        if (resolvedStyle == ServerConfig.OverlayStyle.DEPTH_MESH &&
+            arSession?.depthSupported == false
+        ) {
+            depthMesh = null
+            coverage = CoverageRenderer().also {
+                // Created lazily after arSession exists — must
+                // also init on the GL thread, deferred to the
+                // renderer.
+                it.setAlpha(overlayAlpha)
+            }
+            resolvedStyle = ServerConfig.OverlayStyle.POINTS
+            // The Renderer.onSurfaceCreated path has already run
+            // by the time we get here in some flows; hint it to
+            // re-init the new renderer next frame via a flag.
+            needsCoverageGlInit = true
+        }
     }
+
+    @Volatile private var needsCoverageGlInit = false
 
     private fun onStartCaptureTapped() {
         if (captureGateActive) return
@@ -373,17 +419,26 @@ class CaptureActivity : AppCompatActivity() {
         finish()
     }
 
-    private fun maybeUpdateCoverageHud() {
-        coverageHudCounter++
-        if (coverageHudCounter % 4 != 0) return
-        val stats = coverage.coverageStats()
-        runOnUiThread {
-            binding.coverageHud.text = getString(
-                R.string.coverage_status_fmt,
-                stats.wellCoveredPct,
-                stats.totalPoints,
-            )
+    /**
+     * HUD update throttled to ~2 Hz so we don't UI-thread-thrash.
+     * Format depends on the active overlay: Phase 1 shows the
+     * coverage % + total points; Phase 3 prototype shows the
+     * latest mesh's triangle count.
+     */
+    private fun maybeUpdateHud() {
+        hudThrottleCounter++
+        if (hudThrottleCounter % 4 != 0) return
+        val text = when (resolvedStyle) {
+            ServerConfig.OverlayStyle.POINTS -> {
+                val stats = coverage?.coverageStats() ?: return
+                getString(R.string.coverage_status_fmt, stats.wellCoveredPct, stats.totalPoints)
+            }
+            ServerConfig.OverlayStyle.DEPTH_MESH -> {
+                val stats = depthMesh?.stats() ?: return
+                getString(R.string.mesh_status_fmt, stats.triangles)
+            }
         }
+        runOnUiThread { binding.coverageHud.text = text }
     }
 
     private fun maybeUpdateFrameCounter() {
@@ -397,8 +452,16 @@ class CaptureActivity : AppCompatActivity() {
         override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
             GLES20.glClearColor(0f, 0f, 0f, 1f)
             background.createOnGlThread()
-            coverage.createOnGlThread()
-            coverage.setAlpha(overlayAlpha)
+            coverage?.createOnGlThread()
+            depthMesh?.createOnGlThread()
+            // Push the alpha after createOnGlThread so the first
+            // frame already reflects the user's preference. setAlpha
+            // is thread-safe; the call from onCreate above is the
+            // source of truth, this just makes the GL-side state
+            // consistent regardless of which path assigned the
+            // field first.
+            coverage?.setAlpha(overlayAlpha)
+            depthMesh?.setAlpha(overlayAlpha)
             arSession?.setTextureName(background.textureId)
         }
 
@@ -412,32 +475,64 @@ class CaptureActivity : AppCompatActivity() {
             val ar = arSession ?: return
             val frame = ar.update() ?: return
 
+            // Defensive: if startArSession swapped depthMesh →
+            // coverage after onSurfaceCreated already ran, we need
+            // to lazy-init the new renderer's GL resources here
+            // (still on the GL thread).
+            if (needsCoverageGlInit) {
+                coverage?.createOnGlThread()
+                coverage?.setAlpha(overlayAlpha)
+                needsCoverageGlInit = false
+            }
+
             background.updateTexCoords(frame)
             background.draw()
 
-            // Coverage overlay rides on top of the camera quad. Uses
-            // ARCore's view + projection so the dots project onto
-            // the surfaces ARCore is tracking, not into thin air.
-            coverage.draw(ar.viewMatrix(frame), ar.projectionMatrix(frame))
+            val view = ar.viewMatrix(frame)
+            val proj = ar.projectionMatrix(frame)
+
+            // Phase 1 path: render the feature-point overlay on
+            // every frame, accumulate observations only during
+            // capture. Cheap.
+            coverage?.let { c ->
+                c.draw(view, proj)
+                if (captureGateActive) {
+                    try {
+                        val pc = ar.acquirePointCloud(frame)
+                        try { c.recordObservations(pc) } finally { pc.close() }
+                    } catch (_: Exception) {
+                        // Don't let a transient point-cloud failure
+                        // kill recording; the splat trains from
+                        // JPEGs + poses, the overlay is purely UX.
+                    }
+                }
+            }
+
+            // Phase 3 path: rebuild the mesh from the latest depth
+            // image and draw it. The depth image isn't always ready
+            // (NotYet on first few frames); when it isn't, we just
+            // skip the rebuild and last-known mesh keeps showing.
+            depthMesh?.let { m ->
+                try {
+                    val depthImage = ar.acquireDepthImage16(frame)
+                    if (depthImage != null) {
+                        try {
+                            val intr = ar.colorIntrinsics(frame)
+                            val pose = ar.cameraPose(frame)
+                            m.update(depthImage, intr, pose)
+                        } finally {
+                            depthImage.close()
+                        }
+                    }
+                } catch (_: Exception) {
+                    // Same defensive policy: depth failures are
+                    // overlay-only, don't kill recording.
+                }
+                m.draw(view, proj)
+            }
 
             if (!captureGateActive) return
             val captured = ar.pollFrameData(frame) ?: return
-
-            // Record this frame's tracked feature points into the
-            // overlay for visual feedback. PointCloud is Closeable;
-            // wrap so we always release ARCore's hold.
-            try {
-                val pc = ar.acquirePointCloud(frame)
-                try {
-                    coverage.recordObservations(pc)
-                } finally {
-                    pc.close()
-                }
-            } catch (_: Exception) {
-                // Don't let a transient point-cloud failure kill
-                // recording; the splat trains from JPEGs + poses,
-                // the overlay is purely a UX layer.
-            }
 
             // Persist the frame to the draft directory. This runs on
             // the GL thread which is fine for the volume we deal
@@ -462,7 +557,7 @@ class CaptureActivity : AppCompatActivity() {
                 }
                 return
             }
-            maybeUpdateCoverageHud()
+            maybeUpdateHud()
             maybeUpdateFrameCounter()
         }
     }
