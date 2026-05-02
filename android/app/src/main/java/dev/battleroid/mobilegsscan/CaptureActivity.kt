@@ -422,8 +422,8 @@ class CaptureActivity : AppCompatActivity() {
     /**
      * HUD update throttled to ~2 Hz so we don't UI-thread-thrash.
      * Format depends on the active overlay: Phase 1 shows the
-     * coverage % + total points; Phase 3 prototype shows the
-     * latest mesh's triangle count.
+     * coverage % + total points; Phase 3 prototype (wireframe)
+     * shows the latest mesh's edge count.
      */
     private fun maybeUpdateHud() {
         hudThrottleCounter++
@@ -435,7 +435,7 @@ class CaptureActivity : AppCompatActivity() {
             }
             ServerConfig.OverlayStyle.DEPTH_MESH -> {
                 val stats = depthMesh?.stats() ?: return
-                getString(R.string.mesh_status_fmt, stats.triangles)
+                getString(R.string.mesh_status_fmt, stats.edges)
             }
         }
         runOnUiThread { binding.coverageHud.text = text }
