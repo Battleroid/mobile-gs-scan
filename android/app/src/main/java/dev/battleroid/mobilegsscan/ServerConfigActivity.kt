@@ -133,9 +133,11 @@ class ServerConfigActivity : AppCompatActivity() {
         val tiHelper = mutedHelper(getString(R.string.hint_train_fidelity))
 
         // ── coverage-overlay opacity slider ─────────────────────
-        // Multiplies the per-fragment alpha in CoverageRenderer's
-        // shader. 20..100% so the user can't accidentally make the
-        // overlay invisible and think it's broken; default 70%.
+        // Multiplies the per-fragment alpha in the active overlay
+        // renderer's shader (CoverageRenderer or
+        // DepthMeshRenderer). 20..100% so the user can't
+        // accidentally make the overlay invisible and think it's
+        // broken; default 70%.
         val aSection = sectionHeader(getString(R.string.label_overlay_alpha))
         val aValueLabel = TextView(this).apply {
             text = getString(
@@ -158,6 +160,51 @@ class ServerConfigActivity : AppCompatActivity() {
             })
         }
         val aHelper = mutedHelper(getString(R.string.hint_overlay_alpha))
+
+        // ── overlay style picker ────────────────────────────────
+        // Two buttons: surface points (Phase 1, default) vs depth
+        // mesh (Phase 3 prototype). Same selected/dim pattern as
+        // training fidelity. Mutually exclusive — capture activity
+        // instantiates one renderer at start time.
+        val osSection = sectionHeader(getString(R.string.label_overlay_style))
+        var selectedStyle = ServerConfig.overlayStyle(this)
+        val osValueLabel = TextView(this).apply {
+            setTextColor(getColor(R.color.fg))
+            text = overlayStyleLabel(selectedStyle)
+        }
+        val btnPoints = Button(this).apply {
+            text = getString(R.string.overlay_style_points)
+        }
+        val btnMesh = Button(this).apply {
+            text = getString(R.string.overlay_style_depth_mesh)
+        }
+        val osButtons = listOf(
+            btnPoints to ServerConfig.OverlayStyle.POINTS,
+            btnMesh to ServerConfig.OverlayStyle.DEPTH_MESH,
+        )
+        fun refreshOverlayStyleSelection() {
+            osButtons.forEach { (btn, value) ->
+                btn.alpha = if (value == selectedStyle) 1.0f else 0.55f
+            }
+        }
+        osButtons.forEach { (btn, value) ->
+            btn.setOnClickListener {
+                selectedStyle = value
+                osValueLabel.text = overlayStyleLabel(selectedStyle)
+                refreshOverlayStyleSelection()
+            }
+        }
+        refreshOverlayStyleSelection()
+        val osRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        val twoEqual = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        val twoEqualWithMarginEnd = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+            marginEnd = gap
+        }
+        osRow.addView(btnPoints, twoEqualWithMarginEnd)
+        osRow.addView(btnMesh, twoEqual)
+        val osHelper = mutedHelper(getString(R.string.hint_overlay_style))
 
         // ── save ──────────────────────────────────────────────
         val save = Button(this).apply {
@@ -182,6 +229,9 @@ class ServerConfigActivity : AppCompatActivity() {
                 )
                 ServerConfig.setCoverageOverlayAlphaPct(
                     this@ServerConfigActivity, aSlider.progress,
+                )
+                ServerConfig.setOverlayStyle(
+                    this@ServerConfigActivity, selectedStyle,
                 )
                 val saved = ServerConfig.studioUrl(this@ServerConfigActivity).orEmpty()
                 if (saved != raw) {
@@ -214,6 +264,10 @@ class ServerConfigActivity : AppCompatActivity() {
         root.addView(aValueLabel)
         root.addView(aSlider)
         root.addView(aHelper)
+        root.addView(osSection)
+        root.addView(osValueLabel)
+        root.addView(osRow)
+        root.addView(osHelper)
         root.addView(save)
         setContentView(root)
 
@@ -221,14 +275,14 @@ class ServerConfigActivity : AppCompatActivity() {
         // params are the LinearLayout-owned ones (they're
         // ViewGroup.LayoutParams during the apply{} call above and
         // don't have topMargin / bottomMargin fields).
-        listOf(urlHelper, fpsHelper, qHelper, tiHelper, aHelper).forEach { v ->
+        listOf(urlHelper, fpsHelper, qHelper, tiHelper, aHelper, osHelper).forEach { v ->
             (v.layoutParams as LinearLayout.LayoutParams).apply {
                 topMargin = (4 * resources.displayMetrics.density).toInt()
                 bottomMargin = (16 * resources.displayMetrics.density).toInt()
                 v.layoutParams = this
             }
         }
-        listOf(fpsSection, qSection, tiSection, aSection).forEach { v ->
+        listOf(fpsSection, qSection, tiSection, aSection, osSection).forEach { v ->
             (v.layoutParams as LinearLayout.LayoutParams).apply {
                 topMargin = (16 * resources.displayMetrics.density).toInt()
                 v.layoutParams = this
@@ -251,6 +305,17 @@ class ServerConfigActivity : AppCompatActivity() {
             insets
         }
     }
+
+    private fun overlayStyleLabel(style: ServerConfig.OverlayStyle): String =
+        getString(
+            R.string.selected_overlay_style_fmt,
+            getString(
+                when (style) {
+                    ServerConfig.OverlayStyle.POINTS -> R.string.overlay_style_points
+                    ServerConfig.OverlayStyle.DEPTH_MESH -> R.string.overlay_style_depth_mesh
+                },
+            ),
+        )
 
     private fun mutedHelper(text: String): TextView = TextView(this).apply {
         this.text = text
