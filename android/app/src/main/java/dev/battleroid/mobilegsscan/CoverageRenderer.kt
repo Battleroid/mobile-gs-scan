@@ -24,6 +24,15 @@ import java.nio.FloatBuffer
  * companion HUD on the activity reports total point count + the
  * percentage of points considered well-covered (≥3 observations).
  *
+ * Distance fade: each point's per-fragment alpha is also scaled
+ * by `1 / (1 + d / FADE_K_M)` where d is the post-projection
+ * homogeneous-w (effectively view-space depth in metres). Closer
+ * points stay bright; far ones fade toward translucent so the
+ * overlay reads as 3D rather than as a flat uniform sprinkle of
+ * dots over the camera image. Combines naturally with the
+ * existing distance-based point-size attenuation already in the
+ * vertex shader (closer = bigger AND brighter).
+ *
  * Lifecycle:
  *   1. createOnGlThread() — must run on the GL thread (i.e. inside
  *      GLSurfaceView.Renderer.onSurfaceCreated). Allocates the
@@ -78,25 +87,48 @@ class CoverageRenderer {
         // (DEFAULT_OVERLAY_ALPHA_PCT = 70).
         private const val DEFAULT_ALPHA = 0.7f
 
+        // Falloff distance for the depth-fade curve (metres). The
+        // fragment shader scales alpha by `1 / (1 + d / FADE_K_M)`
+        // where d is the vertex's clip-space w (≈ view-space
+        // depth). 2 m means a point 2 m from the camera gets 50%
+        // of full alpha; at 6 m it's 25%; at 10 m it's 17%. Tuned
+        // to keep close near-field dots crisp while letting the
+        // far-field background "wash out" so the user can see the
+        // 3D structure of where they've covered.
+        private const val DEPTH_FADE_K_M = 2.0f
+
         private const val VERTEX_SHADER = """
             uniform mat4 u_ViewProj;
             uniform float u_BaseSize;
             attribute vec3 a_Position;
             attribute vec4 a_Color;
             varying vec4 v_Color;
+            varying float v_Depth;
             void main() {
                 gl_Position = u_ViewProj * vec4(a_Position, 1.0);
                 gl_PointSize = clamp(u_BaseSize / max(gl_Position.w, 0.1), 2.0, 16.0);
                 v_Color = a_Color;
+                // gl_Position.w after the perspective transform is
+                // approximately the view-space depth in metres,
+                // which is what we want for the depth-fade curve.
+                v_Depth = gl_Position.w;
             }
         """
 
         private const val FRAGMENT_SHADER = """
             precision mediump float;
             uniform float u_Alpha;
+            uniform float u_FadeK;
             varying vec4 v_Color;
+            varying float v_Depth;
             void main() {
-                gl_FragColor = vec4(v_Color.rgb, v_Color.a * u_Alpha);
+                // Standard depth-cued opacity curve: bright at the
+                // near plane, asymptotically fading toward zero as
+                // the point recedes. Without this the overlay
+                // reads as a uniform sprinkle of dots over the
+                // camera image with no 3D cue.
+                float fade = 1.0 / (1.0 + v_Depth / u_FadeK);
+                gl_FragColor = vec4(v_Color.rgb, v_Color.a * u_Alpha * fade);
             }
         """
     }
@@ -110,6 +142,7 @@ class CoverageRenderer {
     private var viewProjUniform: Int = 0
     private var baseSizeUniform: Int = 0
     private var alphaUniform: Int = 0
+    private var fadeKUniform: Int = 0
 
     private var vbo: Int = 0
     private var pointCount: Int = 0
@@ -133,6 +166,7 @@ class CoverageRenderer {
         viewProjUniform = GLES20.glGetUniformLocation(program, "u_ViewProj")
         baseSizeUniform = GLES20.glGetUniformLocation(program, "u_BaseSize")
         alphaUniform = GLES20.glGetUniformLocation(program, "u_Alpha")
+        fadeKUniform = GLES20.glGetUniformLocation(program, "u_FadeK")
 
         val handles = IntArray(1)
         GLES20.glGenBuffers(1, handles, 0)
@@ -202,6 +236,7 @@ class CoverageRenderer {
         GLES20.glUniformMatrix4fv(viewProjUniform, 1, false, viewProjMatrix, 0)
         GLES20.glUniform1f(baseSizeUniform, POINT_BASE_SIZE)
         GLES20.glUniform1f(alphaUniform, alpha)
+        GLES20.glUniform1f(fadeKUniform, DEPTH_FADE_K_M)
 
         // Depth test on so points behind closer geometry will be
         // occluded once we have closer geometry. The camera quad
