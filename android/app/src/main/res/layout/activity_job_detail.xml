@@ -229,7 +229,15 @@
             <!-- Subprocess log section — collapsible, polled while
                  the job is running. Mirrors the web's JobLogPanel
                  behavior. Hidden if the server says no log is
-                 available for this kind (mesh). -->
+                 available for this kind (mesh).
+
+                 logValue is height-capped at 280dp and scrolls
+                 internally (its own ScrollingMovementMethod, set
+                 from the activity). The activity auto-scrolls
+                 logValue to its bottom on each successful poll.
+                 The outer NestedScrollView no longer scrolls when
+                 the log updates — the user can scroll the rest of
+                 the page freely while the live tail keeps moving. -->
             <LinearLayout
                 android:id="@+id/logRow"
                 android:orientation="vertical"
@@ -250,6 +258,9 @@
                     android:padding="6dp"
                     android:background="@color/bg"
                     android:visibility="gone"
+                    android:scrollbars="vertical"
+                    android:fadeScrollbars="false"
+                    android:maxHeight="280dp"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:text="" />
