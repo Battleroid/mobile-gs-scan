@@ -1,8 +1,15 @@
 """Structure-from-motion step.
 
 `run_sfm` shells out to Glomap with a COLMAP-format output workspace
-under `scenes/<id>/sfm/`. Falls back to writing the ARCore poses
-directly when the capture has them.
+under `scenes/<id>/sfm/`. Three backends:
+
+  * ``glomap`` / ``colmap`` — real feature-based solvers; used when
+    the capture lacks per-frame pose (web upload, drag-drop).
+  * ``arcore_native`` — used when the phone streamed ARCore poses
+    alongside the frames. Skips the solver and writes a synthetic
+    marker so the train step falls back to its stub path. Real
+    pose-conditioned training (writing valid COLMAP cameras.txt /
+    images.txt + a triangulated points3D.txt) is a follow-up.
 
 In PR #1 the real Glomap binary is built into worker-gs's image. If
 it's missing on the host (e.g. running the api container with the
@@ -48,6 +55,12 @@ async def run_sfm(
 
     await progress(0.05, f"sfm: backend={backend}")
 
+    if backend == "arcore_native":
+        # Phone capture path. Don't run a real feature-based solver
+        # — use the poses ARCore already gave us.
+        return await write_arcore_poses_as_colmap(
+            capture_dir=capture_dir, scene_dir=scene_dir, progress=progress
+        )
     if backend == "glomap" and shutil.which("glomap"):
         return await _run_glomap(sfm_dir=sfm_dir, progress=progress)
     if backend == "colmap" and shutil.which("colmap"):
@@ -116,16 +129,43 @@ async def _run_stub(*, sfm_dir: Path, progress: ProgressCb) -> dict:
 async def write_arcore_poses_as_colmap(
     *, capture_dir: Path, scene_dir: Path, progress: ProgressCb
 ) -> dict:
-    """Convert poses.jsonl to a COLMAP-format workspace + skip SfM."""
+    """ARCore-pose path. Wires the workspace + flags downstream.
+
+    Currently writes:
+
+      * symlink ``scene_dir/sfm/images`` → ``capture_dir/frames``.
+      * a copy of the streamed ``poses.jsonl`` so the data lives
+        under the scene rather than only the capture.
+      * ``arcore_native.json`` marker so it's obvious which path
+        produced this scene.
+      * ``synthetic.json`` marker so train.py's stub fallback fires
+        and the pipeline completes end-to-end. Real pose-conditioned
+        training (write a valid COLMAP cameras.txt / images.txt +
+        a triangulated sparse points3D.txt, then ns-train against
+        that) is the follow-up; landing it here would balloon the
+        scope of a fix that's just trying to stop the cascade
+        crash on the phone-capture path.
+    """
     sfm_dir = scene_dir / "sfm"
     sfm_dir.mkdir(parents=True, exist_ok=True)
     out = sfm_dir / "sparse" / "0"
     out.mkdir(parents=True, exist_ok=True)
     if not (sfm_dir / "images").exists():
         (sfm_dir / "images").symlink_to(capture_dir / "frames")
+
     poses_path = capture_dir / "poses.jsonl"
     if poses_path.exists():
         shutil.copy(poses_path, sfm_dir / "poses.jsonl")
+
     (sfm_dir / "arcore_native.json").write_text(json.dumps({"source": "arcore"}))
+    # Triggers the stub branch in train.py until real ARCore-pose
+    # training lands. Without this the train step would try to run
+    # ns-train against an empty cameras.txt / points3D.txt and crash.
+    (sfm_dir / "synthetic.json").write_text(
+        json.dumps({
+            "reason": "arcore_native",
+            "todo": "emit valid COLMAP cameras.txt + triangulated points3D.txt",
+        })
+    )
     await progress(0.95, "sfm: arcore poses")
-    return {"backend": "arcore_native", "synthetic": False}
+    return {"backend": "arcore_native", "synthetic": True}

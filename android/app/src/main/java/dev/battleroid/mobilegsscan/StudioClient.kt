@@ -29,6 +29,12 @@ import java.util.concurrent.TimeUnit
  * class is HTTP-only.
  */
 class StudioClient(private val baseUrl: String) {
+    // encodeDefaults = false here is *intentional* for the response-
+    // parsing direction (lets us add fields server-side without
+    // forcing them into every request DTO). On the request side it
+    // means request DTOs must NOT carry defaults on fields that the
+    // server interprets differently than kotlin's intent — see
+    // CaptureCreate below for the ugly version of that lesson.
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = false }
 
     private val http: OkHttpClient = OkHttpClient.Builder()
@@ -88,18 +94,31 @@ class StudioClient(private val baseUrl: String) {
         val claimed_by: String? = null,
         val started_at: String? = null,
         val completed_at: String? = null,
-        // result is a free-form dict server-side (worker-specific
-        // payload). Keep as raw JsonElement so we don't have to bake
-        // its shape into the client — the detail screen renders the
-        // pretty-printed text.
         val result: JsonElement? = null,
     )
 
+    // *** No default values on these fields. ***
+    //
+    // The Json instance above runs with encodeDefaults = false, which
+    // means kotlinx.serialization OMITS any field whose value matches
+    // its Kotlin default. If we declared
+    // ``has_pose: Boolean = true`` here, an explicit
+    // CaptureCreate(name=..., has_pose=true) would still serialize
+    // to ``{"name":"..."}`` — the has_pose field disappears from the
+    // wire because it matches the default. The server-side Pydantic
+    // model has its own default of has_pose=False (the upload path
+    // needs it false), so the missing field gets filled in as False
+    // and every phone-native capture ends up stored as has_pose=False.
+    // Cascading downstream: SfM runs on the phone frames, glomap
+    // crashes on the small frame count, train/export cascade-fail.
+    //
+    // Dropping the defaults forces every field to be serialized,
+    // so the server sees the value the caller actually intended.
     @Serializable
     private data class CaptureCreate(
         val name: String,
-        val source: String = "mobile_native",
-        val has_pose: Boolean = true,
+        val source: String,
+        val has_pose: Boolean,
     )
 
     suspend fun health(): Boolean = withContext(Dispatchers.IO) {
@@ -147,22 +166,25 @@ class StudioClient(private val baseUrl: String) {
             }
     }
 
-    suspend fun createCapture(name: String, hasPose: Boolean = true): Capture =
-        withContext(Dispatchers.IO) {
-            val payload = json.encodeToString(
-                CaptureCreate.serializer(),
-                CaptureCreate(name = name, has_pose = hasPose),
-            )
-            val req = Request.Builder()
-                .url("$baseUrl/api/captures")
-                .post(payload.toRequestBody("application/json".toMediaType()))
-                .build()
-            http.newCall(req).execute().use { res ->
-                if (!res.isSuccessful) {
-                    error("HTTP ${res.code}: ${res.body?.string().orEmpty()}")
-                }
-                val body = res.body?.string().orEmpty()
-                json.decodeFromString<Capture>(body)
+    suspend fun createCapture(
+        name: String,
+        hasPose: Boolean = true,
+        source: String = "mobile_native",
+    ): Capture = withContext(Dispatchers.IO) {
+        val payload = json.encodeToString(
+            CaptureCreate.serializer(),
+            CaptureCreate(name = name, source = source, has_pose = hasPose),
+        )
+        val req = Request.Builder()
+            .url("$baseUrl/api/captures")
+            .post(payload.toRequestBody("application/json".toMediaType()))
+            .build()
+        http.newCall(req).execute().use { res ->
+            if (!res.isSuccessful) {
+                error("HTTP ${res.code}: ${res.body?.string().orEmpty()}")
             }
+            val body = res.body?.string().orEmpty()
+            json.decodeFromString<Capture>(body)
         }
+    }
 }
