@@ -20,6 +20,10 @@ import java.io.ByteArrayOutputStream
  *   - configures the session for fastest CPU image access (the GPU
  *     image pipeline is too involved for the current overlay; we
  *     keep the overlay minimal and read CPU-side YUV instead).
+ *   - opportunistically enables ARCore's depth mode at session
+ *     create time when the device supports it. The Phase 3
+ *     [DepthMeshRenderer] consumes this; the Phase 1
+ *     [CoverageRenderer] doesn't care either way.
  *   - exposes [update] which advances the session by one frame and
  *     returns the resulting [Frame], so callers can run their own
  *     rendering against ARCore's camera-feed texture.
@@ -27,8 +31,9 @@ import java.io.ByteArrayOutputStream
  *     pose + intrinsics + JPEG-encoded RGB image from a Frame,
  *     throttled to a target frame rate.
  *   - exposes [viewMatrix] / [projectionMatrix] / [acquirePointCloud]
- *     so overlay renderers can project and color world-space
- *     geometry without reaching into the underlying [Session].
+ *     / [acquireDepthImage16] so overlay renderers can project and
+ *     color world-space geometry without reaching into the
+ *     underlying [Session].
  *
  * Designed to be driven from the `GLSurfaceView` render thread.
  */
@@ -38,14 +43,26 @@ class ARCaptureSession(
     private val jpegQuality: Int = 85,
 ) {
 
-    private val session: Session = Session(context).apply {
-        val cfg = Config(this).apply {
+    /**
+     * True when ARCore reports the device can compute a depth image
+     * (Pixel-class hardware + recent Play Services for AR). Cached
+     * at session-create time. Phase 3 callers gate their depth
+     * acquisition on this — the alternative is repeated
+     * NotYetAvailableException churn per frame.
+     */
+    val depthSupported: Boolean
+
+    private val session: Session = Session(context).also { s ->
+        val supported = s.isDepthModeSupported(Config.DepthMode.AUTOMATIC)
+        depthSupported = supported
+        val cfg = Config(s).apply {
             focusMode = Config.FocusMode.AUTO
             updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
             lightEstimationMode = Config.LightEstimationMode.DISABLED
             planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
+            depthMode = if (supported) Config.DepthMode.AUTOMATIC else Config.DepthMode.DISABLED
         }
-        configure(cfg)
+        s.configure(cfg)
     }
     private var lastEmitMs: Long = 0
     private var frameIndex: Int = 0
@@ -89,12 +106,47 @@ class ARCaptureSession(
         FloatArray(16).also { frame.camera.getProjectionMatrix(it, 0, near, far) }
 
     /**
+     * Column-major 4x4 cam-to-world pose for [frame]. Phase 3's
+     * [DepthMeshRenderer] needs this to lift each depth pixel from
+     * the camera's local frame into world space so the mesh stays
+     * put as the camera moves.
+     */
+    fun cameraPose(frame: Frame): FloatArray =
+        FloatArray(16).also { frame.camera.pose.toMatrix(it, 0) }
+
+    /**
+     * Color-camera intrinsics for [frame] in pixel units. Already
+     * the same call shape `pollFrameData` uses internally; surfaced
+     * here so overlay renderers can ask without going through the
+     * frame-streaming path.
+     */
+    fun colorIntrinsics(frame: Frame): Intrinsics =
+        readIntrinsics(frame.camera.imageIntrinsics)
+
+    /**
      * Acquire the tracked feature point cloud from [frame]. The
      * returned [PointCloud] is `Closeable` — caller must close it
      * (idiomatic Kotlin: `acquirePointCloud(frame).use { ... }`).
      */
     fun acquirePointCloud(frame: Frame): PointCloud =
         frame.acquirePointCloud()
+
+    /**
+     * Acquire the 16-bit depth image (uint16 millimeters,
+     * little-endian) for [frame]. Returns null when ARCore hasn't
+     * computed a depth frame yet — common for the first few frames
+     * after session start, and intermittently while tracking
+     * stabilizes. The returned [Image] is `Closeable` — caller
+     * must close it.
+     *
+     * Throws [IllegalStateException] if the session was started
+     * without depth support; gate on [depthSupported] first.
+     */
+    fun acquireDepthImage16(frame: Frame): Image? = try {
+        frame.acquireDepthImage16Bits()
+    } catch (e: NotYetAvailableException) {
+        null
+    }
 
     /**
      * Extract pose + intrinsics + JPEG from a Frame returned by
