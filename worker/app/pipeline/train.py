@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import shutil
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -19,6 +20,15 @@ from app.pipeline._logtail import format_subprocess_error, tail_file
 log = logging.getLogger(__name__)
 
 ProgressCb = Callable[[float, str], Awaitable[None]]
+
+# Regex that picks up splatfacto's iteration progress lines from the
+# subprocess stdout. Splatfacto (and the rest of nerfstudio's trainer)
+# emits lines containing "Iter 1234 ..." — capitalized. The previous
+# parser used line.find(b"iter ") (lowercase) which never matched, so
+# the progress bar froze at 0 % for the entire ~15-min run. Anchored
+# to a word boundary so we don't match "Citerator 23" or other
+# substring noise. Group 1 is the integer iteration count.
+ITER_RE = re.compile(rb"\biter\s+(\d+)", re.IGNORECASE)
 
 
 async def run_train(
@@ -77,24 +87,25 @@ async def _run_splatfacto(
         stderr=asyncio.subprocess.STDOUT,
     )
 
-    iter_marker = b"iter "
     last_pct = 0.0
     with log_path.open("wb") as logf:
         assert proc.stdout is not None
         async for raw in proc.stdout:
             logf.write(raw)
-            line = raw.strip()
-            ix = line.find(iter_marker)
-            if ix >= 0:
-                tail = line[ix + len(iter_marker):]
-                try:
-                    current = int(tail.split()[0])
-                except (IndexError, ValueError):
-                    continue
-                pct = max(0.0, min(0.99, current / max(iters, 1)))
-                if pct - last_pct >= 0.01:
-                    await progress(pct, f"train: iter {current}/{iters}")
-                    last_pct = pct
+            m = ITER_RE.search(raw)
+            if not m:
+                continue
+            try:
+                current = int(m.group(1))
+            except (IndexError, ValueError):
+                continue
+            pct = max(0.0, min(0.99, current / max(iters, 1)))
+            # Throttle to ~1 % steps so we don't flood the events
+            # bus with every iter (splatfacto can emit several
+            # lines per iteration).
+            if pct - last_pct >= 0.01:
+                await progress(pct, f"train: iter {current}/{iters}")
+                last_pct = pct
 
     rc = await proc.wait()
     if rc != 0:
