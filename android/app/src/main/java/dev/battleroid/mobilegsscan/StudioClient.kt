@@ -24,6 +24,9 @@ import java.util.concurrent.TimeUnit
  *                                       session screen
  *        GET  /api/scenes/{id}         — scene + embedded jobs list
  *        GET  /api/jobs/{id}           — single-job detail
+ *        GET  /api/jobs/{id}/log       — tail of the subprocess log
+ *                                       (sfm: glomap.log; train:
+ *                                       train.log; export: export.log)
  *
  * The WebSocket frame ingest is handled by StreamingClient. This
  * class is HTTP-only.
@@ -97,23 +100,14 @@ class StudioClient(private val baseUrl: String) {
         val result: JsonElement? = null,
     )
 
-    // *** No default values on these fields. ***
-    //
-    // The Json instance above runs with encodeDefaults = false, which
-    // means kotlinx.serialization OMITS any field whose value matches
-    // its Kotlin default. If we declared
-    // ``has_pose: Boolean = true`` here, an explicit
-    // CaptureCreate(name=..., has_pose=true) would still serialize
-    // to ``{"name":"..."}`` — the has_pose field disappears from the
-    // wire because it matches the default. The server-side Pydantic
-    // model has its own default of has_pose=False (the upload path
-    // needs it false), so the missing field gets filled in as False
-    // and every phone-native capture ends up stored as has_pose=False.
-    // Cascading downstream: SfM runs on the phone frames, glomap
-    // crashes on the small frame count, train/export cascade-fail.
-    //
-    // Dropping the defaults forces every field to be serialized,
-    // so the server sees the value the caller actually intended.
+    @Serializable
+    data class JobLog(
+        val log: String = "",
+        val size: Long = 0L,
+        val path: String? = null,
+        val available: Boolean = false,
+    )
+
     @Serializable
     private data class CaptureCreate(
         val name: String,
@@ -165,6 +159,24 @@ class StudioClient(private val baseUrl: String) {
                 json.decodeFromString<JobDetail>(res.body?.string().orEmpty())
             }
     }
+
+    /**
+     * Fetch the tail of the subprocess log file for [id]. Server
+     * caps tailBytes at 1 MB; default 16 KB here gives the user a
+     * reasonable on-screen tail without making the response huge.
+     * Mesh job kind responds with available=false (no subprocess in
+     * PR #1 stub).
+     */
+    suspend fun getJobLog(id: String, tailBytes: Int = 16384): JobLog =
+        withContext(Dispatchers.IO) {
+            val req = Request.Builder()
+                .url("$baseUrl/api/jobs/$id/log?tail_bytes=$tailBytes")
+                .build()
+            http.newCall(req).execute().use { res ->
+                if (!res.isSuccessful) error("HTTP ${res.code}")
+                json.decodeFromString<JobLog>(res.body?.string().orEmpty())
+            }
+        }
 
     suspend fun createCapture(
         name: String,
