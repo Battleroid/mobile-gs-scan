@@ -69,12 +69,18 @@ export function JobLogPanel({ job }: { job: Job }) {
     el.scrollTop = el.scrollHeight;
   }, [data?.log, follow]);
 
-  // When the job lands (running -> not-running), turn follow off
-  // so the user can browse the captured tail freely. Don't touch
-  // it on the way up — initial state already set it correctly.
-  useEffect(() => {
+  // Reset `follow` to false when the job transitions out of the
+  // running/claimed state, so the user can browse the captured
+  // tail freely without being scroll-jacked. React 19 forbids
+  // setState() inside an effect for this kind of state-syncing
+  // (react-hooks/set-state-in-effect); use the documented
+  // "adjust state on prop change during render" pattern instead.
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  const [prevIsRunning, setPrevIsRunning] = useState(isRunning);
+  if (prevIsRunning !== isRunning) {
+    setPrevIsRunning(isRunning);
     if (!isRunning) setFollow(false);
-  }, [isRunning]);
+  }
 
   if (!open) {
     return (
