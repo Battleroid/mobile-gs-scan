@@ -191,9 +191,10 @@ function SplatScene({
   // setup-effect's deps array. The second effect at the bottom of
   // this component applies live changes by writing to
   // sparkRef.current.maxStdDev. This ref carries the current value
-  // through to the setup effect without making it a dep.
+  // through to the setup effect without making it a dep — kept in
+  // sync from inside that same effect so we don't write to it
+  // during render (forbidden by react-hooks/refs).
   const maxStdDevRef = useRef(maxStdDev);
-  maxStdDevRef.current = maxStdDev;
 
   useEffect(() => {
     let cancelled = false;
@@ -366,8 +367,11 @@ function SplatScene({
 
   // Apply maxStdDev change. SparkRenderer exposes maxStdDev as a
   // settable property; if a future Spark version drops it the
-  // assignment is a harmless no-op (caught below).
+  // assignment is a harmless no-op (caught below). Also keeps
+  // maxStdDevRef in sync so the setup effect (which reads the
+  // initial value at mount-time) sees the latest after a re-mount.
   useEffect(() => {
+    maxStdDevRef.current = maxStdDev;
     const spark = sparkRef.current as unknown as { maxStdDev?: number } | null;
     if (spark) {
       try { spark.maxStdDev = maxStdDev; } catch { /* ignore */ }
