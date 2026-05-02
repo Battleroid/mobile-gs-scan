@@ -132,6 +132,33 @@ class ServerConfigActivity : AppCompatActivity() {
         presetRow.addView(btnHigh, one)
         val tiHelper = mutedHelper(getString(R.string.hint_train_fidelity))
 
+        // ── coverage-overlay opacity slider ─────────────────────
+        // Multiplies the per-fragment alpha in CoverageRenderer's
+        // shader. 20..100% so the user can't accidentally make the
+        // overlay invisible and think it's broken; default 70%.
+        val aSection = sectionHeader(getString(R.string.label_overlay_alpha))
+        val aValueLabel = TextView(this).apply {
+            text = getString(
+                R.string.overlay_alpha_fmt,
+                ServerConfig.coverageOverlayAlphaPct(this@ServerConfigActivity),
+            )
+            setTextColor(getColor(R.color.fg))
+        }
+        val aSlider = SeekBar(this).apply {
+            min = ServerConfig.MIN_OVERLAY_ALPHA_PCT
+            max = ServerConfig.MAX_OVERLAY_ALPHA_PCT
+            progress = ServerConfig.coverageOverlayAlphaPct(this@ServerConfigActivity)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar, value: Int, fromUser: Boolean) {
+                    val a = value.coerceAtLeast(ServerConfig.MIN_OVERLAY_ALPHA_PCT)
+                    aValueLabel.text = getString(R.string.overlay_alpha_fmt, a)
+                }
+                override fun onStartTrackingTouch(sb: SeekBar) {}
+                override fun onStopTrackingTouch(sb: SeekBar) {}
+            })
+        }
+        val aHelper = mutedHelper(getString(R.string.hint_overlay_alpha))
+
         // ── save ──────────────────────────────────────────────
         val save = Button(this).apply {
             text = getString(R.string.action_save)
@@ -152,6 +179,9 @@ class ServerConfigActivity : AppCompatActivity() {
                 )
                 ServerConfig.setCaptureTrainIters(
                     this@ServerConfigActivity, selectedIters,
+                )
+                ServerConfig.setCoverageOverlayAlphaPct(
+                    this@ServerConfigActivity, aSlider.progress,
                 )
                 val saved = ServerConfig.studioUrl(this@ServerConfigActivity).orEmpty()
                 if (saved != raw) {
@@ -180,6 +210,10 @@ class ServerConfigActivity : AppCompatActivity() {
         root.addView(tiValueLabel)
         root.addView(presetRow)
         root.addView(tiHelper)
+        root.addView(aSection)
+        root.addView(aValueLabel)
+        root.addView(aSlider)
+        root.addView(aHelper)
         root.addView(save)
         setContentView(root)
 
@@ -187,14 +221,14 @@ class ServerConfigActivity : AppCompatActivity() {
         // params are the LinearLayout-owned ones (they're
         // ViewGroup.LayoutParams during the apply{} call above and
         // don't have topMargin / bottomMargin fields).
-        listOf(urlHelper, fpsHelper, qHelper, tiHelper).forEach { v ->
+        listOf(urlHelper, fpsHelper, qHelper, tiHelper, aHelper).forEach { v ->
             (v.layoutParams as LinearLayout.LayoutParams).apply {
                 topMargin = (4 * resources.displayMetrics.density).toInt()
                 bottomMargin = (16 * resources.displayMetrics.density).toInt()
                 v.layoutParams = this
             }
         }
-        listOf(fpsSection, qSection, tiSection).forEach { v ->
+        listOf(fpsSection, qSection, tiSection, aSection).forEach { v ->
             (v.layoutParams as LinearLayout.LayoutParams).apply {
                 topMargin = (16 * resources.displayMetrics.density).toInt()
                 v.layoutParams = this

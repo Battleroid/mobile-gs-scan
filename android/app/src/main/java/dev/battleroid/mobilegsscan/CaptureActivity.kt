@@ -55,10 +55,10 @@ import javax.microedition.khronos.opengles.GL10
  *      instead of the browser. CaptureDetailActivity polls
  *      /api/captures + /api/scenes for live job state.
  *
- * Capture rate + JPEG quality are read once at activity start from
- * ServerConfig and passed to the ARCaptureSession constructor; the
- * user changes them via the Settings screen, and the next session
- * picks up the new values.
+ * Capture rate, JPEG quality, and coverage-overlay alpha are read
+ * once at activity start from ServerConfig and pushed into the
+ * relevant components; the user changes them via the Settings
+ * screen, and the next session picks up the new values.
  */
 class CaptureActivity : AppCompatActivity() {
     companion object {
@@ -87,6 +87,10 @@ class CaptureActivity : AppCompatActivity() {
     private var captureName: String? = null
     private var sceneId: String? = null
 
+    // Snapshot at activity start; Settings changes mid-session
+    // don't take effect until the next capture session.
+    private var overlayAlpha: Float = 0.7f
+
     private var receivedCount = 0
     private var droppedCount = 0
     private var coverageHudCounter = 0
@@ -107,6 +111,9 @@ class CaptureActivity : AppCompatActivity() {
             finish()
             return
         }
+
+        overlayAlpha = ServerConfig.coverageOverlayAlphaFloat(this)
+        coverage.setAlpha(overlayAlpha)
 
         binding.btnFinish.setOnClickListener { finishCapture() }
         binding.btnStart.setOnClickListener { onStartCaptureTapped() }
@@ -427,6 +434,13 @@ class CaptureActivity : AppCompatActivity() {
             GLES20.glClearColor(0f, 0f, 0f, 1f)
             background.createOnGlThread()
             coverage.createOnGlThread()
+            // Push the saved alpha after createOnGlThread so the
+            // first frame already reflects the user's preference.
+            // setAlpha is thread-safe; the call from onCreate above
+            // is the source of truth, this just makes the
+            // GL-side state consistent regardless of which path
+            // assigned the field first.
+            coverage.setAlpha(overlayAlpha)
             arSession?.setTextureName(background.textureId)
         }
 

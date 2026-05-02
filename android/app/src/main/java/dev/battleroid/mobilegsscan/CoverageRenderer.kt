@@ -36,7 +36,8 @@ import java.nio.FloatBuffer
  *   3. draw(viewMatrix, projMatrix) — called every render frame
  *      after the camera background is drawn. Rebuilds the VBO from
  *      the observation map if dirty, then renders GL_POINTS with
- *      depth test enabled.
+ *      depth test enabled and alpha blending so the camera image
+ *      shows through translucent dots.
  *
  * Single GL VBO + a flat hashmap: at the typical few-thousand-point
  * scale ARCore returns, the per-frame rebuild is comfortably under
@@ -58,7 +59,10 @@ class CoverageRenderer {
         // for splatfacto to triangulate a reasonable gaussian.
         private const val WELL_COVERED_THRESHOLD = 3
 
-        // Color buckets. RGBA, all alpha=1.
+        // Color buckets. RGBA, all alpha=1; the global u_Alpha
+        // uniform multiplies in the fragment shader so the user
+        // can tune overall translucency from Settings without
+        // touching the per-bucket palette.
         private val SPARSE = floatArrayOf(1.0f, 0.4f, 0.4f, 1.0f)    // red
         private val MODERATE = floatArrayOf(1.0f, 1.0f, 0.4f, 1.0f)  // yellow
         private val COVERED = floatArrayOf(0.4f, 1.0f, 0.5f, 1.0f)   // green
@@ -68,6 +72,11 @@ class CoverageRenderer {
         // bigger. Clamp 2..16 keeps very-close and very-far points
         // visible without ballooning into giant blobs.
         private const val POINT_BASE_SIZE = 30.0f
+
+        // Default alpha if the activity never calls setAlpha. 0.7
+        // matches the user-configurable default in ServerConfig
+        // (DEFAULT_OVERLAY_ALPHA_PCT = 70).
+        private const val DEFAULT_ALPHA = 0.7f
 
         private const val VERTEX_SHADER = """
             uniform mat4 u_ViewProj;
@@ -84,9 +93,10 @@ class CoverageRenderer {
 
         private const val FRAGMENT_SHADER = """
             precision mediump float;
+            uniform float u_Alpha;
             varying vec4 v_Color;
             void main() {
-                gl_FragColor = v_Color;
+                gl_FragColor = vec4(v_Color.rgb, v_Color.a * u_Alpha);
             }
         """
     }
@@ -99,10 +109,13 @@ class CoverageRenderer {
     private var colorAttrib: Int = 0
     private var viewProjUniform: Int = 0
     private var baseSizeUniform: Int = 0
+    private var alphaUniform: Int = 0
 
     private var vbo: Int = 0
     private var pointCount: Int = 0
     private var dirty: Boolean = false
+
+    @Volatile private var alpha: Float = DEFAULT_ALPHA
 
     // ARCore-stable point id → cumulative observation count.
     private val observations = HashMap<Long, Int>()
@@ -119,6 +132,7 @@ class CoverageRenderer {
         colorAttrib = GLES20.glGetAttribLocation(program, "a_Color")
         viewProjUniform = GLES20.glGetUniformLocation(program, "u_ViewProj")
         baseSizeUniform = GLES20.glGetUniformLocation(program, "u_BaseSize")
+        alphaUniform = GLES20.glGetUniformLocation(program, "u_Alpha")
 
         val handles = IntArray(1)
         GLES20.glGenBuffers(1, handles, 0)
@@ -133,6 +147,15 @@ class CoverageRenderer {
             GLES20.GL_DYNAMIC_DRAW,
         )
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
+    }
+
+    /**
+     * Set the global per-fragment alpha multiplier in [0, 1]. Safe
+     * to call from any thread; the value is read once per draw
+     * call. Out-of-range values are clamped.
+     */
+    fun setAlpha(a: Float) {
+        alpha = a.coerceIn(0f, 1f)
     }
 
     /**
@@ -178,6 +201,7 @@ class CoverageRenderer {
         GLES20.glUseProgram(program)
         GLES20.glUniformMatrix4fv(viewProjUniform, 1, false, viewProjMatrix, 0)
         GLES20.glUniform1f(baseSizeUniform, POINT_BASE_SIZE)
+        GLES20.glUniform1f(alphaUniform, alpha)
 
         // Depth test on so points behind closer geometry will be
         // occluded once we have closer geometry. The camera quad
@@ -185,6 +209,13 @@ class CoverageRenderer {
         // sensible baseline for future overlay layers.
         GLES20.glEnable(GLES20.GL_DEPTH_TEST)
         GLES20.glDepthMask(true)
+
+        // Alpha blending so the camera image shows through the
+        // dots. Without GL_BLEND the fragment-color alpha would be
+        // ignored and dots would always be opaque regardless of
+        // u_Alpha.
+        GLES20.glEnable(GLES20.GL_BLEND)
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
 
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vbo)
         GLES20.glVertexAttribPointer(
@@ -201,6 +232,9 @@ class CoverageRenderer {
         GLES20.glDisableVertexAttribArray(posAttrib)
         GLES20.glDisableVertexAttribArray(colorAttrib)
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
+        // Restore default GL state. Other renderers in the chain
+        // assume blending is off unless they enable it themselves.
+        GLES20.glDisable(GLES20.GL_BLEND)
     }
 
     fun coverageStats(): CoverageStats {
