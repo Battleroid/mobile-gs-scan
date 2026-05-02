@@ -28,9 +28,27 @@ async def run_train(
     train_dir = scene_dir / "train"
     train_dir.mkdir(parents=True, exist_ok=True)
 
+    # Distinguish the two stub triggers explicitly so the user can
+    # tell from the progress message + result blob WHY the training
+    # ran in stub mode. The previous "no nerfstudio installed" copy
+    # fired regardless of which condition tripped, which made it
+    # impossible to debug remote setups (nerfstudio missing? sfm
+    # output missing? both?).
     sfm_dir = scene_dir / "sfm"
-    if (sfm_dir / "synthetic.json").exists() or not shutil.which("ns-train"):
-        return await _run_stub(train_dir=train_dir, iters=iters, progress=progress)
+    if (sfm_dir / "synthetic.json").exists():
+        return await _run_stub(
+            train_dir=train_dir,
+            iters=iters,
+            progress=progress,
+            reason="sfm step produced no real reconstruction",
+        )
+    if not shutil.which("ns-train"):
+        return await _run_stub(
+            train_dir=train_dir,
+            iters=iters,
+            progress=progress,
+            reason="ns-train not on PATH (nerfstudio not installed in worker image)",
+        )
 
     return await _run_splatfacto(
         scene_dir=scene_dir, train_dir=train_dir, iters=iters, progress=progress
@@ -99,14 +117,24 @@ def _find_latest_config(train_dir: Path) -> Path | None:
 
 
 async def _run_stub(
-    *, train_dir: Path, iters: int, progress: ProgressCb
+    *,
+    train_dir: Path,
+    iters: int,
+    progress: ProgressCb,
+    reason: str = "stub",
 ) -> dict:
-    """Synthetic checkpoint. Walks the progress bar so the UI animates."""
-    await progress(0.0, "train: synthetic (no nerfstudio installed)")
+    """Synthetic checkpoint. Walks the progress bar so the UI animates.
+
+    `reason` is surfaced in both the progress message and the result
+    blob so anyone debugging a stub run can see WHY it stubbed (sfm
+    didn't produce real data vs. ns-train binary missing) without
+    grepping container logs.
+    """
+    await progress(0.0, f"train: synthetic ({reason})")
     steps = 20
     for i in range(1, steps + 1):
         await asyncio.sleep(0.2)
         await progress(i / steps, f"train: synthetic step {i}/{steps}")
     marker = train_dir / "synthetic.json"
-    marker.write_text(json.dumps({"iters": iters, "stub": True}))
-    return {"stub": True, "iters": iters}
+    marker.write_text(json.dumps({"iters": iters, "stub": True, "reason": reason}))
+    return {"stub": True, "iters": iters, "reason": reason}
