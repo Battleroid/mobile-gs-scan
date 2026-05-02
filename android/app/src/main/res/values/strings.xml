@@ -45,6 +45,16 @@
     <string name="hint_overlay_alpha">how solid the AR coverage dots are. lower lets more of the camera image show through. 70%% is the default.</string>
     <string name="overlay_alpha_fmt">%1$d%%</string>
 
+    <!-- Settings: AR overlay style picker. Two-button section
+         that picks which overlay the capture screen draws on top
+         of the camera preview. Mutually exclusive — capture
+         activity instantiates exactly one renderer per session. -->
+    <string name="label_overlay_style">AR overlay style</string>
+    <string name="hint_overlay_style">surface points uses ARCore feature points (lighter, runs everywhere). depth mesh is a Pixel-class prototype that builds a triangle mesh from ARCore\'s depth camera each frame — you may decide it isn\'t worth the noise. on devices without depth support the capture screen falls back to surface points.</string>
+    <string name="overlay_style_points">Surface points</string>
+    <string name="overlay_style_depth_mesh">Depth mesh (experimental)</string>
+    <string name="selected_overlay_style_fmt">selected: %1$s</string>
+
     <!-- home screen status indicator -->
     <string name="status_online">studio: online</string>
     <string name="status_offline">studio: offline</string>
@@ -92,10 +102,11 @@
     <string name="hint_start_capture">aim the camera at your subject\nthen tap Start when ready</string>
 
     <!-- Capture screen coverage HUD. Top-centre overlay updated
-         from CoverageRenderer.coverageStats(). Format string takes
-         (well-covered-percent, total-points). -->
+         from CoverageRenderer.coverageStats() (Phase 1 points) or
+         DepthMeshRenderer.stats() (Phase 3 mesh prototype). -->
     <string name="coverage_initial">0%% covered</string>
     <string name="coverage_status_fmt">%1$d%% covered · %2$d points</string>
+    <string name="mesh_status_fmt">depth mesh · %1$d tris</string>
 
     <!-- Native capture-detail / job-detail screens. Replaces the
          old AlertDialog from MainActivity and the
