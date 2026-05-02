@@ -57,7 +57,12 @@ import java.nio.ShortBuffer
  *     exposes `Frame.transformCoordinates2d` for the precise
  *     mapping but we use the simpler approach here.
  *
- *   - GLES 2.0 only, single-pass, single dynamic VBO + IBO.
+ *   - GLES 2.0 only, single-pass, single dynamic VBO + IBO with
+ *     16-bit (uint16) indices — see [MAX_VERTICES] for why we
+ *     cap below the uint16 ceiling. Switching to
+ *     `OES_element_index_uint` (32-bit indices) would let us
+ *     unlock higher-res depth streams, but isn't worth the
+ *     complexity for the prototype.
  */
 class DepthMeshRenderer {
     companion object {
@@ -83,10 +88,19 @@ class DepthMeshRenderer {
         private const val MIN_DEPTH_M = 0.15f
         private const val MAX_DEPTH_M = 8.0f
 
-        // Hard caps so a malformed depth image can't blow past
-        // pre-allocated buffer sizes. At 640×480 / stride 2 we'd
-        // hit ~76800 verts; cap a touch above that.
-        private const val MAX_VERTICES = 100_000
+        // Hard cap on the per-frame vertex count. We use uint16
+        // (GL_UNSIGNED_SHORT) indices — addressing range is
+        // 0..65535. Going past that wraps and silently corrupts
+        // the mesh (codex flagged this on the original PR). Cap
+        // at 65000 to leave a small safety margin.
+        //
+        // 320×180 depth at SAMPLE_STRIDE=2 → 14400 verts (well
+        // under). 640×480 at SAMPLE_STRIDE=2 → 76800 verts (over,
+        // would be dropped by the gridSize > MAX_VERTICES guard
+        // below). If we ever ship on a higher-res depth stream
+        // we'd either bump SAMPLE_STRIDE to 3+ or move to 32-bit
+        // indices via OES_element_index_uint.
+        private const val MAX_VERTICES = 65_000
         // Wireframe emits 5 edges per grid quad (top, right,
         // bottom, left, diagonal) × 2 indices/edge = 10 indices
         // per quad. Worst-case quad count ≈ MAX_VERTICES, so
@@ -256,9 +270,12 @@ class DepthMeshRenderer {
         val gridH = (depthH + SAMPLE_STRIDE - 1) / SAMPLE_STRIDE
         val gridSize = gridW * gridH
         if (gridSize > MAX_VERTICES) {
-            // Defensive: shouldn't happen with our stride + typical
-            // depth resolutions, but better to drop the frame than
-            // blow the VBO.
+            // Grid would overflow our 16-bit index range. Drop the
+            // frame; on a higher-res depth stream this means the
+            // user just sees no mesh until they move closer or we
+            // bump SAMPLE_STRIDE / move to 32-bit indices. ARCore
+            // depth on Pixel 10 Pro is 320×180 at the moment, so
+            // this branch is dead in practice.
             indexCount = 0
             vertexCount = 0
             return
