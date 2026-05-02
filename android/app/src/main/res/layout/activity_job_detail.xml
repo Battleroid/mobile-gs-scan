@@ -1,0 +1,230 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:orientation="vertical"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
+
+        <!-- Top bar: back button + job kind. -->
+        <LinearLayout
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:padding="16dp"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <Button
+                android:id="@+id/btnBack"
+                android:text="@string/action_back"
+                android:layout_marginEnd="12dp"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+
+            <TextView
+                android:id="@+id/kind"
+                android:layout_weight="1"
+                android:textColor="@color/fg"
+                android:textSize="18sp"
+                android:textStyle="bold"
+                android:fontFamily="monospace"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:text="" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:orientation="vertical"
+            android:padding="16dp"
+            android:background="@color/surface"
+            android:layout_marginStart="16dp"
+            android:layout_marginEnd="16dp"
+            android:layout_marginBottom="16dp"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <!-- Status row. -->
+            <LinearLayout
+                android:orientation="horizontal"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content">
+                <TextView
+                    android:layout_width="110dp"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/muted"
+                    android:fontFamily="monospace"
+                    android:text="@string/detail_status_label" />
+                <TextView
+                    android:id="@+id/statusValue"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/fg"
+                    android:fontFamily="monospace"
+                    android:text="" />
+            </LinearLayout>
+
+            <!-- Progress bar + percentage label side by side. -->
+            <LinearLayout
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginTop="12dp"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content">
+                <ProgressBar
+                    android:id="@+id/progressBar"
+                    style="?android:attr/progressBarStyleHorizontal"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:max="100"
+                    android:progressTint="@color/accent" />
+                <TextView
+                    android:id="@+id/progressPercent"
+                    android:layout_marginStart="12dp"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/fg"
+                    android:fontFamily="monospace"
+                    android:textSize="12sp"
+                    android:text="" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/progressMsg"
+                android:layout_marginTop="4dp"
+                android:textColor="@color/muted"
+                android:fontFamily="monospace"
+                android:textSize="12sp"
+                android:visibility="gone"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="" />
+
+            <!-- Worker / lifecycle metadata. -->
+            <LinearLayout
+                android:orientation="horizontal"
+                android:layout_marginTop="12dp"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content">
+                <TextView
+                    android:layout_width="110dp"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/muted"
+                    android:fontFamily="monospace"
+                    android:text="@string/detail_claimed_by_label" />
+                <TextView
+                    android:id="@+id/claimedByValue"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/fg"
+                    android:fontFamily="monospace"
+                    android:singleLine="true"
+                    android:ellipsize="end"
+                    android:text="" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:orientation="horizontal"
+                android:layout_marginTop="8dp"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content">
+                <TextView
+                    android:layout_width="110dp"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/muted"
+                    android:fontFamily="monospace"
+                    android:text="@string/detail_started_label" />
+                <TextView
+                    android:id="@+id/startedValue"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/fg"
+                    android:fontFamily="monospace"
+                    android:singleLine="true"
+                    android:ellipsize="end"
+                    android:text="" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:orientation="horizontal"
+                android:layout_marginTop="8dp"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content">
+                <TextView
+                    android:layout_width="110dp"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/muted"
+                    android:fontFamily="monospace"
+                    android:text="@string/detail_completed_label" />
+                <TextView
+                    android:id="@+id/completedValue"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/fg"
+                    android:fontFamily="monospace"
+                    android:singleLine="true"
+                    android:ellipsize="end"
+                    android:text="" />
+            </LinearLayout>
+
+            <!-- Error row — hidden unless the job actually has one. -->
+            <LinearLayout
+                android:id="@+id/errorRow"
+                android:orientation="vertical"
+                android:layout_marginTop="12dp"
+                android:visibility="gone"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content">
+                <TextView
+                    android:textColor="@color/muted"
+                    android:fontFamily="monospace"
+                    android:text="@string/detail_error_label"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" />
+                <TextView
+                    android:id="@+id/errorValue"
+                    android:textColor="@color/danger"
+                    android:fontFamily="monospace"
+                    android:textSize="12sp"
+                    android:layout_marginTop="4dp"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="" />
+            </LinearLayout>
+
+            <!-- Result blob — hidden until the job has actually
+                 produced one. Pretty-printed JSON in monospace; the
+                 worker-specific shape isn't worth bespoke UI. -->
+            <LinearLayout
+                android:id="@+id/resultRow"
+                android:orientation="vertical"
+                android:layout_marginTop="12dp"
+                android:visibility="gone"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content">
+                <TextView
+                    android:textColor="@color/muted"
+                    android:fontFamily="monospace"
+                    android:text="@string/detail_result_label"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" />
+                <TextView
+                    android:id="@+id/resultValue"
+                    android:textColor="@color/fg"
+                    android:fontFamily="monospace"
+                    android:textSize="12sp"
+                    android:layout_marginTop="4dp"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="" />
+            </LinearLayout>
+        </LinearLayout>
+    </LinearLayout>
+</androidx.core.widget.NestedScrollView>

@@ -1,0 +1,222 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:orientation="vertical"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
+
+        <!-- Top bar: back button + capture name. Replaces the
+             AlertDialog title from the home-screen tap. -->
+        <LinearLayout
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:padding="16dp"
+            android:background="@color/bg"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <Button
+                android:id="@+id/btnBack"
+                android:text="@string/action_back"
+                android:layout_marginEnd="12dp"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+
+            <TextView
+                android:id="@+id/captureName"
+                android:layout_weight="1"
+                android:textColor="@color/fg"
+                android:textSize="18sp"
+                android:textStyle="bold"
+                android:fontFamily="monospace"
+                android:singleLine="true"
+                android:ellipsize="end"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:text="" />
+        </LinearLayout>
+
+        <!-- Capture status section. Static labels in muted color,
+             values in fg color, monospace throughout to match the
+             rest of the app. -->
+        <LinearLayout
+            android:orientation="vertical"
+            android:padding="16dp"
+            android:background="@color/surface"
+            android:layout_marginStart="16dp"
+            android:layout_marginEnd="16dp"
+            android:layout_marginTop="4dp"
+            android:layout_marginBottom="16dp"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <LinearLayout
+                android:orientation="horizontal"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content">
+                <TextView
+                    android:layout_width="100dp"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/muted"
+                    android:fontFamily="monospace"
+                    android:text="@string/detail_status_label" />
+                <TextView
+                    android:id="@+id/statusValue"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/fg"
+                    android:fontFamily="monospace"
+                    android:text="" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:orientation="horizontal"
+                android:layout_marginTop="8dp"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content">
+                <TextView
+                    android:layout_width="100dp"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/muted"
+                    android:fontFamily="monospace"
+                    android:text="@string/detail_source_label" />
+                <TextView
+                    android:id="@+id/sourceValue"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/fg"
+                    android:fontFamily="monospace"
+                    android:text="" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:orientation="horizontal"
+                android:layout_marginTop="8dp"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content">
+                <TextView
+                    android:layout_width="100dp"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/muted"
+                    android:fontFamily="monospace"
+                    android:text="@string/detail_frames_label" />
+                <TextView
+                    android:id="@+id/framesValue"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/fg"
+                    android:fontFamily="monospace"
+                    android:text="" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:orientation="horizontal"
+                android:layout_marginTop="8dp"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content">
+                <TextView
+                    android:layout_width="100dp"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/muted"
+                    android:fontFamily="monospace"
+                    android:text="@string/detail_created_label" />
+                <TextView
+                    android:id="@+id/createdValue"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/fg"
+                    android:fontFamily="monospace"
+                    android:singleLine="true"
+                    android:ellipsize="end"
+                    android:text="" />
+            </LinearLayout>
+
+            <!-- Visible only when the capture has an error. -->
+            <LinearLayout
+                android:id="@+id/errorRow"
+                android:orientation="horizontal"
+                android:layout_marginTop="8dp"
+                android:visibility="gone"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content">
+                <TextView
+                    android:layout_width="100dp"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/muted"
+                    android:fontFamily="monospace"
+                    android:text="@string/detail_error_label" />
+                <TextView
+                    android:id="@+id/errorValue"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/danger"
+                    android:fontFamily="monospace"
+                    android:text="" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- Open viewer in browser. Hidden until the export
+             produces an artifact — we don't want to send the user
+             to a 404. Native splat rendering is its own can of
+             worms; the studio web UI's R3F viewer is the path of
+             least resistance for now. -->
+        <Button
+            android:id="@+id/btnViewerWeb"
+            android:text="@string/action_open_viewer_web"
+            android:layout_marginStart="16dp"
+            android:layout_marginEnd="16dp"
+            android:layout_marginBottom="16dp"
+            android:padding="12dp"
+            android:backgroundTint="@color/accent"
+            android:textColor="@android:color/black"
+            android:visibility="gone"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+
+        <!-- Empty state shown until /api/captures/{id} returns a
+             non-null scene_id (i.e. until the user finalizes and
+             the server creates the scene record). -->
+        <TextView
+            android:id="@+id/scenePlaceholder"
+            android:text="@string/detail_no_scene"
+            android:textColor="@color/muted"
+            android:padding="32dp"
+            android:gravity="center"
+            android:fontFamily="monospace"
+            android:textSize="13sp"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+
+        <!-- Pipeline jobs section. Header + RecyclerView. Hidden
+             until the scene exists. -->
+        <TextView
+            android:id="@+id/jobsHeader"
+            android:text="@string/detail_jobs_header"
+            android:textColor="@color/muted"
+            android:layout_marginStart="16dp"
+            android:layout_marginEnd="16dp"
+            android:layout_marginTop="8dp"
+            android:fontFamily="monospace"
+            android:textSize="12sp"
+            android:visibility="gone"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/jobs"
+            android:layout_marginStart="16dp"
+            android:layout_marginEnd="16dp"
+            android:layout_marginBottom="16dp"
+            android:nestedScrollingEnabled="false"
+            android:visibility="gone"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+    </LinearLayout>
+</androidx.core.widget.NestedScrollView>

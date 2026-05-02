@@ -28,8 +28,8 @@ import kotlinx.coroutines.launch
  *      dot / "online" label or a red dot / "offline" label.
  *   2. Sessions list — polls /api/captures every 5s, renders rows
  *      via [CaptureAdapter]. Pull-to-refresh forces an immediate
- *      reload. Tapping a row opens an info dialog with a "view in
- *      studio" deep link to the web UI.
+ *      reload. Tapping a row opens [CaptureDetailActivity] for a
+ *      native session view (status, jobs, artifacts).
  *   3. New capture — POSTs to /api/captures, then hands off to
  *      [CaptureActivity] with the freshly-issued capture id +
  *      pair_token. No QR pairing.
@@ -38,9 +38,7 @@ import kotlinx.coroutines.launch
  * [ServerConfig.studioUrl] is unset.
  *
  * Also handles the legacy https://<studio>/m/<token> deep link
- * intent for backwards compatibility with the web QR flow (which
- * still issues those URLs in PR-A; the web pairing UI is dropped
- * in PR-C).
+ * intent for backwards compatibility with the web QR flow.
  */
 class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
@@ -89,7 +87,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Legacy: if the user got here from a QR scan, route into
-        // CaptureActivity directly. Goes away in PR-C.
+        // CaptureActivity directly.
         handleDeepLink(intent)
     }
 
@@ -117,7 +115,7 @@ class MainActivity : AppCompatActivity() {
         pollJob = null
     }
 
-    // ── status / list rendering ───────────────────────────────────
+    // ── status / list rendering ──────────────────────────────
 
     private fun renderNoUrl() {
         binding.statusText.text = getString(R.string.status_no_url)
@@ -148,7 +146,7 @@ class MainActivity : AppCompatActivity() {
         binding.empty.text = getString(R.string.empty_no_captures)
     }
 
-    // ── polling ───────────────────────────────────────────────────
+    // ── polling ────────────────────────────────────────
 
     private fun startPolling() {
         pollJob?.cancel()
@@ -176,7 +174,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ── actions ───────────────────────────────────────────────────
+    // ── actions ────────────────────────────────────────
 
     private fun createNewCapture() {
         val c = client ?: return
@@ -206,26 +204,16 @@ class MainActivity : AppCompatActivity() {
 
     private fun onCaptureClicked(c: StudioClient.Capture) {
         val baseUrl = ServerConfig.studioUrl(this) ?: return
-        val msg = buildString {
-            append("id: ${c.id}\n")
-            append("source: ${c.source}\n")
-            append("status: ${c.status}\n")
-            append("frames: ${c.frame_count}")
-            if (c.dropped_count > 0) append(" (${c.dropped_count} dropped)")
-            append("\n")
-            if (c.scene_id != null) append("scene: ${c.scene_id}\n")
-            if (c.error != null) append("error: ${c.error}\n")
-            append("created: ${c.created_at}")
-        }
-        AlertDialog.Builder(this)
-            .setTitle(c.name)
-            .setMessage(msg)
-            .setPositiveButton("open in studio") { _, _ ->
-                val url = "$baseUrl/captures/${c.id}"
-                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-            }
-            .setNegativeButton("close", null)
-            .show()
+        // Native session-detail screen replaces the previous
+        // AlertDialog. Status / frames / pipeline jobs / artifacts
+        // all live there now.
+        startActivity(
+            Intent(this, CaptureDetailActivity::class.java).apply {
+                putExtra(CaptureDetailActivity.EXTRA_BASE_URL, baseUrl)
+                putExtra(CaptureDetailActivity.EXTRA_CAPTURE_ID, c.id)
+                putExtra(CaptureDetailActivity.EXTRA_CAPTURE_NAME, c.name)
+            },
+        )
     }
 
     private fun showError(msg: String) {
@@ -264,8 +252,8 @@ class CaptureAdapter(
 
     fun submit(list: List<StudioClient.Capture>) {
         items = list
-        // Cheap & correct for a list this small. PR-B can switch to
-        // DiffUtil if scroll performance becomes an issue.
+        // Cheap & correct for a list this small. Switch to DiffUtil
+        // if scroll performance becomes an issue.
         notifyDataSetChanged()
     }
 

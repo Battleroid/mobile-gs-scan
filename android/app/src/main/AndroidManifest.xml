@@ -75,5 +75,15 @@
         <activity
             android:name=".ServerConfigActivity"
             android:exported="false" />
+
+        <activity
+            android:name=".CaptureDetailActivity"
+            android:exported="false"
+            android:parentActivityName=".MainActivity" />
+
+        <activity
+            android:name=".JobDetailActivity"
+            android:exported="false"
+            android:parentActivityName=".CaptureDetailActivity" />
     </application>
 </manifest>
