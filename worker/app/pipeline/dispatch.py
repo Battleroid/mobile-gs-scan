@@ -1,7 +1,19 @@
 """Decide which jobs to enqueue when a capture is finalized.
 
-Mobile native → has ARCore poses → skip SfM, go straight to train.
-Mobile web / drag-drop → no poses → SfM first.
+Mobile native (has_pose=True) → SfM step writes a COLMAP-shaped
+  workspace from the phone's poses.jsonl (backend=arcore_native);
+  no real Glomap / COLMAP run.
+Mobile web / drag-drop (has_pose=False) → real SfM via
+  settings.sfm_backend (glomap by default, colmap as fallback).
+
+We always enqueue the SfM job (modulo settings.sfm_backend=='none')
+so every downstream step can rely on `scene_dir/sfm/` existing.
+Previously the has_pose=True branch skipped SfM entirely — but
+nothing else in the pipeline produced the COLMAP workspace train
+then needs, so train would crash on a missing directory. Routing
+has_pose through the SfM job with a different backend is the
+narrowest fix that keeps the dispatch shape (sfm → train → export
+→ mesh) consistent across both paths.
 
 PR #1 always enqueues a `mesh` job too, but worker-gs treats it as
 a no-op so the pipeline still completes. PR #2 fills it in with the
@@ -23,9 +35,23 @@ async def enqueue_pipeline(
     settings = get_settings()
     job_ids: list[str] = []
 
-    if not has_pose and settings.sfm_backend != "none":
+    backend: str | None
+    if has_pose:
+        # Phone capture with ARCore poses. The SfM job runs the
+        # arcore_native handler in app/pipeline/sfm.py, which
+        # converts poses.jsonl into a COLMAP-shaped workspace train
+        # can ingest, instead of running a real feature-based
+        # solver on a small handful of phone frames (which usually
+        # fails).
+        backend = "arcore_native"
+    elif settings.sfm_backend != "none":
+        backend = settings.sfm_backend
+    else:
+        backend = None
+
+    if backend is not None:
         sfm = await store.enqueue_job(
-            scene_id, JobKind.sfm, payload={"backend": settings.sfm_backend}
+            scene_id, JobKind.sfm, payload={"backend": backend}
         )
         job_ids.append(sfm.id)
 
