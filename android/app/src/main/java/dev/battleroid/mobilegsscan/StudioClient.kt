@@ -4,6 +4,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -19,6 +20,10 @@ import java.util.concurrent.TimeUnit
  *   2. Capture-session lifecycle:
  *        GET  /api/captures            — list for the home screen
  *        POST /api/captures            — start a phone-driven session
+ *        GET  /api/captures/{id}       — detail for the native
+ *                                       session screen
+ *        GET  /api/scenes/{id}         — scene + embedded jobs list
+ *        GET  /api/jobs/{id}           — single-job detail
  *
  * The WebSocket frame ingest is handled by StreamingClient. This
  * class is HTTP-only.
@@ -49,6 +54,48 @@ class StudioClient(private val baseUrl: String) {
     )
 
     @Serializable
+    data class JobView(
+        val id: String,
+        val kind: String,
+        val status: String,
+        val progress: Float = 0f,
+        val progress_msg: String? = null,
+        val error: String? = null,
+    )
+
+    @Serializable
+    data class Scene(
+        val id: String,
+        val capture_id: String,
+        val status: String,
+        val error: String? = null,
+        val ply_url: String? = null,
+        val spz_url: String? = null,
+        val jobs: List<JobView> = emptyList(),
+        val created_at: String,
+        val completed_at: String? = null,
+    )
+
+    @Serializable
+    data class JobDetail(
+        val id: String,
+        val scene_id: String,
+        val kind: String,
+        val status: String,
+        val progress: Float = 0f,
+        val progress_msg: String? = null,
+        val error: String? = null,
+        val claimed_by: String? = null,
+        val started_at: String? = null,
+        val completed_at: String? = null,
+        // result is a free-form dict server-side (worker-specific
+        // payload). Keep as raw JsonElement so we don't have to bake
+        // its shape into the client — the detail screen renders the
+        // pretty-printed text.
+        val result: JsonElement? = null,
+    )
+
+    @Serializable
     private data class CaptureCreate(
         val name: String,
         val source: String = "mobile_native",
@@ -70,6 +117,33 @@ class StudioClient(private val baseUrl: String) {
                 if (!res.isSuccessful) error("HTTP ${res.code}")
                 val body = res.body?.string().orEmpty()
                 json.decodeFromString<List<Capture>>(body)
+            }
+    }
+
+    suspend fun getCapture(id: String): Capture = withContext(Dispatchers.IO) {
+        http.newCall(Request.Builder().url("$baseUrl/api/captures/$id").build())
+            .execute()
+            .use { res ->
+                if (!res.isSuccessful) error("HTTP ${res.code}")
+                json.decodeFromString<Capture>(res.body?.string().orEmpty())
+            }
+    }
+
+    suspend fun getScene(id: String): Scene = withContext(Dispatchers.IO) {
+        http.newCall(Request.Builder().url("$baseUrl/api/scenes/$id").build())
+            .execute()
+            .use { res ->
+                if (!res.isSuccessful) error("HTTP ${res.code}")
+                json.decodeFromString<Scene>(res.body?.string().orEmpty())
+            }
+    }
+
+    suspend fun getJob(id: String): JobDetail = withContext(Dispatchers.IO) {
+        http.newCall(Request.Builder().url("$baseUrl/api/jobs/$id").build())
+            .execute()
+            .use { res ->
+                if (!res.isSuccessful) error("HTTP ${res.code}")
+                json.decodeFromString<JobDetail>(res.body?.string().orEmpty())
             }
     }
 

@@ -8,6 +8,8 @@
     <string name="action_new_capture">+ new capture</string>
     <string name="action_open_play_store">Open Play Store</string>
     <string name="action_cancel">Cancel</string>
+    <string name="action_back">Back</string>
+    <string name="action_open_viewer_web">Open viewer in browser</string>
 
     <!-- Settings: studio URL field. Hint reflects the auto-prefix
          behaviour in ServerConfig.normalize — bare hostname or IP
@@ -33,6 +35,26 @@
          preview to nudge them toward the Start button. -->
     <string name="capture_idle">idle — tap Start</string>
     <string name="hint_start_capture">aim the camera at your subject\nthen tap Start when ready</string>
+
+    <!-- Native capture-detail / job-detail screens. Replaces the
+         old AlertDialog from MainActivity and the
+         openProgressInBrowser hand-off from CaptureActivity. -->
+    <string name="detail_loading">loading…</string>
+    <string name="detail_status_label">status:</string>
+    <string name="detail_source_label">source:</string>
+    <string name="detail_frames_label">frames:</string>
+    <string name="detail_created_label">created:</string>
+    <string name="detail_error_label">error:</string>
+    <string name="detail_result_label">result:</string>
+    <string name="detail_claimed_by_label">claimed by:</string>
+    <string name="detail_started_label">started:</string>
+    <string name="detail_completed_label">completed:</string>
+    <string name="detail_jobs_header">PIPELINE JOBS</string>
+    <string name="detail_no_scene">capture not finalized yet — pipeline jobs will appear here once the capture is submitted for processing</string>
+    <string name="detail_unclaimed">(unclaimed)</string>
+    <string name="detail_frames_fmt">%1$d</string>
+    <string name="detail_frames_with_drops_fmt">%1$d (%2$d dropped)</string>
+    <string name="detail_progress_pct_fmt">%1$d%%</string>
 
     <!-- ARCore unsupported-device dialog. Triggered when
          ArCoreApk.checkAvailability returns

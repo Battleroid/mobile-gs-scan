@@ -46,9 +46,11 @@ import javax.microedition.khronos.opengles.GL10
  *      header, kicks off the heartbeat loop, and flips the
  *      captureGateActive flag so subsequent draws extract +
  *      transmit JPEG/pose data.
- *   6. On Finish (button or back after start), call
- *      streamer.finalize() and pop the activity to the web for
- *      progress tracking.
+ *   6. On Finish: send the WS finalize message, then route the
+ *      user to the native CaptureDetailActivity (stacked on top of
+ *      the home screen) so they land on the pipeline-progress view
+ *      instead of the browser. CaptureDetailActivity polls
+ *      /api/captures + /api/scenes for live job state.
  */
 class CaptureActivity : AppCompatActivity() {
     companion object {
@@ -75,14 +77,8 @@ class CaptureActivity : AppCompatActivity() {
     private var receivedCount = 0
     private var droppedCount = 0
 
-    // Avoid prompting the user to install Play Services for AR more
-    // than once per Activity lifetime. requestInstall takes a flag
-    // for this — we flip it after the first prompt.
     private var userRequestedArInstall = false
 
-    // Streaming gate. Off until the user taps Start; the renderer
-    // checks this every frame. AR session + preview run regardless
-    // so the user can aim before recording.
     @Volatile private var captureGateActive = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -100,8 +96,6 @@ class CaptureActivity : AppCompatActivity() {
 
         binding.btnFinish.setOnClickListener { finishCapture() }
         binding.btnStart.setOnClickListener { onStartCaptureTapped() }
-        // Disabled until we've resolved the capture record. Re-enabled
-        // by startArSession's coroutine once captureId is known.
         binding.btnStart.isEnabled = false
         binding.frameCounter.text = getString(R.string.capture_idle)
 
@@ -259,11 +253,6 @@ class CaptureActivity : AppCompatActivity() {
             finish()
             return
         }
-        // Texture binding belt-and-braces: if the GL surface came up
-        // before the AR session was ready, the renderer's
-        // arSession?.setTextureName call no-op'd. Re-bind here so
-        // session.update() has a valid OES target. Both code paths
-        // (surface-first, session-first) end up with the same wiring.
         if (background.textureId >= 0) {
             arSession?.setTextureName(background.textureId)
         }
@@ -288,19 +277,13 @@ class CaptureActivity : AppCompatActivity() {
             captureId = info.captureId
             captureName = info.captureName
             binding.sessionLabel.text = info.captureName
-            // Resolved — now the user can actually start capture.
             binding.btnStart.isEnabled = true
         }
     }
 
     private fun onStartCaptureTapped() {
         val cap = captureId
-        if (cap.isNullOrBlank()) {
-            // Defensive — button shouldn't be enabled before resolve
-            // completes, but if a user manages to double-tap during
-            // the flip, just no-op.
-            return
-        }
+        if (cap.isNullOrBlank()) return
         if (captureGateActive) return
 
         streamer = StreamingClient(
@@ -374,7 +357,7 @@ class CaptureActivity : AppCompatActivity() {
             }
             is StreamingClient.Event.Queued -> {
                 sceneId = evt.sceneId
-                openProgressInBrowser()
+                routeToCaptureDetail()
             }
             is StreamingClient.Event.Closed,
             is StreamingClient.Event.Failed -> Unit
@@ -383,20 +366,45 @@ class CaptureActivity : AppCompatActivity() {
 
     private fun finishCapture() {
         if (!captureGateActive) {
-            // Never started — just back out without poking the server.
+            // Never started — no streamer to finalize, just back out.
             finish()
             return
         }
         streamer?.finalize("user")
+        // Give the server a beat to ack the finalize before we hop
+        // to the detail screen. If the WS round-trip beats the
+        // delay, handleStreamEvent will fire routeToCaptureDetail
+        // first and the postDelayed will short-circuit on the
+        // isFinishing() guard inside.
         binding.glSurface.postDelayed({
-            if (sceneId == null) openProgressInBrowser()
+            if (!isFinishing) routeToCaptureDetail()
         }, 5_000)
     }
 
-    private fun openProgressInBrowser() {
+    /**
+     * Hop the user to the native CaptureDetailActivity stacked on
+     * top of MainActivity. Replaces the previous behaviour of
+     * opening /captures/<id> in a browser.
+     *
+     * Intent flags:
+     *   - CLEAR_TOP + SINGLE_TOP on the MainActivity intent so we
+     *     reuse the existing instance instead of stacking a duplicate.
+     *   - NEW_TASK is implicit because we're starting from an
+     *     activity context with the MainActivity flags.
+     */
+    private fun routeToCaptureDetail() {
         val cap = captureId ?: return
-        val url = "$baseUrl/captures/$cap"
-        startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)))
+        val home = Intent(this, MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        }
+        val detail = Intent(this, CaptureDetailActivity::class.java).apply {
+            putExtra(CaptureDetailActivity.EXTRA_BASE_URL, baseUrl)
+            putExtra(CaptureDetailActivity.EXTRA_CAPTURE_ID, cap)
+            putExtra(CaptureDetailActivity.EXTRA_CAPTURE_NAME, captureName.orEmpty())
+        }
+        // Stack: MainActivity (root) <- CaptureDetailActivity (top).
+        // Back from detail returns to home.
+        startActivities(arrayOf(home, detail))
         finish()
     }
 
@@ -404,11 +412,6 @@ class CaptureActivity : AppCompatActivity() {
         override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
             GLES20.glClearColor(0f, 0f, 0f, 1f)
             background.createOnGlThread()
-            // First half of the texture-binding handshake. If the
-            // session was created first, this connects the freshly-
-            // generated texture id to it. If the session is created
-            // later (permission flow async path), startArSession will
-            // handle the second half.
             arSession?.setTextureName(background.textureId)
         }
 
@@ -423,9 +426,6 @@ class CaptureActivity : AppCompatActivity() {
             val frame = ar.update() ?: return
             background.updateTexCoords(frame)
             background.draw()
-            // Streaming gate: only extract + transmit JPEG/pose data
-            // when the user has tapped Start. Preview keeps running
-            // either way — they need to see what they're aiming at.
             if (!captureGateActive) return
             val captured = ar.pollFrameData(frame) ?: return
             streamer?.sendFrame(
