@@ -8,11 +8,14 @@ import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.os.Bundle
 import android.view.View
+import android.view.ViewGroup
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import com.google.ar.core.ArCoreApk
 import dev.battleroid.mobilegsscan.databinding.ActivityCaptureBinding
@@ -72,6 +75,12 @@ class CaptureActivity : AppCompatActivity() {
         // frames at 10 fps is ~0.4s, more than fast enough for the
         // user without thrashing the UI thread.
         private const val HUD_REFRESH_EVERY = 4
+        // Baseline top margin for the three top-aligned HUD
+        // TextViews, in dp. Mirrors the layout_marginTop /
+        // layout_margin="20dp" attribute in activity_capture.xml;
+        // we add the systemBars top inset on top so they don't
+        // slide under the status bar / camera cutout.
+        private const val HUD_BASE_TOP_DP = 20
     }
 
     private lateinit var binding: ActivityCaptureBinding
@@ -125,7 +134,42 @@ class CaptureActivity : AppCompatActivity() {
         binding.glSurface.setRenderer(Renderer())
         binding.glSurface.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
 
+        // Push the top HUD elements below the system status bar /
+        // camera-cutout inset. The activity runs edge-to-edge so
+        // the camera preview can fill the display; without this
+        // the three TextViews anchored at the top of the
+        // FrameLayout slide under the status bar and become
+        // unreadable on Android 15+ / Pixel-class devices. We
+        // only adjust HUD margins, not the GLSurfaceView, so the
+        // camera preview itself stays full-screen.
+        applyHudInsets()
+
         ensurePermissionsThenConnect()
+    }
+
+    private fun applyHudInsets() {
+        val baseTopPx = (HUD_BASE_TOP_DP * resources.displayMetrics.density).toInt()
+        val topAnchored = listOf(
+            binding.sessionLabel,
+            binding.frameCounter,
+            binding.coverageHud,
+        )
+        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->
+            val sys = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            val cutout = insets.getInsets(WindowInsetsCompat.Type.displayCutout())
+            // Take the larger of the system-bars and cutout top
+            // insets — gesture-nav phones sometimes expose the
+            // cutout via the cutout type rather than the
+            // status-bar type.
+            val topInset = maxOf(sys.top, cutout.top)
+            topAnchored.forEach { v ->
+                val lp = v.layoutParams as? ViewGroup.MarginLayoutParams
+                    ?: return@forEach
+                lp.topMargin = baseTopPx + topInset
+                v.layoutParams = lp
+            }
+            insets
+        }
     }
 
     override fun onResume() {
