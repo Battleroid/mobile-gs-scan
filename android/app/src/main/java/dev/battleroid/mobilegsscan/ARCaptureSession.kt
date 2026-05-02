@@ -9,6 +9,7 @@ import com.google.ar.core.Camera
 import com.google.ar.core.CameraIntrinsics
 import com.google.ar.core.Config
 import com.google.ar.core.Frame
+import com.google.ar.core.PointCloud
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
 import com.google.ar.core.exceptions.NotYetAvailableException
@@ -25,6 +26,9 @@ import java.io.ByteArrayOutputStream
  *   - exposes [pollFrameData] which extracts the most recent tracked
  *     pose + intrinsics + JPEG-encoded RGB image from a Frame,
  *     throttled to a target frame rate.
+ *   - exposes [viewMatrix] / [projectionMatrix] / [acquirePointCloud]
+ *     so overlay renderers can project and color world-space
+ *     geometry without reaching into the underlying [Session].
  *
  * Designed to be driven from the `GLSurfaceView` render thread.
  */
@@ -64,6 +68,33 @@ class ARCaptureSession(
     } catch (e: Exception) {
         null
     }
+
+    /**
+     * Column-major 4x4 view matrix (world → camera) for [frame].
+     * Used by overlay renderers (e.g. CoverageRenderer) to project
+     * world-space geometry into the camera view.
+     */
+    fun viewMatrix(frame: Frame): FloatArray =
+        FloatArray(16).also { frame.camera.getViewMatrix(it, 0) }
+
+    /**
+     * Column-major 4x4 perspective-projection matrix for [frame],
+     * matching the same near/far planes the camera quad uses.
+     */
+    fun projectionMatrix(
+        frame: Frame,
+        near: Float = 0.05f,
+        far: Float = 100f,
+    ): FloatArray =
+        FloatArray(16).also { frame.camera.getProjectionMatrix(it, 0, near, far) }
+
+    /**
+     * Acquire the tracked feature point cloud from [frame]. The
+     * returned [PointCloud] is `Closeable` — caller must close it
+     * (idiomatic Kotlin: `acquirePointCloud(frame).use { ... }`).
+     */
+    fun acquirePointCloud(frame: Frame): PointCloud =
+        frame.acquirePointCloud()
 
     /**
      * Extract pose + intrinsics + JPEG from a Frame returned by

@@ -38,14 +38,17 @@ import javax.microedition.khronos.opengles.GL10
  *      the GL preview.
  *   4. Render: every frame, advance ARCore, paint the camera quad
  *      via BackgroundRenderer so the user sees what they're aiming
- *      at. This loop runs from the moment the GL surface is ready,
- *      independent of whether the user has tapped Start.
+ *      at, then draw the [CoverageRenderer] overlay on top so the
+ *      user sees Scaniverse-style colored dots on the actual
+ *      surfaces showing how thoroughly each region has been
+ *      captured.
  *   5. Streaming gate: frame ingestion is OFF until the user taps
  *      "Start capture". This lets them aim and frame the subject
  *      first. Tapping Start opens the WebSocket, sends the session
  *      header, kicks off the heartbeat loop, and flips the
  *      captureGateActive flag so subsequent draws extract +
- *      transmit JPEG/pose data.
+ *      transmit JPEG/pose data AND record the frame's point cloud
+ *      observations into the coverage overlay.
  *   6. On Finish: send the WS finalize message, then route the
  *      user to the native CaptureDetailActivity (stacked on top of
  *      the home screen) so they land on the pipeline-progress view
@@ -65,11 +68,16 @@ class CaptureActivity : AppCompatActivity() {
         const val EXTRA_CAPTURE_NAME = "capture_name"
         private const val PERM_REQ = 0xC4
         private const val PLAY_SERVICES_FOR_AR_PKG = "com.google.ar.core"
+        // Update the coverage HUD every N captured frames — every 4
+        // frames at 10 fps is ~0.4s, more than fast enough for the
+        // user without thrashing the UI thread.
+        private const val HUD_REFRESH_EVERY = 4
     }
 
     private lateinit var binding: ActivityCaptureBinding
     private var arSession: ARCaptureSession? = null
     private val background = BackgroundRenderer()
+    private val coverage = CoverageRenderer()
     private var streamer: StreamingClient? = null
     private var heartbeatJob: Job? = null
 
@@ -81,6 +89,7 @@ class CaptureActivity : AppCompatActivity() {
 
     private var receivedCount = 0
     private var droppedCount = 0
+    private var coverageHudCounter = 0
 
     private var userRequestedArInstall = false
 
@@ -103,6 +112,7 @@ class CaptureActivity : AppCompatActivity() {
         binding.btnStart.setOnClickListener { onStartCaptureTapped() }
         binding.btnStart.isEnabled = false
         binding.frameCounter.text = getString(R.string.capture_idle)
+        binding.coverageHud.text = getString(R.string.coverage_initial)
 
         binding.glSurface.setEGLContextClientVersion(2)
         binding.glSurface.setRenderer(Renderer())
@@ -252,10 +262,6 @@ class CaptureActivity : AppCompatActivity() {
 
     private fun startArSession() {
         try {
-            // Capture rate + jpeg quality come from Settings (with
-            // sensible defaults if the user hasn't touched them).
-            // ARCaptureSession's rate-limit gate uses targetIntervalMs
-            // directly; floor at 33ms (~30 fps) inside ServerConfig.
             arSession = ARCaptureSession(
                 context = this,
                 targetIntervalMs = ServerConfig.captureIntervalMs(this),
@@ -403,10 +409,24 @@ class CaptureActivity : AppCompatActivity() {
         finish()
     }
 
+    private fun maybeUpdateCoverageHud() {
+        coverageHudCounter++
+        if (coverageHudCounter % HUD_REFRESH_EVERY != 0) return
+        val stats = coverage.coverageStats()
+        runOnUiThread {
+            binding.coverageHud.text = getString(
+                R.string.coverage_status_fmt,
+                stats.wellCoveredPct,
+                stats.totalPoints,
+            )
+        }
+    }
+
     private inner class Renderer : GLSurfaceView.Renderer {
         override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
             GLES20.glClearColor(0f, 0f, 0f, 1f)
             background.createOnGlThread()
+            coverage.createOnGlThread()
             arSession?.setTextureName(background.textureId)
         }
 
@@ -419,10 +439,35 @@ class CaptureActivity : AppCompatActivity() {
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
             val ar = arSession ?: return
             val frame = ar.update() ?: return
+
             background.updateTexCoords(frame)
             background.draw()
+
+            // Coverage overlay rides on top of the camera quad. Uses
+            // ARCore's view + projection so the dots project onto
+            // the surfaces ARCore is tracking, not into thin air.
+            coverage.draw(ar.viewMatrix(frame), ar.projectionMatrix(frame))
+
             if (!captureGateActive) return
             val captured = ar.pollFrameData(frame) ?: return
+
+            // Record this frame's tracked feature points BEFORE
+            // shipping the JPEG — PointCloud is Closeable, wrap so
+            // we always release ARCore's hold.
+            try {
+                val pc = ar.acquirePointCloud(frame)
+                try {
+                    coverage.recordObservations(pc)
+                } finally {
+                    pc.close()
+                }
+            } catch (e: Exception) {
+                // Don't let a transient point-cloud failure kill the
+                // streaming path; the splat trains from JPEGs +
+                // poses, the overlay is purely a UX layer.
+            }
+            maybeUpdateCoverageHud()
+
             streamer?.sendFrame(
                 idx = captured.idx,
                 jpeg = captured.jpeg,
