@@ -64,6 +64,17 @@
     <string name="detail_frames_with_drops_fmt">%1$d (%2$d dropped)</string>
     <string name="detail_progress_pct_fmt">%1$d%%</string>
 
+    <!-- Job-detail subprocess log section. Mirrors the web's
+         JobLogPanel: live tail polled every 3s while open + running,
+         user can hide / re-open at any time. "unavailable" message
+         fires for the mesh job (which has no subprocess in PR #1
+         stub) and for any kind whose log file hasn\'t appeared yet. -->
+    <string name="detail_log_show">show log</string>
+    <string name="detail_log_hide">hide log</string>
+    <string name="detail_log_unavailable">no log available for this step</string>
+    <string name="detail_log_empty">(log file is empty)</string>
+    <string name="detail_log_fetch_failed_fmt">could not load log: %1$s</string>
+
     <!-- ARCore unsupported-device dialog. Triggered when
          ArCoreApk.checkAvailability returns
          UNSUPPORTED_DEVICE_NOT_CAPABLE — almost always because

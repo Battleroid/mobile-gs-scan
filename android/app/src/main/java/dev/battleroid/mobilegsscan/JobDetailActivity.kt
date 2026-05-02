@@ -19,6 +19,13 @@ import kotlinx.serialization.json.JsonElement
  * seconds and renders progress, message, error, and the worker's
  * result blob (when present).
  *
+ * Subprocess log section: collapsible block at the bottom of the
+ * card. Auto-opens for jobs that are currently running so the user
+ * gets a live tail without interaction; closes itself when the job
+ * lands but stays openable for postmortem inspection. Mirrors the
+ * web's JobLogPanel behavior exactly. Polled at the same 3s tick as
+ * the job-detail fetch when open + running.
+ *
  * The result blob is intentionally rendered as pretty-printed JSON
  * — it's worker-specific (sfm output, train metrics, export paths)
  * and baking each shape into the client UI is more work than it's
@@ -42,6 +49,16 @@ class JobDetailActivity : AppCompatActivity() {
     private var pollJob: Job? = null
     private var client: StudioClient? = null
     private var jobId: String = ""
+
+    // Log panel state. Default-open for running / claimed jobs so
+    // the live tail shows immediately; default-closed otherwise.
+    // Whether to actually fetch/show is then gated on this flag.
+    private var logOpen: Boolean = false
+    // Latest known job status, used by both the renderer (which job
+    // detail data populates) and the log poller (which decides
+    // whether to keep ticking). Kept here so the log fetch path
+    // doesn't have to refetch the job just to know if it's running.
+    private var lastStatus: String = ""
 
     private val prettyJson = Json { prettyPrint = true; encodeDefaults = false }
 
@@ -70,6 +87,7 @@ class JobDetailActivity : AppCompatActivity() {
         }
 
         binding.btnBack.setOnClickListener { finish() }
+        binding.btnLogToggle.setOnClickListener { toggleLog() }
         binding.kind.text = seedKind.ifBlank { getString(R.string.detail_loading) }
         binding.statusValue.text = getString(R.string.detail_loading)
 
@@ -102,7 +120,55 @@ class JobDetailActivity : AppCompatActivity() {
             binding.statusValue.append(": ${e.message ?: "unknown"}")
             return
         }
+
+        // First time we see a running job, auto-open the log so the
+        // user gets the live tail. After that the user is in
+        // control via the toggle button.
+        val running = detail.status == "running" || detail.status == "claimed"
+        if (running && lastStatus != "running" && lastStatus != "claimed" && !logOpen) {
+            logOpen = true
+            applyLogVisibility()
+        }
+        lastStatus = detail.status
+
         renderJob(detail)
+        if (logOpen) {
+            fetchAndRenderLog()
+        }
+    }
+
+    private fun toggleLog() {
+        logOpen = !logOpen
+        applyLogVisibility()
+        if (logOpen) {
+            // Fetch immediately when opened so the user doesn't have
+            // to wait for the next 3s tick.
+            lifecycleScope.launch { fetchAndRenderLog() }
+        }
+    }
+
+    private fun applyLogVisibility() {
+        binding.btnLogToggle.text = getString(
+            if (logOpen) R.string.detail_log_hide else R.string.detail_log_show,
+        )
+        binding.logValue.visibility = if (logOpen) View.VISIBLE else View.GONE
+    }
+
+    private suspend fun fetchAndRenderLog() {
+        val c = client ?: return
+        val res = try {
+            c.getJobLog(jobId)
+        } catch (e: Exception) {
+            binding.logValue.text = getString(
+                R.string.detail_log_fetch_failed_fmt, e.message ?: "unknown",
+            )
+            return
+        }
+        if (!res.available) {
+            binding.logValue.text = getString(R.string.detail_log_unavailable)
+            return
+        }
+        binding.logValue.text = res.log.ifBlank { getString(R.string.detail_log_empty) }
     }
 
     private fun renderJob(j: StudioClient.JobDetail) {
