@@ -54,41 +54,94 @@
             android:layout_height="wrap_content" />
     </LinearLayout>
 
-    <!-- Captures list. Pull-to-refresh wraps a RecyclerView and a
-         centered empty-state TextView; the activity toggles
-         visibility based on list length. -->
+    <!-- Lists: drafts (local-only, top) + captures (server, below).
+         Both are wrapped by a single SwipeRefreshLayout that pulls
+         both at once. The empty-state TextView surfaces only when
+         BOTH lists are empty. -->
     <androidx.swiperefreshlayout.widget.SwipeRefreshLayout
         android:id="@+id/refresh"
         android:layout_weight="1"
         android:layout_width="match_parent"
         android:layout_height="0dp">
 
-        <FrameLayout
+        <androidx.core.widget.NestedScrollView
             android:layout_width="match_parent"
-            android:layout_height="match_parent">
+            android:layout_height="match_parent"
+            android:fillViewport="true">
 
-            <androidx.recyclerview.widget.RecyclerView
-                android:id="@+id/captures"
+            <FrameLayout
                 android:layout_width="match_parent"
-                android:layout_height="match_parent" />
+                android:layout_height="wrap_content">
 
-            <TextView
-                android:id="@+id/empty"
-                android:text="@string/empty_no_captures"
-                android:textColor="@color/muted"
-                android:gravity="center"
-                android:padding="32dp"
-                android:fontFamily="monospace"
-                android:textSize="13sp"
-                android:visibility="gone"
-                android:layout_width="match_parent"
-                android:layout_height="match_parent" />
-        </FrameLayout>
+                <LinearLayout
+                    android:orientation="vertical"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content">
+
+                    <!-- Drafts header + list. Hidden when there are
+                         no drafts. -->
+                    <TextView
+                        android:id="@+id/draftsHeader"
+                        android:text="@string/drafts_header"
+                        android:textColor="@color/muted"
+                        android:textSize="12sp"
+                        android:fontFamily="monospace"
+                        android:paddingStart="16dp"
+                        android:paddingEnd="16dp"
+                        android:paddingTop="8dp"
+                        android:paddingBottom="4dp"
+                        android:visibility="gone"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content" />
+
+                    <androidx.recyclerview.widget.RecyclerView
+                        android:id="@+id/drafts"
+                        android:nestedScrollingEnabled="false"
+                        android:visibility="gone"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content" />
+
+                    <!-- Captures header + list. Same hide-when-empty
+                         behaviour. -->
+                    <TextView
+                        android:id="@+id/capturesHeader"
+                        android:text="@string/captures_header"
+                        android:textColor="@color/muted"
+                        android:textSize="12sp"
+                        android:fontFamily="monospace"
+                        android:paddingStart="16dp"
+                        android:paddingEnd="16dp"
+                        android:paddingTop="16dp"
+                        android:paddingBottom="4dp"
+                        android:visibility="gone"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content" />
+
+                    <androidx.recyclerview.widget.RecyclerView
+                        android:id="@+id/captures"
+                        android:nestedScrollingEnabled="false"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/empty"
+                    android:text="@string/empty_no_captures"
+                    android:textColor="@color/muted"
+                    android:gravity="center"
+                    android:padding="32dp"
+                    android:fontFamily="monospace"
+                    android:textSize="13sp"
+                    android:visibility="gone"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent" />
+            </FrameLayout>
+        </androidx.core.widget.NestedScrollView>
     </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
 
-    <!-- New capture: starts a session via POST /api/captures and
-         hands off to CaptureActivity. Disabled until the studio URL
-         is set + the health probe sees the server up. -->
+    <!-- New capture: creates a local Draft and hands off to
+         CaptureActivity. Stays enabled regardless of studio
+         reachability — recording is fully offline. -->
     <Button
         android:id="@+id/btnNewCapture"
         android:text="@string/action_new_capture"
@@ -98,7 +151,7 @@
         android:textStyle="bold"
         android:backgroundTint="@color/accent"
         android:textColor="@android:color/black"
-        android:enabled="false"
+        android:enabled="true"
         android:layout_width="match_parent"
         android:layout_height="wrap_content" />
 </LinearLayout>

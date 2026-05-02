@@ -16,70 +16,59 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
-import androidx.lifecycle.lifecycleScope
 import com.google.ar.core.ArCoreApk
 import dev.battleroid.mobilegsscan.databinding.ActivityCaptureBinding
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import org.json.JSONObject
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
 /**
  * The capture screen.
  *
+ * As of the local-record-then-upload pivot, this activity is no
+ * longer responsible for any network I/O. It records frames + poses
+ * to a [Draft] directory on local storage during capture. The user
+ * decides what to do with the draft on Finish — upload now, save
+ * for later, or discard — none of which require the studio to be
+ * reachable from the phone's current network.
+ *
  * Lifecycle:
  *   1. Validate ARCore availability + Google Play Services for AR.
  *   2. Request camera permission.
- *   3. Resolve capture id + name (from extras for the phone-driven
- *      path, or via /api/captures/by-token for the legacy QR deep
- *      link path). Done in startArSession's coroutine; doesn't gate
- *      the GL preview.
+ *   3. Open the [Draft] passed in via [EXTRA_DRAFT_ID] (created by
+ *      [MainActivity] before launching us). Bail with a toast if it
+ *      no longer exists on disk.
  *   4. Render: every frame, advance ARCore, paint the camera quad
- *      via BackgroundRenderer so the user sees what they're aiming
- *      at, then draw the [CoverageRenderer] overlay on top so the
- *      user sees Scaniverse-style colored dots on the actual
- *      surfaces showing how thoroughly each region has been
- *      captured.
- *   5. Streaming gate: frame ingestion is OFF until the user taps
- *      "Start capture". This lets them aim and frame the subject
- *      first. Tapping Start opens the WebSocket, sends the session
- *      header, kicks off the heartbeat loop, and flips the
- *      captureGateActive flag so subsequent draws extract +
- *      transmit JPEG/pose data AND record the frame's point cloud
- *      observations into the coverage overlay.
- *   6. On Finish: send the WS finalize message, then route the
- *      user to the native CaptureDetailActivity (stacked on top of
- *      the home screen) so they land on the pipeline-progress view
- *      instead of the browser. CaptureDetailActivity polls
- *      /api/captures + /api/scenes for live job state.
+ *      via BackgroundRenderer, then draw the [CoverageRenderer]
+ *      overlay so the user sees Scaniverse-style colored dots on
+ *      the actual surfaces showing how thoroughly each region has
+ *      been captured.
+ *   5. Recording gate: frame writes are OFF until the user taps
+ *      "Start capture". Until then the preview runs, the coverage
+ *      overlay accumulates points (so the user can see ARCore
+ *      tracking the scene), but we don't commit anything to disk.
+ *      Tapping Start flips the captureGateActive flag.
+ *   6. On Finish: show a three-way dialog —
+ *        - Upload now → finalize draft, route to [DraftDetailActivity]
+ *          with auto-upload, which performs the WS replay and on
+ *          success deletes the local copy + routes to the
+ *          server-side capture detail.
+ *        - Save for later → finalize draft, route home; the draft
+ *          shows up in the home-screen drafts list.
+ *        - Discard → delete the draft directory, route home.
  *
- * Capture rate, JPEG quality, and coverage-overlay alpha are read
- * once at activity start from ServerConfig and pushed into the
- * relevant components; the user changes them via the Settings
- * screen, and the next session picks up the new values.
+ * Capture rate, JPEG quality, and overlay-alpha settings are read
+ * once at activity start from ServerConfig, same as before.
  */
 class CaptureActivity : AppCompatActivity() {
     companion object {
         const val EXTRA_BASE_URL = "base_url"
-        const val EXTRA_PAIR_TOKEN = "pair_token"
-        const val EXTRA_CAPTURE_ID = "capture_id"
-        const val EXTRA_CAPTURE_NAME = "capture_name"
+        const val EXTRA_DRAFT_ID = "draft_id"
         private const val PERM_REQ = 0xC4
         private const val PLAY_SERVICES_FOR_AR_PKG = "com.google.ar.core"
-        // Update the coverage HUD every N captured frames — every 4
-        // frames at 10 fps is ~0.4s, more than fast enough for the
-        // user without thrashing the UI thread.
-        private const val HUD_REFRESH_EVERY = 4
         // Baseline top margin for the three top-aligned HUD
-        // TextViews, in dp. Mirrors the layout_marginTop /
-        // layout_margin="20dp" attribute in activity_capture.xml;
-        // we add the systemBars top inset on top so they don't
-        // slide under the status bar / camera cutout.
+        // TextViews. Mirrors the layout_marginTop / layout_margin
+        // 20dp value in activity_capture.xml; we add the systemBars
+        // top inset on top so they don't slide under the status bar.
         private const val HUD_BASE_TOP_DP = 20
     }
 
@@ -87,21 +76,12 @@ class CaptureActivity : AppCompatActivity() {
     private var arSession: ARCaptureSession? = null
     private val background = BackgroundRenderer()
     private val coverage = CoverageRenderer()
-    private var streamer: StreamingClient? = null
-    private var heartbeatJob: Job? = null
 
     private var baseUrl: String = ""
-    private var pairToken: String = ""
-    private var captureId: String? = null
-    private var captureName: String? = null
-    private var sceneId: String? = null
+    private var draftId: String = ""
+    private var draft: Draft? = null
 
-    // Snapshot at activity start; Settings changes mid-session
-    // don't take effect until the next capture session.
     private var overlayAlpha: Float = 0.7f
-
-    private var receivedCount = 0
-    private var droppedCount = 0
     private var coverageHudCounter = 0
 
     private var userRequestedArInstall = false
@@ -114,9 +94,15 @@ class CaptureActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         baseUrl = intent.getStringExtra(EXTRA_BASE_URL).orEmpty()
-        pairToken = intent.getStringExtra(EXTRA_PAIR_TOKEN).orEmpty()
-        if (baseUrl.isEmpty() || pairToken.isEmpty()) {
-            Toast.makeText(this, "missing pair token", Toast.LENGTH_SHORT).show()
+        draftId = intent.getStringExtra(EXTRA_DRAFT_ID).orEmpty()
+        if (draftId.isEmpty()) {
+            Toast.makeText(this, "missing draft id", Toast.LENGTH_SHORT).show()
+            finish()
+            return
+        }
+        draft = DraftStore.openDraft(this, draftId)
+        if (draft == null) {
+            Toast.makeText(this, "draft no longer exists", Toast.LENGTH_SHORT).show()
             finish()
             return
         }
@@ -124,24 +110,20 @@ class CaptureActivity : AppCompatActivity() {
         overlayAlpha = ServerConfig.coverageOverlayAlphaFloat(this)
         coverage.setAlpha(overlayAlpha)
 
-        binding.btnFinish.setOnClickListener { finishCapture() }
+        binding.btnFinish.setOnClickListener { onFinishTapped() }
         binding.btnStart.setOnClickListener { onStartCaptureTapped() }
-        binding.btnStart.isEnabled = false
+        // Local-record means we no longer need the server to be up
+        // before the user can record. Enable Start as soon as the
+        // ARCore session is wired up.
+        binding.btnStart.isEnabled = true
         binding.frameCounter.text = getString(R.string.capture_idle)
         binding.coverageHud.text = getString(R.string.coverage_initial)
+        binding.sessionLabel.text = draft?.meta?.name ?: ""
 
         binding.glSurface.setEGLContextClientVersion(2)
         binding.glSurface.setRenderer(Renderer())
         binding.glSurface.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
 
-        // Push the top HUD elements below the system status bar /
-        // camera-cutout inset. The activity runs edge-to-edge so
-        // the camera preview can fill the display; without this
-        // the three TextViews anchored at the top of the
-        // FrameLayout slide under the status bar and become
-        // unreadable on Android 15+ / Pixel-class devices. We
-        // only adjust HUD margins, not the GLSurfaceView, so the
-        // camera preview itself stays full-screen.
         applyHudInsets()
 
         ensurePermissionsThenConnect()
@@ -157,10 +139,6 @@ class CaptureActivity : AppCompatActivity() {
         ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->
             val sys = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             val cutout = insets.getInsets(WindowInsetsCompat.Type.displayCutout())
-            // Take the larger of the system-bars and cutout top
-            // insets — gesture-nav phones sometimes expose the
-            // cutout via the cutout type rather than the
-            // status-bar type.
             val topInset = maxOf(sys.top, cutout.top)
             topAnchored.forEach { v ->
                 val lp = v.layoutParams as? ViewGroup.MarginLayoutParams
@@ -195,8 +173,6 @@ class CaptureActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        heartbeatJob?.cancel()
-        streamer?.close()
         arSession?.close()
         super.onDestroy()
     }
@@ -326,60 +302,10 @@ class CaptureActivity : AppCompatActivity() {
         if (background.textureId >= 0) {
             arSession?.setTextureName(background.textureId)
         }
-
-        val preCaptureId = intent.getStringExtra(EXTRA_CAPTURE_ID)
-        val preCaptureName = intent.getStringExtra(EXTRA_CAPTURE_NAME).orEmpty()
-
-        lifecycleScope.launch {
-            val info: CaptureInfo? = if (!preCaptureId.isNullOrBlank()) {
-                CaptureInfo(
-                    captureId = preCaptureId,
-                    captureName = preCaptureName.ifBlank { "phone capture" },
-                )
-            } else {
-                withContext(Dispatchers.IO) { resolveCaptureFromToken() }
-            }
-            if (info == null) {
-                Toast.makeText(this@CaptureActivity, "pair token invalid", Toast.LENGTH_LONG).show()
-                finish()
-                return@launch
-            }
-            captureId = info.captureId
-            captureName = info.captureName
-            binding.sessionLabel.text = info.captureName
-            binding.btnStart.isEnabled = true
-        }
     }
 
     private fun onStartCaptureTapped() {
-        val cap = captureId
-        if (cap.isNullOrBlank()) return
         if (captureGateActive) return
-
-        streamer = StreamingClient(
-            scope = lifecycleScope,
-            baseUrl = baseUrl,
-            captureId = cap,
-            pairToken = pairToken,
-        ).also { s ->
-            s.connect()
-            lifecycleScope.launch {
-                s.events.collect(::handleStreamEvent)
-            }
-            s.sendSession(
-                deviceLabel = android.os.Build.MODEL,
-                intrinsics = Intrinsics(0f, 0f, 0f, 0f, 0, 0),
-                hasPose = true,
-            )
-        }
-
-        heartbeatJob = lifecycleScope.launch {
-            while (true) {
-                kotlinx.coroutines.delay(5_000)
-                streamer?.heartbeat()
-            }
-        }
-
         captureGateActive = true
         binding.startHint.visibility = View.GONE
         binding.btnStart.visibility = View.GONE
@@ -387,74 +313,61 @@ class CaptureActivity : AppCompatActivity() {
         binding.frameCounter.text = "0 frames"
     }
 
-    private data class CaptureInfo(val captureId: String, val captureName: String)
-
-    private fun resolveCaptureFromToken(): CaptureInfo? {
-        val client = OkHttpClient()
-        val req = Request.Builder()
-            .url("$baseUrl/api/captures/by-token/$pairToken")
-            .build()
-        return runCatching {
-            client.newCall(req).execute().use { res ->
-                if (!res.isSuccessful) return null
-                val body = res.body?.string().orEmpty()
-                val obj = JSONObject(body)
-                CaptureInfo(
-                    captureId = obj.getString("id"),
-                    captureName = obj.optString("name", "capture"),
-                )
-            }
-        }.getOrNull()
-    }
-
-    private fun handleStreamEvent(evt: StreamingClient.Event) {
-        when (evt) {
-            is StreamingClient.Event.Ack -> {
-                receivedCount = evt.received
-                droppedCount = evt.dropped
-                runOnUiThread {
-                    binding.frameCounter.text = if (droppedCount > 0) {
-                        "$receivedCount frames ($droppedCount dropped)"
-                    } else {
-                        "$receivedCount frames"
-                    }
-                }
-            }
-            is StreamingClient.Event.Limit -> {
-                runOnUiThread {
-                    Toast.makeText(this, "server cap: ${evt.reason}", Toast.LENGTH_SHORT).show()
-                }
-            }
-            is StreamingClient.Event.Queued -> {
-                sceneId = evt.sceneId
-                routeToCaptureDetail()
-            }
-            is StreamingClient.Event.Closed,
-            is StreamingClient.Event.Failed -> Unit
-        }
-    }
-
-    private fun finishCapture() {
+    private fun onFinishTapped() {
         if (!captureGateActive) {
-            // Never started — no streamer to finalize, just back out.
+            // Never started — discard the empty draft and back out.
+            draft?.delete()
             finish()
             return
         }
-        streamer?.finalize("user")
-        binding.glSurface.postDelayed({
-            if (!isFinishing) routeToCaptureDetail()
-        }, 5_000)
+        captureGateActive = false
+        val d = draft ?: run {
+            finish()
+            return
+        }
+        // Show three-way decision: upload now / save for later /
+        // discard. We finalize-then-route in upload-now and
+        // save-for-later; discard deletes the directory outright.
+        AlertDialog.Builder(this)
+            .setTitle(R.string.finish_dialog_title)
+            .setMessage(
+                getString(
+                    R.string.finish_dialog_body_fmt,
+                    d.meta.frame_count,
+                ),
+            )
+            .setCancelable(false)
+            .setPositiveButton(R.string.finish_action_upload_now) { _, _ ->
+                d.finalize()
+                routeToDraftDetail(d, autoUpload = true)
+            }
+            .setNeutralButton(R.string.finish_action_save_later) { _, _ ->
+                d.finalize()
+                routeHome()
+            }
+            .setNegativeButton(R.string.finish_action_discard) { _, _ ->
+                d.delete()
+                routeHome()
+            }
+            .show()
     }
 
-    private fun routeToCaptureDetail() {
-        val cap = captureId ?: return
+    private fun routeHome() {
         val home = Intent(this, MainActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         }
-        val detail = Intent(this, CaptureDetailActivity::class.java).apply {
-            putExtra(CaptureDetailActivity.EXTRA_BASE_URL, baseUrl)
-            putExtra(CaptureDetailActivity.EXTRA_CAPTURE_ID, cap)
-            putExtra(CaptureDetailActivity.EXTRA_CAPTURE_NAME, captureName.orEmpty())
+        startActivity(home)
+        finish()
+    }
+
+    private fun routeToDraftDetail(d: Draft, autoUpload: Boolean) {
+        val home = Intent(this, MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        }
+        val detail = Intent(this, DraftDetailActivity::class.java).apply {
+            putExtra(DraftDetailActivity.EXTRA_BASE_URL, baseUrl)
+            putExtra(DraftDetailActivity.EXTRA_DRAFT_ID, d.id)
+            putExtra(DraftDetailActivity.EXTRA_AUTO_UPLOAD, autoUpload)
         }
         startActivities(arrayOf(home, detail))
         finish()
@@ -462,7 +375,7 @@ class CaptureActivity : AppCompatActivity() {
 
     private fun maybeUpdateCoverageHud() {
         coverageHudCounter++
-        if (coverageHudCounter % HUD_REFRESH_EVERY != 0) return
+        if (coverageHudCounter % 4 != 0) return
         val stats = coverage.coverageStats()
         runOnUiThread {
             binding.coverageHud.text = getString(
@@ -473,17 +386,18 @@ class CaptureActivity : AppCompatActivity() {
         }
     }
 
+    private fun maybeUpdateFrameCounter() {
+        val count = draft?.meta?.frame_count ?: return
+        runOnUiThread {
+            binding.frameCounter.text = "$count frames"
+        }
+    }
+
     private inner class Renderer : GLSurfaceView.Renderer {
         override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
             GLES20.glClearColor(0f, 0f, 0f, 1f)
             background.createOnGlThread()
             coverage.createOnGlThread()
-            // Push the saved alpha after createOnGlThread so the
-            // first frame already reflects the user's preference.
-            // setAlpha is thread-safe; the call from onCreate above
-            // is the source of truth, this just makes the
-            // GL-side state consistent regardless of which path
-            // assigned the field first.
             coverage.setAlpha(overlayAlpha)
             arSession?.setTextureName(background.textureId)
         }
@@ -509,9 +423,9 @@ class CaptureActivity : AppCompatActivity() {
             if (!captureGateActive) return
             val captured = ar.pollFrameData(frame) ?: return
 
-            // Record this frame's tracked feature points BEFORE
-            // shipping the JPEG — PointCloud is Closeable, wrap so
-            // we always release ARCore's hold.
+            // Record this frame's tracked feature points into the
+            // overlay for visual feedback. PointCloud is Closeable;
+            // wrap so we always release ARCore's hold.
             try {
                 val pc = ar.acquirePointCloud(frame)
                 try {
@@ -519,19 +433,37 @@ class CaptureActivity : AppCompatActivity() {
                 } finally {
                     pc.close()
                 }
+            } catch (_: Exception) {
+                // Don't let a transient point-cloud failure kill
+                // recording; the splat trains from JPEGs + poses,
+                // the overlay is purely a UX layer.
+            }
+
+            // Persist the frame to the draft directory. This runs on
+            // the GL thread which is fine for the volume we deal
+            // with (10 fps × ~150 KB JPEG = 1.5 MB/s). If we ever
+            // start dropping frames here we'd push the disk write
+            // onto a single-threaded coroutine.
+            val d = draft ?: return
+            try {
+                d.appendFrame(
+                    idx = captured.idx,
+                    jpeg = captured.jpeg,
+                    pose = captured.pose,
+                    intrinsics = captured.intrinsics,
+                )
             } catch (e: Exception) {
-                // Don't let a transient point-cloud failure kill the
-                // streaming path; the splat trains from JPEGs +
-                // poses, the overlay is purely a UX layer.
+                runOnUiThread {
+                    Toast.makeText(
+                        this@CaptureActivity,
+                        "frame write failed: ${e.message}",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
+                return
             }
             maybeUpdateCoverageHud()
-
-            streamer?.sendFrame(
-                idx = captured.idx,
-                jpeg = captured.jpeg,
-                pose = captured.pose,
-                intrinsics = captured.intrinsics,
-            )
+            maybeUpdateFrameCounter()
         }
     }
 }

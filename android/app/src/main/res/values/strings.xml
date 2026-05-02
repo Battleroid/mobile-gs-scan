@@ -56,6 +56,34 @@
     <string name="empty_no_url">tap settings and enter your studio URL to get started</string>
     <string name="empty_no_captures">no captures yet — tap \"new capture\" to start</string>
 
+    <!-- Drafts section on the home screen. Drafts are local-only
+         capture sessions that haven\'t been uploaded yet. -->
+    <string name="drafts_header">DRAFTS (NOT UPLOADED)</string>
+    <string name="captures_header">CAPTURES</string>
+    <string name="draft_unnamed">(unnamed draft)</string>
+    <string name="draft_subtitle_finalized_fmt">%1$d frames · %2$s · ready to upload</string>
+    <string name="draft_subtitle_incomplete_fmt">%1$d frames · %2$s · incomplete</string>
+    <string name="draft_status_ready">ready to upload</string>
+    <string name="draft_status_incomplete">incomplete (recording was interrupted)</string>
+    <string name="draft_action_upload">Upload now</string>
+    <string name="draft_rename_help">leave blank to let the studio pick a memorable name on upload.</string>
+    <string name="draft_discard_title">Discard draft?</string>
+    <string name="draft_discard_body">All recorded frames will be deleted from the phone. This cannot be undone.</string>
+
+    <!-- CaptureActivity Finish dialog: three-way pick. -->
+    <string name="finish_dialog_title">Finish capture</string>
+    <string name="finish_dialog_body_fmt">Recorded %1$d frames. Upload now, save the draft for later, or discard it?</string>
+    <string name="finish_action_upload_now">Upload now</string>
+    <string name="finish_action_save_later">Save for later</string>
+    <string name="finish_action_discard">Discard</string>
+
+    <!-- DraftDetailActivity upload progress + outcomes. -->
+    <string name="upload_progress_fmt">uploading frame %1$d / %2$d</string>
+    <string name="upload_failed_title">Upload failed</string>
+    <string name="upload_succeeded">upload complete</string>
+    <string name="upload_no_studio">studio URL not set — open Settings first</string>
+    <string name="upload_no_frames">draft has no frames to upload</string>
+
     <!-- Capture screen overlay copy. Frame-counter starts at
          capture_idle and flips to live counts ("42 frames") once
          the user taps Start. The hint sits in the centre of the
