@@ -66,6 +66,20 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       GS_TRAIN_ITERS: ${GS_TRAIN_ITERS:-15000}
       GS_SFM_BACKEND: ${GS_SFM_BACKEND:-glomap}
+      # Splatfacto image cache: "gpu" (default) or "cpu". Default
+      # nerfstudio behavior auto-falls-back to cpu for >500 images
+      # which slows step time. With a 24GB+ card we have plenty of
+      # headroom; flip to cpu here if your GPU is smaller and OOMs.
+      GS_TRAIN_CACHE_IMAGES: ${GS_TRAIN_CACHE_IMAGES:-gpu}
+      # Persist torch.hub checkpoint cache across container restarts
+      # / rebuilds. splatfacto loads AlexNet for LPIPS perceptual
+      # loss the first time training runs; default cache is at
+      # /root/.cache/torch/hub/checkpoints which lives in the
+      # writable container layer and disappears on rebuild. Point
+      # TORCH_HOME at a path inside the persistent ``models``
+      # volume so the ~250MB AlexNet checkpoint is downloaded once
+      # and reused for every subsequent train run.
+      TORCH_HOME: /models/torch
       WORKER_CLASS: gs
       API_BASE_URL: http://api:8000
     volumes:
