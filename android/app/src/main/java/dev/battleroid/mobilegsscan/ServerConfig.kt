@@ -9,7 +9,8 @@ import androidx.core.content.edit
  *   - studio URL (which server to talk to)
  *   - capture rate + JPEG quality (frame-streaming knobs)
  *   - training-fidelity preset (per-capture splatfacto iter count)
- *   - coverage-overlay opacity (translucency of the AR dots)
+ *   - coverage-overlay opacity (translucency of the AR overlay)
+ *   - AR overlay style (Phase 1 surface points vs Phase 3 depth mesh)
  *
  * Single-user, single-server — there's no list of saved servers,
  * just the most recent one.
@@ -21,6 +22,7 @@ object ServerConfig {
     private const val KEY_JPEG_QUALITY = "capture_jpeg_quality"
     private const val KEY_TRAIN_ITERS = "train_iters"
     private const val KEY_OVERLAY_ALPHA = "overlay_alpha"
+    private const val KEY_OVERLAY_STYLE = "overlay_style"
 
     // Capture-rate defaults. The previous hardcoded
     // ``targetIntervalMs = 200`` (5 fps) in ARCaptureSession was too
@@ -54,6 +56,31 @@ object ServerConfig {
     const val DEFAULT_OVERLAY_ALPHA_PCT = 70
     const val MIN_OVERLAY_ALPHA_PCT = 20
     const val MAX_OVERLAY_ALPHA_PCT = 100
+
+    /**
+     * Which AR overlay the capture screen renders. Mutually
+     * exclusive — only one is active per session, picked at
+     * activity-create time.
+     *
+     *   - [POINTS]: Phase 1 ARCore feature-point dots
+     *     (CoverageRenderer). Default. Light, always-available.
+     *
+     *   - [DEPTH_MESH]: Phase 3 depth-image triangle-mesh
+     *     (DepthMeshRenderer, prototype). Heavier; requires
+     *     ARCore depth-mode-supported devices (Pixel-class). If
+     *     selected on a non-supporting device, capture falls back
+     *     to POINTS without warning — the toggle is best-effort.
+     */
+    enum class OverlayStyle(val storedValue: Int) {
+        POINTS(0),
+        DEPTH_MESH(1);
+
+        companion object {
+            fun fromStored(v: Int): OverlayStyle =
+                values().firstOrNull { it.storedValue == v } ?: POINTS
+        }
+    }
+    val DEFAULT_OVERLAY_STYLE = OverlayStyle.POINTS
 
     fun prefs(ctx: Context): SharedPreferences =
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -108,9 +135,18 @@ object ServerConfig {
         }
     }
 
-    /** Convenience for CoverageRenderer.setAlpha — same value, [0, 1]. */
+    /** Convenience for renderer.setAlpha — same value, [0, 1]. */
     fun coverageOverlayAlphaFloat(ctx: Context): Float =
         coverageOverlayAlphaPct(ctx) / 100f
+
+    fun overlayStyle(ctx: Context): OverlayStyle =
+        OverlayStyle.fromStored(
+            prefs(ctx).getInt(KEY_OVERLAY_STYLE, DEFAULT_OVERLAY_STYLE.storedValue),
+        )
+
+    fun setOverlayStyle(ctx: Context, style: OverlayStyle) {
+        prefs(ctx).edit { putInt(KEY_OVERLAY_STYLE, style.storedValue) }
+    }
 
     /**
      * Translate the user-facing "fps" prefs to the per-frame interval
