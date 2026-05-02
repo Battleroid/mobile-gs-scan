@@ -37,6 +37,13 @@
     <string name="preset_train_high">High (30k)</string>
     <string name="selected_train_iters_fmt">selected: %1$d iterations</string>
 
+    <!-- Settings: coverage-overlay opacity slider. Multiplies the
+         per-fragment alpha in the AR coverage renderer; lower =
+         camera image shows through more, higher = solid dots. -->
+    <string name="label_overlay_alpha">Coverage overlay opacity</string>
+    <string name="hint_overlay_alpha">how solid the AR coverage dots are. lower lets more of the camera image show through. 70%% is the default.</string>
+    <string name="overlay_alpha_fmt">%1$d%%</string>
+
     <!-- home screen status indicator -->
     <string name="status_online">studio: online</string>
     <string name="status_offline">studio: offline</string>
