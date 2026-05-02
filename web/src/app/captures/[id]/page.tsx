@@ -9,9 +9,10 @@ import { useSceneEvents } from "@/hooks/useSceneEvents";
 import { CapturePairing } from "@/components/CapturePairing";
 import type { Job } from "@/lib/types";
 
-// Heavy three.js viewer — keep it out of the SSR bundle.
-const SplatViewer = dynamic(
-  () => import("@/components/SplatViewer").then((m) => m.SplatViewer),
+// Heavy three.js editor (wraps the viewer + filter UI). Same SSR bail
+// reason as before — Spark touches `window` at import time.
+const SplatEditor = dynamic(
+  () => import("@/components/SplatEditor").then((m) => m.SplatEditor),
   { ssr: false },
 );
 
@@ -74,29 +75,7 @@ export default function CaptureDetailPage({ params }: PageProps) {
           {scene.status === "completed" && (scene.ply_url || scene.spz_url) && (
             <div className="space-y-3">
               <h2 className="text-sm text-muted mt-6">scene</h2>
-              <SplatViewer
-                url={api.base() + (scene.spz_url ?? scene.ply_url!)}
-              />
-              <div className="flex gap-3 text-xs">
-                {scene.ply_url && (
-                  <a
-                    href={api.base() + scene.ply_url}
-                    download
-                    className="underline hover:text-fg"
-                  >
-                    download .ply
-                  </a>
-                )}
-                {scene.spz_url && (
-                  <a
-                    href={api.base() + scene.spz_url}
-                    download
-                    className="underline hover:text-fg"
-                  >
-                    download .spz
-                  </a>
-                )}
-              </div>
+              <SplatEditor scene={scene} />
             </div>
           )}
 

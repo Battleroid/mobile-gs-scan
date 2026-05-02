@@ -7,7 +7,7 @@
 //      origin as the web ui.
 //   3. Server-side rendering on Next: localhost:8000 fallback so
 //      the build doesn't crash.
-import type { Capture, CaptureSource, Scene } from "./types";
+import type { Capture, CaptureSource, FilterRecipe, Scene } from "./types";
 
 function apiBase(): string {
   const baked = process.env.NEXT_PUBLIC_API_BASE;
@@ -65,8 +65,20 @@ export const api = {
   deleteCapture: (id: string) =>
     fetch(`${apiBase()}/api/captures/${id}`, { method: "DELETE" }),
   getScene: (id: string) => jsonReq<Scene>(`/api/scenes/${id}`),
-  artifactUrl: (sceneId: string, kind: "ply" | "spz") =>
-    `${apiBase()}/api/scenes/${sceneId}/artifacts/${kind}`,
+  artifactUrl: (
+    sceneId: string,
+    kind: "ply" | "spz",
+    opts?: { edit?: boolean },
+  ) =>
+    `${apiBase()}/api/scenes/${sceneId}/artifacts/${kind}` +
+    (opts?.edit ? "?edit=true" : ""),
+  upsertSceneEdit: (sceneId: string, recipe: FilterRecipe) =>
+    jsonReq<Scene>(`/api/scenes/${sceneId}/edit`, {
+      method: "PUT",
+      body: JSON.stringify({ recipe }),
+    }),
+  clearSceneEdit: (sceneId: string) =>
+    jsonReq<Scene>(`/api/scenes/${sceneId}/edit`, { method: "DELETE" }),
 };
 
 export function wsUrl(path: string): string {

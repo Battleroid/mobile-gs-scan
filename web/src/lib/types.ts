@@ -31,7 +31,7 @@ export interface Capture {
   updated_at: string;
 }
 
-export type JobKind = "sfm" | "train" | "export" | "mesh";
+export type JobKind = "sfm" | "train" | "export" | "mesh" | "filter";
 export type JobStatus =
   | "queued"
   | "claimed"
@@ -49,6 +49,23 @@ export interface Job {
   error: string | null;
 }
 
+export type EditStatus = "none" | "queued" | "running" | "completed" | "failed";
+
+export interface FilterRecipeOp {
+  type:
+    | "opacity_threshold"
+    | "scale_clamp"
+    | "bbox_crop"
+    | "sphere_remove"
+    | "sor"
+    | "dbscan_keep_largest";
+  [k: string]: unknown;
+}
+
+export interface FilterRecipe {
+  ops: FilterRecipeOp[];
+}
+
 export interface Scene {
   id: string;
   capture_id: string;
@@ -59,6 +76,11 @@ export interface Scene {
   jobs: Job[];
   created_at: string;
   completed_at: string | null;
+  edited_ply_url: string | null;
+  edited_spz_url: string | null;
+  edit_status: EditStatus;
+  edit_error: string | null;
+  edit_recipe: FilterRecipe | null;
 }
 
 export interface ServerEvent {
