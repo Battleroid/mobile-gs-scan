@@ -8,6 +8,11 @@ Concurrency note: SQLite serializes writes. The volume of writes
 here is low (a row per claim, a row per heartbeat every few seconds,
 a row update per export step) — well below the point where you'd
 need anything fancier.
+
+Datetime convention: see the schema module's docstring. Every
+datetime in this codebase is a naive UTC value (“wall clock at the
+Greenwich meridian”). ``_utcnow()`` returns naive UTC; every column
+stores naive UTC; every comparison stays naive↔naive.
 """
 from __future__ import annotations
 
@@ -50,7 +55,8 @@ def _make_token() -> str:
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    # Naive UTC — must match the column type. See module docstring.
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 async def init_store(settings: Settings | None = None) -> None:
@@ -94,7 +100,7 @@ async def session() -> AsyncIterator[AsyncSession]:
         yield s
 
 
-# ─── captures ─────────────────────────────────────────────────────
+# ─── captures ─────────────────────────────────────
 
 
 async def create_capture(
@@ -193,7 +199,7 @@ async def set_capture_status(
         await s.commit()
 
 
-# ─── scenes ───────────────────────────────────────────────────────
+# ─── scenes ────────────────────────────────────────
 
 
 async def create_scene(capture_id: str) -> Scene:
@@ -226,7 +232,7 @@ async def update_scene(scene_id: str, **fields) -> None:
         await s.commit()
 
 
-# ─── jobs ─────────────────────────────────────────────────────────
+# ─── jobs ──────────────────────────────────────────
 
 
 async def enqueue_job(scene_id: str, kind: JobKind, payload: dict | None = None) -> Job:
