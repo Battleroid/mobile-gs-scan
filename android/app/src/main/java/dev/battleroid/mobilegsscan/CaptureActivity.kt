@@ -98,6 +98,16 @@ class CaptureActivity : AppCompatActivity() {
 
     @Volatile private var captureGateActive = false
 
+    // True after Renderer.onSurfaceCreated has run on the GL thread.
+    // Used by the depth-fallback path in startArSession to decide
+    // whether the "we just swapped depthMesh → coverage" event
+    // needs a deferred GL init on the next frame: if onSurfaceCreated
+    // hasn't fired yet, it'll pick up the now-non-null coverage
+    // and call createOnGlThread itself; if it has, we need to
+    // schedule the init via needsCoverageGlInit.
+    @Volatile private var glSurfaceCreated = false
+    @Volatile private var needsCoverageGlInit = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityCaptureBinding.inflate(layoutInflater)
@@ -341,14 +351,17 @@ class CaptureActivity : AppCompatActivity() {
                 it.setAlpha(overlayAlpha)
             }
             resolvedStyle = ServerConfig.OverlayStyle.POINTS
-            // The Renderer.onSurfaceCreated path has already run
-            // by the time we get here in some flows; hint it to
-            // re-init the new renderer next frame via a flag.
-            needsCoverageGlInit = true
+            // Only schedule the deferred GL init if onSurfaceCreated
+            // has already run. If it hasn't, it'll pick up the new
+            // non-null `coverage` field and call createOnGlThread
+            // itself — calling it twice would recompile shaders
+            // and leak the first set of GL objects. Codex flagged
+            // this on the original PR (P2).
+            if (glSurfaceCreated) {
+                needsCoverageGlInit = true
+            }
         }
     }
-
-    @Volatile private var needsCoverageGlInit = false
 
     private fun onStartCaptureTapped() {
         if (captureGateActive) return
@@ -463,6 +476,11 @@ class CaptureActivity : AppCompatActivity() {
             coverage?.setAlpha(overlayAlpha)
             depthMesh?.setAlpha(overlayAlpha)
             arSession?.setTextureName(background.textureId)
+            // Mark the surface created AFTER all renderers are
+            // initialized. startArSession's depth-fallback path
+            // reads this to decide whether to schedule a deferred
+            // coverage GL init for the next frame.
+            glSurfaceCreated = true
         }
 
         override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
@@ -475,10 +493,11 @@ class CaptureActivity : AppCompatActivity() {
             val ar = arSession ?: return
             val frame = ar.update() ?: return
 
-            // Defensive: if startArSession swapped depthMesh →
-            // coverage after onSurfaceCreated already ran, we need
-            // to lazy-init the new renderer's GL resources here
-            // (still on the GL thread).
+            // Lazy-init the coverage renderer's GL resources iff
+            // startArSession swapped depthMesh → coverage AFTER
+            // onSurfaceCreated ran. The pre-onSurfaceCreated swap
+            // path is handled by onSurfaceCreated itself (it sees
+            // the now-non-null coverage and inits it normally).
             if (needsCoverageGlInit) {
                 coverage?.createOnGlThread()
                 coverage?.setAlpha(overlayAlpha)
