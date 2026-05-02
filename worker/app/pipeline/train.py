@@ -22,6 +22,26 @@ log = logging.getLogger(__name__)
 
 ProgressCb = Callable[[float, str], Awaitable[None]]
 
+# Splatfacto / nerfstudio rich-progress data rows look like:
+#
+#     2900 (19.33%)       7.937 ms             1 m, 36 s            39.57 M
+#
+# i.e. ``<iter>\s+\(<percent>%\)\s+...`` repeated every refresh
+# (the trainer uses rich's live display which redraws via cursor-up
+# escapes, so the same line shows up many times during a run).
+# PROGRESS_RE captures both the iter number and the explicit percent
+# so we don't have to compute pct = current/iters ourselves — splatfacto
+# already factored in any warmup / decimation / data-loader skew.
+#
+# Anchored on the ``(NN.NN%)`` form so the table-header line
+# ``Step (% Done)`` (which has "% Done" instead of "<digit>%)")
+# doesn't false-match.
+PROGRESS_RE = re.compile(rb"(\d+)\s+\((\d+(?:\.\d+)?)%\)")
+
+# Older / non-splatfacto trainers emit ``iter 1234`` lines without
+# the parens-wrapped percent. Kept as a fallback so this code keeps
+# emitting progress when used against future nerfstudio configs that
+# print iter counts but no percent table.
 ITER_RE = re.compile(rb"\biter\s+(\d+)", re.IGNORECASE)
 
 
@@ -95,19 +115,40 @@ async def _run_splatfacto(
             assert proc.stdout is not None
             async for raw in proc.stdout:
                 logf.write(raw)
-                m = ITER_RE.search(raw)
-                if not m:
+
+                pct: float | None = None
+                label: str | None = None
+
+                pm = PROGRESS_RE.search(raw)
+                if pm:
+                    try:
+                        current = int(pm.group(1))
+                        percent = float(pm.group(2))
+                    except ValueError:
+                        current = None
+                        percent = None
+                    if percent is not None:
+                        pct = max(0.0, min(0.99, percent / 100.0))
+                        label = f"train: iter {current}/{iters} ({percent:.1f}%)"
+                else:
+                    im = ITER_RE.search(raw)
+                    if im:
+                        try:
+                            current = int(im.group(1))
+                        except (IndexError, ValueError):
+                            current = None
+                        if current is not None:
+                            pct = max(0.0, min(0.99, current / max(iters, 1)))
+                            label = f"train: iter {current}/{iters}"
+
+                if pct is None:
                     continue
-                try:
-                    current = int(m.group(1))
-                except (IndexError, ValueError):
-                    continue
-                pct = max(0.0, min(0.99, current / max(iters, 1)))
+
                 # Throttle to ~1 % steps so we don't flood the events
-                # bus with every iter (splatfacto can emit several
-                # lines per iteration).
+                # bus. Splatfacto's live display refreshes every ~0.1 s,
+                # which would be far too chatty otherwise.
                 if pct - last_pct >= 0.01:
-                    await progress(pct, f"train: iter {current}/{iters}")
+                    await progress(pct, label or f"train: {int(pct * 100)}%")
                     last_pct = pct
 
         rc = await proc.wait()
