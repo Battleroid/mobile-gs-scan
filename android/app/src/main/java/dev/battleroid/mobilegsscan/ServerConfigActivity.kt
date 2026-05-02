@@ -6,6 +6,7 @@ import android.view.Gravity
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -22,33 +23,69 @@ class ServerConfigActivity : AppCompatActivity() {
             setPadding(padding, padding, padding, padding)
         }
 
-        val label = TextView(this).apply {
+        val urlLabel = TextView(this).apply {
             text = getString(R.string.label_studio_url)
         }
-        val input = EditText(this).apply {
+        val urlInput = EditText(this).apply {
             hint = getString(R.string.hint_studio_url)
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
             setText(ServerConfig.studioUrl(this@ServerConfigActivity).orEmpty())
         }
-        // Helper text under the input — clarifies that the scheme is
-        // optional (we auto-prefix `https://` in ServerConfig.normalize)
-        // and reminds the user `http://` is supported if they need it.
-        val helper = TextView(this).apply {
-            text = getString(R.string.hint_studio_url_help)
-            textSize = 12f
-            setTextColor(getColor(R.color.muted))
-            gravity = Gravity.START
-            val topMargin = (4 * resources.displayMetrics.density).toInt()
-            val bottomMargin = (16 * resources.displayMetrics.density).toInt()
-            (layoutParams as? LinearLayout.LayoutParams)?.apply {
-                this.topMargin = topMargin
-                this.bottomMargin = bottomMargin
-            }
+        val urlHelper = mutedHelper(getString(R.string.hint_studio_url_help))
+
+        // ── capture-rate slider ───────────────────────────────────
+        val fpsSection = sectionHeader(getString(R.string.label_capture_fps))
+        val fpsValueLabel = TextView(this).apply {
+            text = getString(
+                R.string.capture_fps_fmt,
+                ServerConfig.captureFps(this@ServerConfigActivity),
+            )
+            setTextColor(getColor(R.color.fg))
         }
+        val fpsSlider = SeekBar(this).apply {
+            min = ServerConfig.MIN_FPS
+            max = ServerConfig.MAX_FPS
+            progress = ServerConfig.captureFps(this@ServerConfigActivity)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar, value: Int, fromUser: Boolean) {
+                    val fps = value.coerceAtLeast(ServerConfig.MIN_FPS)
+                    fpsValueLabel.text = getString(R.string.capture_fps_fmt, fps)
+                }
+                override fun onStartTrackingTouch(sb: SeekBar) {}
+                override fun onStopTrackingTouch(sb: SeekBar) {}
+            })
+        }
+        val fpsHelper = mutedHelper(getString(R.string.hint_capture_fps))
+
+        // ── jpeg-quality slider ──────────────────────────────────
+        val qSection = sectionHeader(getString(R.string.label_capture_jpeg_quality))
+        val qValueLabel = TextView(this).apply {
+            text = getString(
+                R.string.capture_jpeg_quality_fmt,
+                ServerConfig.captureJpegQuality(this@ServerConfigActivity),
+            )
+            setTextColor(getColor(R.color.fg))
+        }
+        val qSlider = SeekBar(this).apply {
+            min = ServerConfig.MIN_JPEG_QUALITY
+            max = ServerConfig.MAX_JPEG_QUALITY
+            progress = ServerConfig.captureJpegQuality(this@ServerConfigActivity)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar, value: Int, fromUser: Boolean) {
+                    val q = value.coerceAtLeast(ServerConfig.MIN_JPEG_QUALITY)
+                    qValueLabel.text = getString(R.string.capture_jpeg_quality_fmt, q)
+                }
+                override fun onStartTrackingTouch(sb: SeekBar) {}
+                override fun onStopTrackingTouch(sb: SeekBar) {}
+            })
+        }
+        val qHelper = mutedHelper(getString(R.string.hint_capture_jpeg_quality))
+
+        // ── save ───────────────────────────────────────────────
         val save = Button(this).apply {
             text = getString(R.string.action_save)
             setOnClickListener {
-                val raw = input.text.toString().trim()
+                val raw = urlInput.text.toString().trim()
                 if (raw.isEmpty()) {
                     Toast.makeText(
                         this@ServerConfigActivity,
@@ -57,16 +94,11 @@ class ServerConfigActivity : AppCompatActivity() {
                     ).show()
                     return@setOnClickListener
                 }
-                // ServerConfig.setStudioUrl runs the same normalize()
-                // (trim, drop trailing slash, prepend https:// if no
-                // scheme), so a user typing bare `192.168.1.42` saves
-                // as `https://192.168.1.42`. Echo what we actually
-                // saved so the user sees the auto-prefix happen
-                // instead of wondering why their bare IP "didn't
-                // work" — Android's habit of auto-correcting a typed
-                // URL to a search query has trained everyone to
-                // distrust this kind of input.
                 ServerConfig.setStudioUrl(this@ServerConfigActivity, raw)
+                ServerConfig.setCaptureFps(this@ServerConfigActivity, fpsSlider.progress)
+                ServerConfig.setCaptureJpegQuality(
+                    this@ServerConfigActivity, qSlider.progress,
+                )
                 val saved = ServerConfig.studioUrl(this@ServerConfigActivity).orEmpty()
                 if (saved != raw) {
                     Toast.makeText(
@@ -79,22 +111,36 @@ class ServerConfigActivity : AppCompatActivity() {
             }
         }
 
-        root.addView(label)
-        root.addView(input)
-        root.addView(helper)
+        root.addView(urlLabel)
+        root.addView(urlInput)
+        root.addView(urlHelper)
+        root.addView(fpsSection)
+        root.addView(fpsValueLabel)
+        root.addView(fpsSlider)
+        root.addView(fpsHelper)
+        root.addView(qSection)
+        root.addView(qValueLabel)
+        root.addView(qSlider)
+        root.addView(qHelper)
         root.addView(save)
         setContentView(root)
 
         // Apply the helper-text margins after addView so the layout
-        // params are the LinearLayout-owned ones (LinearLayout.LayoutParams).
-        // Setting layoutParams during the apply{} block on TextView would
-        // be ViewGroup.LayoutParams, which doesn't have topMargin /
-        // bottomMargin fields — and Kotlin's safe-cast above would
-        // silently no-op. Re-apply now that the parent is in place.
-        (helper.layoutParams as LinearLayout.LayoutParams).apply {
-            topMargin = (4 * resources.displayMetrics.density).toInt()
-            bottomMargin = (16 * resources.displayMetrics.density).toInt()
-            helper.layoutParams = this
+        // params are the LinearLayout-owned ones (they're
+        // ViewGroup.LayoutParams during the apply{} call above and
+        // don't have topMargin / bottomMargin fields).
+        listOf(urlHelper, fpsHelper, qHelper).forEach { v ->
+            (v.layoutParams as LinearLayout.LayoutParams).apply {
+                topMargin = (4 * resources.displayMetrics.density).toInt()
+                bottomMargin = (16 * resources.displayMetrics.density).toInt()
+                v.layoutParams = this
+            }
+        }
+        listOf(fpsSection, qSection).forEach { v ->
+            (v.layoutParams as LinearLayout.LayoutParams).apply {
+                topMargin = (16 * resources.displayMetrics.density).toInt()
+                v.layoutParams = this
+            }
         }
 
         // Same edge-to-edge handling MainActivity gets: pad the root
@@ -112,5 +158,18 @@ class ServerConfigActivity : AppCompatActivity() {
             )
             insets
         }
+    }
+
+    private fun mutedHelper(text: String): TextView = TextView(this).apply {
+        this.text = text
+        textSize = 12f
+        setTextColor(getColor(R.color.muted))
+        gravity = Gravity.START
+    }
+
+    private fun sectionHeader(text: String): TextView = TextView(this).apply {
+        this.text = text
+        textSize = 14f
+        setTextColor(getColor(R.color.fg))
     }
 }
