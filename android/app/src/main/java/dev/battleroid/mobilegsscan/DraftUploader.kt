@@ -65,16 +65,14 @@ class DraftUploader(
             meta.train_iters?.let { put("train_iters", JsonPrimitive(it)) }
         }
 
-        // ``meta.name`` is nullable on the draft, but master's
-        // StudioClient.createCapture takes a non-null String. Send
-        // empty when we have no draft name; the server is happy
-        // with empty (Pydantic ``str`` with no min_length) and
-        // post-#45 will treat empty as the "auto-generate a random
-        // name" signal. Either way the user can rename via the
-        // detail screen.
+        // Pass the draft's nullable name straight through. The
+        // server treats null/blank as "auto-generate a memorable
+        // three-word random name" (PR #45); user-supplied names
+        // are honoured verbatim. Either way the user can rename
+        // via the capture-detail screen post-upload.
         val capture = try {
             client.createCapture(
-                name = meta.name.orEmpty(),
+                name = meta.name,
                 hasPose = true,
                 source = "mobile_native",
                 meta = createMeta,
