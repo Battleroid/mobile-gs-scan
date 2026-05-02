@@ -1,11 +1,15 @@
 package dev.battleroid.mobilegsscan
 
+import android.app.AlertDialog
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.text.InputType
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.EditText
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -34,6 +38,11 @@ import kotlinx.coroutines.launch
  * "Open viewer in browser" deep-links to the studio web UI for
  * the splat viewer — native splat rendering is a bigger problem
  * than this PR is solving.
+ *
+ * Tapping the capture-name TextView opens a rename dialog (mirrors
+ * the inline rename on the web detail page). The local TextView
+ * updates immediately; the next poll re-renders from the server
+ * row to confirm.
  */
 class CaptureDetailActivity : AppCompatActivity() {
     companion object {
@@ -51,6 +60,7 @@ class CaptureDetailActivity : AppCompatActivity() {
     private var lastSceneId: String? = null
     private var lastPlyUrl: String? = null
     private var lastSpzUrl: String? = null
+    private var currentName: String = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -77,7 +87,10 @@ class CaptureDetailActivity : AppCompatActivity() {
             insets
         }
 
-        binding.captureName.text = seedName.ifBlank { getString(R.string.detail_loading) }
+        currentName = seedName
+        binding.captureName.text =
+            seedName.ifBlank { getString(R.string.detail_loading) }
+        binding.captureName.setOnClickListener { showRenameDialog() }
         binding.btnBack.setOnClickListener { finish() }
         binding.btnViewerWeb.setOnClickListener { openSceneInBrowser() }
 
@@ -136,6 +149,7 @@ class CaptureDetailActivity : AppCompatActivity() {
     }
 
     private fun renderCapture(c: StudioClient.Capture) {
+        currentName = c.name
         binding.captureName.text = c.name
         binding.statusValue.text = c.status
         binding.sourceValue.text = c.source
@@ -177,6 +191,53 @@ class CaptureDetailActivity : AppCompatActivity() {
             } else {
                 View.GONE
             }
+    }
+
+    private fun showRenameDialog() {
+        val padding = (24 * resources.displayMetrics.density).toInt()
+        val input = EditText(this).apply {
+            hint = getString(R.string.rename_capture_hint)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
+            setText(currentName)
+            setSelection(text.length)
+        }
+        val container = android.widget.FrameLayout(this).apply {
+            setPadding(padding, padding / 2, padding, 0)
+            addView(input)
+        }
+        AlertDialog.Builder(this)
+            .setTitle(R.string.rename_capture_title)
+            .setView(container)
+            .setPositiveButton(R.string.action_save) { _, _ ->
+                val newName = input.text.toString().trim()
+                if (newName.isEmpty() || newName == currentName) return@setPositiveButton
+                submitRename(newName)
+            }
+            .setNegativeButton(R.string.action_cancel, null)
+            .show()
+    }
+
+    private fun submitRename(newName: String) {
+        val c = client ?: return
+        // Optimistic local update so the title flips immediately;
+        // the next poll will overwrite either way (with the same
+        // value on success, or the old one on failure).
+        val previous = currentName
+        currentName = newName
+        binding.captureName.text = newName
+        lifecycleScope.launch {
+            try {
+                c.renameCapture(captureId, newName)
+            } catch (e: Exception) {
+                currentName = previous
+                binding.captureName.text = previous
+                Toast.makeText(
+                    this@CaptureDetailActivity,
+                    getString(R.string.rename_failed_fmt, e.message ?: "unknown"),
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+        }
     }
 
     private fun onJobClicked(job: StudioClient.JobView) {
