@@ -37,6 +37,12 @@ const VIEW_MODE_LABELS: Record<ViewMode, string> = {
   colored: "colored points",
 };
 
+// 3DGS / splatfacto store color as the DC term of an SH expansion.
+// Inversion to linear RGB is `color = 0.5 + SH_C0 * f_dc` where
+// SH_C0 = 1 / (2 * sqrt(pi)). Same constant Spark and inria's
+// reference 3DGS renderer use.
+const SH_C0 = 0.28209479177387814;
+
 interface Props {
   /** /api/scenes/<id>/artifacts/{ply,spz} URL for the splat. */
   url: string;
@@ -199,10 +205,48 @@ function SplatScene({
             "three/examples/jsm/loaders/PLYLoader.js"
           );
           const loader = new PLYLoader();
+          // Splatfacto / 3DGS .ply files store color as the DC
+          // term of an SH expansion under the property names
+          // f_dc_0/1/2 instead of the standard PLY red/green/
+          // blue. Without this hint PLYLoader drops them and the
+          // "colored points" view always falls back to mono cyan.
+          // Pull them through as a 3-component custom attribute
+          // we convert to a real `color` attribute below.
+          loader.setCustomPropertyNameMapping({
+            shDc: ["f_dc_0", "f_dc_1", "f_dc_2"],
+          });
           const geom = await loader.loadAsync(sourceForPoints);
           if (cancelled) return;
 
-          const hasColor = geom.hasAttribute("color");
+          // Prefer a real RGB color attribute if the PLY had one
+          // (e.g. a points3D.ply seed file from COLMAP). Otherwise
+          // synthesize one from the SH DC coefficients with the
+          // standard 3DGS inversion: `linear = 0.5 + SH_C0 * f_dc`.
+          // Splatfacto can produce slightly out-of-[0,1] values;
+          // clamp before assigning since PointsMaterial expects
+          // normalized RGB.
+          let hasColor = geom.hasAttribute("color");
+          if (!hasColor && geom.hasAttribute("shDc")) {
+            const sh = geom.getAttribute("shDc") as THREE.BufferAttribute;
+            const colors = new Float32Array(sh.count * 3);
+            for (let i = 0; i < sh.count; i++) {
+              const r = 0.5 + SH_C0 * sh.getX(i);
+              const g = 0.5 + SH_C0 * sh.getY(i);
+              const b = 0.5 + SH_C0 * sh.getZ(i);
+              colors[i * 3 + 0] = Math.max(0, Math.min(1, r));
+              colors[i * 3 + 1] = Math.max(0, Math.min(1, g));
+              colors[i * 3 + 2] = Math.max(0, Math.min(1, b));
+            }
+            geom.setAttribute(
+              "color",
+              new THREE.BufferAttribute(colors, 3),
+            );
+            // Drop the source attribute now that it's been
+            // converted; nothing else reads it and it doubles
+            // the per-vertex memory cost.
+            geom.deleteAttribute("shDc");
+            hasColor = true;
+          }
           hasVertexColorsRef.current = hasColor;
 
           // Mono material: always available, used for "points" mode
@@ -216,9 +260,10 @@ function SplatScene({
           monoMaterialRef.current = mono;
 
           // Colored material: only meaningful when the PLY has a
-          // color attribute. Allocate it anyway so the swap path is
-          // unconditional; the "colored" view falls back to mono
-          // below when hasColor is false.
+          // color attribute (real RGB or synthesized from SH DC).
+          // Allocate it anyway so the swap path is unconditional;
+          // the "colored" view falls back to mono below when
+          // hasColor is false.
           const colored = new THREE.PointsMaterial({
             size: 0.01,
             vertexColors: hasColor,
