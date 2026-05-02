@@ -27,6 +27,14 @@ import java.nio.ShortBuffer
  * the entire view in green and made the camera basically
  * unwatchable.
  *
+ * Per-vertex depth-fade: each vertex stores its raw camera-space
+ * depth in metres alongside its world-space position. The
+ * fragment shader scales alpha as `1 / (1 + d/k)` so closer
+ * surfaces appear bright while farther ones fade out, giving the
+ * eye a clear "yes this is a 3D mesh" cue. Without this the
+ * uniform-density wireframe just reads as a flat grid pasted
+ * over the camera.
+ *
  * This is intentionally NOT a TSDF / persistent-mesh accumulator;
  * Scaniverse-style "mesh that fills in as you move around" needs a
  * voxel grid + integration step that's a much bigger lift. The
@@ -34,10 +42,12 @@ import java.nio.ShortBuffer
  *
  * Limitations / known prototype-grade choices:
  *
- *   - Half-resolution sampling (every 2nd depth pixel in each
- *     axis) for ~14k vertices at 320×180 depth. Cuts per-frame
- *     CPU work to ~1ms on a Pixel 10 Pro at the cost of mesh
- *     detail.
+ *   - Quarter-resolution sampling (every 4th depth pixel in each
+ *     axis) for ~3.6k vertices at 320×180 depth. Sparser than
+ *     half-resolution would be — at half-res the wireframe looked
+ *     like a uniform mat (the user couldn't tell it was 3D); at
+ *     quarter-res the cells are big enough to visibly warp around
+ *     objects as you pan.
  *
  *   - Edge culling: skip a quad when adjacent corners' depths
  *     differ by more than `EDGE_DEPTH_JUMP_M` absolute (default
@@ -45,10 +55,11 @@ import java.nio.ShortBuffer
  *     stretch from a foreground object to background. Tradeoff:
  *     at surface boundaries we lose some valid edges too.
  *
- *   - Flat color (translucent green). No per-vertex coverage
- *     shading — that requires a voxel hash + per-vertex lookups
- *     which we deliberately skip in v1 so we can evaluate "is the
- *     mesh useful at all" before building voxel infrastructure.
+ *   - Flat color (translucent green) modulated by per-vertex
+ *     depth-fade. No per-vertex coverage shading — that requires
+ *     a voxel hash + per-vertex lookups which we deliberately
+ *     skip in v1 so we can evaluate "is the mesh useful at all"
+ *     before building voxel infrastructure.
  *
  *   - Depth-camera intrinsics are derived from the color-camera
  *     intrinsics by scaling to depth resolution. ARCore's depth
@@ -68,12 +79,20 @@ class DepthMeshRenderer {
     companion object {
         private const val FLOAT_SIZE = 4
         private const val SHORT_SIZE = 2
-        private const val FLOATS_PER_VERTEX = 3 // x y z
+        // Per-vertex layout: x, y, z (world position) + d (depth
+        // in metres, used by the fragment shader for alpha fade).
+        private const val FLOATS_PER_VERTEX = 4
+        private const val POSITION_OFFSET_BYTES = 0
+        private const val DEPTH_OFFSET_BYTES = 3 * FLOAT_SIZE
+        private const val STRIDE_BYTES = FLOATS_PER_VERTEX * FLOAT_SIZE
 
-        // Sub-sample stride in depth-pixel units. 2 means we read
-        // every other depth pixel in each axis (so 1/4 the total).
-        // 320×180 → 160×90 grid → 14400 verts.
-        private const val SAMPLE_STRIDE = 2
+        // Sub-sample stride in depth-pixel units. 4 means we read
+        // every 4th depth pixel in each axis (so 1/16 the total).
+        // 320×180 → 80×45 grid → 3600 verts. Sparser than the
+        // initial half-resolution prototype because at half-res
+        // the wireframe was so dense it looked like a flat mat
+        // pasted over the camera regardless of underlying 3D.
+        private const val SAMPLE_STRIDE = 4
 
         // Skip a quad if any edge has depth disagreement larger
         // than this (meters). 8 cm is generous enough to keep walls
@@ -94,12 +113,10 @@ class DepthMeshRenderer {
         // the mesh (codex flagged this on the original PR). Cap
         // at 65000 to leave a small safety margin.
         //
-        // 320×180 depth at SAMPLE_STRIDE=2 → 14400 verts (well
-        // under). 640×480 at SAMPLE_STRIDE=2 → 76800 verts (over,
-        // would be dropped by the gridSize > MAX_VERTICES guard
-        // below). If we ever ship on a higher-res depth stream
-        // we'd either bump SAMPLE_STRIDE to 3+ or move to 32-bit
-        // indices via OES_element_index_uint.
+        // 320×180 depth at SAMPLE_STRIDE=4 → 3600 verts (well
+        // under). If we ever ship on a higher-res depth stream
+        // we'd either bump SAMPLE_STRIDE further or move to
+        // 32-bit indices via OES_element_index_uint.
         private const val MAX_VERTICES = 65_000
         // Wireframe emits 5 edges per grid quad (top, right,
         // bottom, left, diagonal) × 2 indices/edge = 10 indices
@@ -121,24 +138,47 @@ class DepthMeshRenderer {
         // hi-DPI Pixel screens without becoming a "thicket".
         private const val LINE_WIDTH_PX = 2.0f
 
+        // Depth-fade falloff distance in metres. The fragment
+        // shader scales alpha by `1 / (1 + d / k)` where d is the
+        // vertex's camera-space depth and k is this constant.
+        // k=1.5m means a vertex 1.5m from the camera gets ~50%
+        // of full alpha; at 4m it's ~28%; at 8m it's ~16%. The
+        // foreground stays bright; the background recedes.
+        private const val DEPTH_FADE_K_M = 1.5f
+
         // Translucent green, looks natural over most camera scenes.
-        // RGBA, .a is multiplied by u_Alpha in the fragment shader.
+        // RGBA, .a is multiplied by u_Alpha and the per-vertex
+        // depth-fade in the fragment shader.
         private val MESH_COLOR = floatArrayOf(0.4f, 1.0f, 0.6f, 1.0f)
 
+        // Vertex shader: standard projection + a varying that
+        // forwards the per-vertex depth (in metres) to the
+        // fragment stage so we can fade alpha by distance.
         private const val VERTEX_SHADER = """
             uniform mat4 u_ViewProj;
             attribute vec3 a_Position;
+            attribute float a_Depth;
+            varying float v_Depth;
             void main() {
                 gl_Position = u_ViewProj * vec4(a_Position, 1.0);
+                v_Depth = a_Depth;
             }
         """
 
+        // Fragment shader: u_Color × u_Alpha × depth-fade.
+        // Depth fade is the same `1 / (1 + d/k)` curve used for
+        // generations of depth-cued wireframe rendering — gives a
+        // perceptual sense of distance without crushing far
+        // surfaces to invisibility.
         private const val FRAGMENT_SHADER = """
             precision mediump float;
             uniform vec4 u_Color;
             uniform float u_Alpha;
+            uniform float u_FadeK;
+            varying float v_Depth;
             void main() {
-                gl_FragColor = vec4(u_Color.rgb, u_Color.a * u_Alpha);
+                float fade = 1.0 / (1.0 + v_Depth / u_FadeK);
+                gl_FragColor = vec4(u_Color.rgb, u_Color.a * u_Alpha * fade);
             }
         """
     }
@@ -148,9 +188,11 @@ class DepthMeshRenderer {
 
     private var program: Int = 0
     private var posAttrib: Int = 0
+    private var depthAttrib: Int = 0
     private var viewProjUniform: Int = 0
     private var colorUniform: Int = 0
     private var alphaUniform: Int = 0
+    private var fadeKUniform: Int = 0
 
     private var vbo: Int = 0
     private var ibo: Int = 0
@@ -176,9 +218,11 @@ class DepthMeshRenderer {
     fun createOnGlThread() {
         program = compileProgram()
         posAttrib = GLES20.glGetAttribLocation(program, "a_Position")
+        depthAttrib = GLES20.glGetAttribLocation(program, "a_Depth")
         viewProjUniform = GLES20.glGetUniformLocation(program, "u_ViewProj")
         colorUniform = GLES20.glGetUniformLocation(program, "u_Color")
         alphaUniform = GLES20.glGetUniformLocation(program, "u_Alpha")
+        fadeKUniform = GLES20.glGetUniformLocation(program, "u_FadeK")
 
         val handles = IntArray(2)
         GLES20.glGenBuffers(2, handles, 0)
@@ -189,7 +233,7 @@ class DepthMeshRenderer {
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vbo)
         GLES20.glBufferData(
             GLES20.GL_ARRAY_BUFFER,
-            MAX_VERTICES * FLOATS_PER_VERTEX * FLOAT_SIZE,
+            MAX_VERTICES * STRIDE_BYTES,
             null,
             GLES20.GL_DYNAMIC_DRAW,
         )
@@ -323,6 +367,10 @@ class DepthMeshRenderer {
                         vertexScratch.put(wx)
                         vertexScratch.put(wy)
                         vertexScratch.put(wz)
+                        // Per-vertex camera-space depth in metres.
+                        // Used by the fragment shader to scale
+                        // alpha by distance (closer = brighter).
+                        vertexScratch.put(depthM)
                         vertexIdx[gIdx] = vCount
                         vCount += 1
                     }
@@ -390,7 +438,7 @@ class DepthMeshRenderer {
         GLES20.glBufferSubData(
             GLES20.GL_ARRAY_BUFFER,
             0,
-            vCount * FLOATS_PER_VERTEX * FLOAT_SIZE,
+            vCount * STRIDE_BYTES,
             vertexScratch,
         )
         GLES20.glBindBuffer(GLES20.GL_ELEMENT_ARRAY_BUFFER, ibo)
@@ -417,6 +465,7 @@ class DepthMeshRenderer {
         GLES20.glUniformMatrix4fv(viewProjUniform, 1, false, viewProjMatrix, 0)
         GLES20.glUniform4fv(colorUniform, 1, MESH_COLOR, 0)
         GLES20.glUniform1f(alphaUniform, alpha)
+        GLES20.glUniform1f(fadeKUniform, DEPTH_FADE_K_M)
 
         // Depth test on so back-facing edges get hidden behind
         // closer surfaces — keeps the wireframe readable when one
@@ -437,9 +486,13 @@ class DepthMeshRenderer {
 
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vbo)
         GLES20.glVertexAttribPointer(
-            posAttrib, 3, GLES20.GL_FLOAT, false, FLOATS_PER_VERTEX * FLOAT_SIZE, 0,
+            posAttrib, 3, GLES20.GL_FLOAT, false, STRIDE_BYTES, POSITION_OFFSET_BYTES,
         )
         GLES20.glEnableVertexAttribArray(posAttrib)
+        GLES20.glVertexAttribPointer(
+            depthAttrib, 1, GLES20.GL_FLOAT, false, STRIDE_BYTES, DEPTH_OFFSET_BYTES,
+        )
+        GLES20.glEnableVertexAttribArray(depthAttrib)
 
         GLES20.glBindBuffer(GLES20.GL_ELEMENT_ARRAY_BUFFER, ibo)
         GLES20.glDrawElements(
@@ -450,6 +503,7 @@ class DepthMeshRenderer {
         )
 
         GLES20.glDisableVertexAttribArray(posAttrib)
+        GLES20.glDisableVertexAttribArray(depthAttrib)
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
         GLES20.glBindBuffer(GLES20.GL_ELEMENT_ARRAY_BUFFER, 0)
         GLES20.glDisable(GLES20.GL_BLEND)
