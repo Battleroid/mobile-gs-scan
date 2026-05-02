@@ -3,9 +3,11 @@ package dev.battleroid.mobilegsscan
 import android.os.Bundle
 import android.text.InputType
 import android.view.Gravity
+import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
@@ -18,6 +20,10 @@ class ServerConfigActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val padding = (24 * resources.displayMetrics.density).toInt()
+        // Inner column that holds every form field stacked
+        // vertically. Sized wrap_content vertically so the
+        // surrounding ScrollView (set up below) can grow it past
+        // the screen height as the form gets longer.
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(padding, padding, padding, padding)
@@ -215,7 +221,25 @@ class ServerConfigActivity : AppCompatActivity() {
         root.addView(aSlider)
         root.addView(aHelper)
         root.addView(save)
-        setContentView(root)
+
+        // The form has grown past the screen height (URL + two
+        // sliders + 3-way training preset + opacity slider + Save).
+        // Wrap in a ScrollView so the bottom entries (and any future
+        // sections) are reachable. fillViewport=true so a short form
+        // still fills the screen vertically (no orphan empty band
+        // below the Save button when the device is large enough to
+        // contain everything).
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
+            addView(
+                root,
+                ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+        }
+        setContentView(scroll)
 
         // Apply the helper-text margins after addView so the layout
         // params are the LinearLayout-owned ones (they're
@@ -235,10 +259,15 @@ class ServerConfigActivity : AppCompatActivity() {
             }
         }
 
-        // Same edge-to-edge handling MainActivity gets: pad the root
-        // with the systemBars insets ON TOP of the existing 24dp
-        // baseline padding so the form fields don't slide under the
-        // status bar / gesture nav on Android 15+.
+        // Same edge-to-edge handling MainActivity gets: pad the
+        // inner column with the systemBars insets ON TOP of the
+        // existing 24dp baseline padding so the form fields don't
+        // slide under the status bar / gesture nav on Android 15+.
+        // We pad the LinearLayout (inside the scroll) rather than
+        // the ScrollView itself so the inset region scrolls with
+        // the content — Save button at the bottom sits above the
+        // gesture nav even when the form has been scrolled to its
+        // last entry.
         val basePad = padding
         ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
             val sys = insets.getInsets(WindowInsetsCompat.Type.systemBars())
