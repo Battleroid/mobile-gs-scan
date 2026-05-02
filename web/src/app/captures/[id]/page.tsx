@@ -1,5 +1,5 @@
 "use client";
-import { use, useEffect, useRef, useState } from "react";
+import { use, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import dynamic from "next/dynamic";
@@ -163,12 +163,11 @@ function CaptureNameEditor({ capture }: { capture: Capture }) {
   const [saving, setSaving] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Resync local draft when an upstream rename event lands while we
-  // weren't editing — otherwise stale draft would clobber the live
-  // value the moment the user clicks Edit.
-  useEffect(() => {
-    if (!editing) setDraft(capture.name);
-  }, [capture.name, editing]);
+  // No need to sync `draft` to `capture.name` while not editing —
+  // the heading renders capture.name directly when editing is
+  // false, so a stale local draft is invisible. startEdit below
+  // re-seeds draft from capture.name on entry to edit mode, which
+  // covers the only case where the value matters.
 
   const startEdit = () => {
     setDraft(capture.name);
