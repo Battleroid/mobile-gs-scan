@@ -31,6 +31,11 @@ class JobDetailActivity : AppCompatActivity() {
         const val EXTRA_BASE_URL = "base_url"
         const val EXTRA_JOB_ID = "job_id"
         const val EXTRA_JOB_KIND = "job_kind"
+        // En-dash placeholder for not-yet-set timestamps. Pulled out
+        // as a const so the literal stays under our control — inline
+        // "—" elsewhere in this file would risk getting smart-quoted
+        // again by an editor / paste roundtrip.
+        private const val UNSET = "—"
     }
 
     private lateinit var binding: ActivityJobDetailBinding
@@ -113,8 +118,8 @@ class JobDetailActivity : AppCompatActivity() {
             if (j.progress_msg.isNullOrBlank()) View.GONE else View.VISIBLE
 
         binding.claimedByValue.text = j.claimed_by ?: getString(R.string.detail_unclaimed)
-        binding.startedValue.text = j.started_at ?: “—”.toString()
-        binding.completedValue.text = j.completed_at ?: “—”.toString()
+        binding.startedValue.text = j.started_at ?: UNSET
+        binding.completedValue.text = j.completed_at ?: UNSET
 
         if (j.error.isNullOrBlank()) {
             binding.errorRow.visibility = View.GONE
