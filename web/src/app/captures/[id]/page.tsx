@@ -8,6 +8,7 @@ import { api } from "@/lib/api";
 import { useCaptureEvents } from "@/hooks/useCaptureEvents";
 import { useSceneEvents } from "@/hooks/useSceneEvents";
 import { CapturePairing } from "@/components/CapturePairing";
+import { JobLogPanel } from "@/components/JobLogPanel";
 import type { Job } from "@/lib/types";
 
 // Heavy three.js viewer — keep it out of the SSR bundle.
@@ -205,6 +206,7 @@ function JobRow({ job }: { job: Job }) {
         <p className="text-xs text-muted mt-1">{job.progress_msg}</p>
       )}
       {job.error && <p className="text-xs text-danger mt-1">{job.error}</p>}
+      <JobLogPanel job={job} />
     </li>
   );
 }
