@@ -50,7 +50,7 @@
          of the camera preview. Mutually exclusive — capture
          activity instantiates exactly one renderer per session. -->
     <string name="label_overlay_style">AR overlay style</string>
-    <string name="hint_overlay_style">surface points uses ARCore feature points (lighter, runs everywhere). depth mesh is a Pixel-class prototype that builds a triangle mesh from ARCore\'s depth camera each frame — you may decide it isn\'t worth the noise. on devices without depth support the capture screen falls back to surface points.</string>
+    <string name="hint_overlay_style">surface points uses ARCore feature points (lighter, runs everywhere). depth mesh is a Pixel-class prototype that builds a wireframe from ARCore\'s depth camera each frame — you may decide it isn\'t worth the noise. on devices without depth support the capture screen falls back to surface points.</string>
     <string name="overlay_style_points">Surface points</string>
     <string name="overlay_style_depth_mesh">Depth mesh (experimental)</string>
     <string name="selected_overlay_style_fmt">selected: %1$s</string>
@@ -103,10 +103,11 @@
 
     <!-- Capture screen coverage HUD. Top-centre overlay updated
          from CoverageRenderer.coverageStats() (Phase 1 points) or
-         DepthMeshRenderer.stats() (Phase 3 mesh prototype). -->
+         DepthMeshRenderer.stats() (Phase 3 mesh prototype, now
+         wireframe — counts edges). -->
     <string name="coverage_initial">0%% covered</string>
     <string name="coverage_status_fmt">%1$d%% covered · %2$d points</string>
-    <string name="mesh_status_fmt">depth mesh · %1$d tris</string>
+    <string name="mesh_status_fmt">depth mesh · %1$d edges</string>
 
     <!-- Native capture-detail / job-detail screens. Replaces the
          old AlertDialog from MainActivity and the
