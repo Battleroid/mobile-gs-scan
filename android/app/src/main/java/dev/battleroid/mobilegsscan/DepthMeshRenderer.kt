@@ -14,10 +14,18 @@ import java.nio.ShortBuffer
  * Per ARCore frame, acquires the camera-aligned depth image,
  * unprojects each (sub-sampled) pixel into world space using the
  * camera's pose at that moment, then renders the resulting mesh
- * as filled translucent triangles. The mesh is REPLACED on every
- * frame — i.e. you always see "what the depth camera saw most
- * recently, anchored where the camera was at that moment". When
- * you pan the phone, the previous frame's mesh is gone.
+ * as a translucent wireframe over the camera preview. The mesh
+ * is REPLACED on every frame — i.e. you always see "what the
+ * depth camera saw most recently, anchored where the camera was
+ * at that moment". When you pan the phone, the previous frame's
+ * mesh is gone.
+ *
+ * Wireframe (not filled) by deliberate prototype-aesthetic choice:
+ * lines are ~1 px wide so most of the camera image keeps showing
+ * through, and the user can clearly read the mesh structure to
+ * evaluate "is this useful?". Filled-triangle rendering covered
+ * the entire view in green and made the camera basically
+ * unwatchable.
  *
  * This is intentionally NOT a TSDF / persistent-mesh accumulator;
  * Scaniverse-style "mesh that fills in as you move around" needs a
@@ -27,15 +35,15 @@ import java.nio.ShortBuffer
  * Limitations / known prototype-grade choices:
  *
  *   - Half-resolution sampling (every 2nd depth pixel in each
- *     axis) for ~14k vertices / ~28k triangles at 320×180 depth.
- *     Cuts per-frame CPU work to ~1ms on a Pixel 10 Pro at the
- *     cost of mesh detail.
+ *     axis) for ~14k vertices at 320×180 depth. Cuts per-frame
+ *     CPU work to ~1ms on a Pixel 10 Pro at the cost of mesh
+ *     detail.
  *
- *   - Edge culling: skip a triangle when adjacent corners' depths
+ *   - Edge culling: skip a quad when adjacent corners' depths
  *     differ by more than `EDGE_DEPTH_JUMP_M` absolute (default
- *     8 cm). Prevents the "tent" artifact where a triangle would
- *     stretch from a foreground object to background. Tradeoff: at
- *     surface boundaries we lose some valid triangles too.
+ *     8 cm). Prevents the "tent" artifact where edges would
+ *     stretch from a foreground object to background. Tradeoff:
+ *     at surface boundaries we lose some valid edges too.
  *
  *   - Flat color (translucent green). No per-vertex coverage
  *     shading — that requires a voxel hash + per-vertex lookups
@@ -59,10 +67,10 @@ class DepthMeshRenderer {
 
         // Sub-sample stride in depth-pixel units. 2 means we read
         // every other depth pixel in each axis (so 1/4 the total).
-        // 320×180 → 160×90 grid → 14400 verts, ~28k triangles.
+        // 320×180 → 160×90 grid → 14400 verts.
         private const val SAMPLE_STRIDE = 2
 
-        // Skip a triangle if any edge has depth disagreement larger
+        // Skip a quad if any edge has depth disagreement larger
         // than this (meters). 8 cm is generous enough to keep walls
         // and curved surfaces intact while still cutting "tents"
         // across object boundaries.
@@ -79,10 +87,25 @@ class DepthMeshRenderer {
         // pre-allocated buffer sizes. At 640×480 / stride 2 we'd
         // hit ~76800 verts; cap a touch above that.
         private const val MAX_VERTICES = 100_000
-        // Two triangles per quad cell, 3 indices per triangle.
-        private const val MAX_INDICES = MAX_VERTICES * 6
+        // Wireframe emits 5 edges per grid quad (top, right,
+        // bottom, left, diagonal) × 2 indices/edge = 10 indices
+        // per quad. Worst-case quad count ≈ MAX_VERTICES, so
+        // index budget ≈ MAX_VERTICES × 12 with headroom.
+        private const val INDICES_PER_QUAD = 10
+        private const val MAX_INDICES = MAX_VERTICES * 12
 
-        private const val DEFAULT_ALPHA = 0.45f
+        // Wireframe alpha. Higher than the filled-triangle default
+        // because lines are 1 px wide — even at 0.85 the camera
+        // pixels between lines show through unimpeded. Multiplied
+        // by the user-side overlay-opacity slider so the Settings
+        // value still moderates the overall intensity.
+        private const val DEFAULT_ALPHA = 0.85f
+
+        // Line width in pixels. GLES2 only mandates support up to
+        // 1.0; in practice every Android driver we care about
+        // accepts up to ~10. 2 px reads as a clean wireframe on
+        // hi-DPI Pixel screens without becoming a "thicket".
+        private const val LINE_WIDTH_PX = 2.0f
 
         // Translucent green, looks natural over most camera scenes.
         // RGBA, .a is multiplied by u_Alpha in the fragment shader.
@@ -106,8 +129,8 @@ class DepthMeshRenderer {
         """
     }
 
-    /** Stats for the HUD. [triangles] is the latest mesh's triangle count. */
-    data class MeshStats(val triangles: Int, val vertices: Int)
+    /** Stats for the HUD. [edges] is the latest mesh's line-segment count. */
+    data class MeshStats(val edges: Int, val vertices: Int)
 
     private var program: Int = 0
     private var posAttrib: Int = 0
@@ -175,7 +198,7 @@ class DepthMeshRenderer {
         alpha = a.coerceIn(0f, 1f)
     }
 
-    fun stats(): MeshStats = MeshStats(triangles = indexCount / 3, vertices = vertexCount)
+    fun stats(): MeshStats = MeshStats(edges = indexCount / 2, vertices = vertexCount)
 
     /**
      * Rebuild the mesh from the current depth image.
@@ -295,9 +318,12 @@ class DepthMeshRenderer {
         }
         vertexScratch.position(0)
 
-        // Pass 2: emit triangle indices for each grid quad whose
-        // four corners are all valid AND no edge spans more than
-        // EDGE_DEPTH_JUMP_M. Each quad → two triangles.
+        // Pass 2: emit line indices for each grid quad whose four
+        // corners are all valid AND no edge spans more than
+        // EDGE_DEPTH_JUMP_M. Each quad contributes 5 line segments
+        // (4 sides + 1 diagonal) = 10 indices. Adjacent quads
+        // double up on shared sides; that's a small overdraw cost
+        // for a substantially simpler edge-emission loop.
         indexScratch.position(0)
         var iCount = 0
         for (cy0 in 0 until gridH - 1) {
@@ -309,8 +335,8 @@ class DepthMeshRenderer {
                 val dtl = depthsM[tl]; val dtr = depthsM[tr]
                 val dbl = depthsM[bl]; val dbr = depthsM[br]
                 if (dtl.isNaN() || dtr.isNaN() || dbl.isNaN() || dbr.isNaN()) continue
-                // Edge thresholds (4 sides + 1 diagonal). Worst-case
-                // span of all six pairs gates the quad.
+                // Edge thresholds (4 sides + 2 diagonals). Worst-
+                // case span of the six pairs gates the quad.
                 val maxJump = maxOf(
                     kotlin.math.abs(dtl - dtr),
                     kotlin.math.abs(dtl - dbl),
@@ -323,20 +349,21 @@ class DepthMeshRenderer {
                 val itl = vertexIdx[tl]; val itr = vertexIdx[tr]
                 val ibl = vertexIdx[bl]; val ibr = vertexIdx[br]
                 if (itl < 0 || itr < 0 || ibl < 0 || ibr < 0) continue
-                if (iCount + 6 > MAX_INDICES) break
-                // Two triangles: (tl, bl, br) and (tl, br, tr).
-                // Winding order doesn't matter — we don't enable
-                // back-face culling on the overlay, but consistency
-                // makes any future culling work.
-                indexScratch.put(itl.toShort())
-                indexScratch.put(ibl.toShort())
-                indexScratch.put(ibr.toShort())
-                indexScratch.put(itl.toShort())
-                indexScratch.put(ibr.toShort())
-                indexScratch.put(itr.toShort())
-                iCount += 6
+                if (iCount + INDICES_PER_QUAD > MAX_INDICES) break
+                // Five edges per quad as line-segment pairs:
+                //   top:    tl → tr
+                //   right:  tr → br
+                //   bottom: br → bl
+                //   left:   bl → tl
+                //   diag:   tl → br
+                indexScratch.put(itl.toShort()); indexScratch.put(itr.toShort())
+                indexScratch.put(itr.toShort()); indexScratch.put(ibr.toShort())
+                indexScratch.put(ibr.toShort()); indexScratch.put(ibl.toShort())
+                indexScratch.put(ibl.toShort()); indexScratch.put(itl.toShort())
+                indexScratch.put(itl.toShort()); indexScratch.put(ibr.toShort())
+                iCount += INDICES_PER_QUAD
             }
-            if (iCount + 6 > MAX_INDICES) break
+            if (iCount + INDICES_PER_QUAD > MAX_INDICES) break
         }
         indexScratch.position(0)
 
@@ -374,17 +401,22 @@ class DepthMeshRenderer {
         GLES20.glUniform4fv(colorUniform, 1, MESH_COLOR, 0)
         GLES20.glUniform1f(alphaUniform, alpha)
 
-        // Depth test on so the mesh self-occludes properly. The
-        // camera quad doesn't write depth, so the mesh effectively
-        // floats over the camera image with internal depth ordering
-        // among triangles.
+        // Depth test on so back-facing edges get hidden behind
+        // closer surfaces — keeps the wireframe readable when one
+        // wall is in front of another. Depth mask on so each line's
+        // first-drawn fragment "owns" its pixel; subsequent overlap
+        // gets rejected. Lines are 1–2 px wide so self-occlusion
+        // between adjacent edges isn't a perceivable issue.
         GLES20.glEnable(GLES20.GL_DEPTH_TEST)
         GLES20.glDepthMask(true)
 
-        // Standard alpha blend so we get the translucent veil look
-        // and the camera image shows through.
+        // Standard alpha blend so the camera image shows through
+        // wherever the wireframe ISN'T drawn. Lines are thin so
+        // most of the screen stays unblocked.
         GLES20.glEnable(GLES20.GL_BLEND)
         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+
+        GLES20.glLineWidth(LINE_WIDTH_PX)
 
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vbo)
         GLES20.glVertexAttribPointer(
@@ -394,7 +426,7 @@ class DepthMeshRenderer {
 
         GLES20.glBindBuffer(GLES20.GL_ELEMENT_ARRAY_BUFFER, ibo)
         GLES20.glDrawElements(
-            GLES20.GL_TRIANGLES,
+            GLES20.GL_LINES,
             indexCount,
             GLES20.GL_UNSIGNED_SHORT,
             0,
@@ -404,6 +436,8 @@ class DepthMeshRenderer {
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
         GLES20.glBindBuffer(GLES20.GL_ELEMENT_ARRAY_BUFFER, 0)
         GLES20.glDisable(GLES20.GL_BLEND)
+        // Reset to default in case other renderers rely on it.
+        GLES20.glLineWidth(1.0f)
     }
 
     private fun compileProgram(): Int {
