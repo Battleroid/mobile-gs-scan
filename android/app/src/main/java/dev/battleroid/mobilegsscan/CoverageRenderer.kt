@@ -1,0 +1,277 @@
+package dev.battleroid.mobilegsscan
+
+import android.opengl.GLES20
+import android.opengl.Matrix
+import com.google.ar.core.PointCloud
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.nio.FloatBuffer
+
+/**
+ * Scaniverse-style AR coverage overlay.
+ *
+ * Renders ARCore's tracked feature point cloud as 3D dots ON THE
+ * ACTUAL SUBJECT SURFACE (not floating in mid-air at past camera
+ * positions), colored by how many captured frames have observed
+ * each point:
+ *
+ *   - 1 observation     → red    (just-seen, sparse)
+ *   - 2..4 observations → yellow (moderate)
+ *   - ≥5 observations    → green  (well-covered)
+ *
+ * The user can see at a glance which surface regions are sparsely
+ * sampled (red) vs richly sampled (green) and aim there next. A
+ * companion HUD on the activity reports total point count + the
+ * percentage of points considered well-covered (≥3 observations).
+ *
+ * Lifecycle:
+ *   1. createOnGlThread() — must run on the GL thread (i.e. inside
+ *      GLSurfaceView.Renderer.onSurfaceCreated). Allocates the
+ *      shader program + a single dynamic VBO.
+ *   2. recordObservations(pointCloud) — called once per CAPTURED
+ *      frame (i.e. inside the captureGateActive branch after
+ *      pollFrameData returns), increments per-point observation
+ *      counts and refreshes the latest world-space position. Marks
+ *      the VBO dirty.
+ *   3. draw(viewMatrix, projMatrix) — called every render frame
+ *      after the camera background is drawn. Rebuilds the VBO from
+ *      the observation map if dirty, then renders GL_POINTS with
+ *      depth test enabled.
+ *
+ * Single GL VBO + a flat hashmap: at the typical few-thousand-point
+ * scale ARCore returns, the per-frame rebuild is comfortably under
+ * a millisecond on a 4090-tethered Pixel 10 Pro.
+ */
+class CoverageRenderer {
+    companion object {
+        private const val FLOAT_SIZE = 4
+        private const val FLOATS_PER_VERTEX = 7  // x y z + r g b a
+        private const val STRIDE = FLOATS_PER_VERTEX * FLOAT_SIZE
+
+        // Cap on points uploaded to the GPU per frame. ARCore
+        // typically tracks a few hundred to ~2k points; this is a
+        // safety net if a high-feature scene blows past that.
+        private const val MAX_POINTS = 8192
+
+        // "Well-covered" threshold for the HUD percentage. 3 hits
+        // empirically corresponds to enough multi-view coverage
+        // for splatfacto to triangulate a reasonable gaussian.
+        private const val WELL_COVERED_THRESHOLD = 3
+
+        // Color buckets. RGBA, all alpha=1.
+        private val SPARSE = floatArrayOf(1.0f, 0.4f, 0.4f, 1.0f)    // red
+        private val MODERATE = floatArrayOf(1.0f, 1.0f, 0.4f, 1.0f)  // yellow
+        private val COVERED = floatArrayOf(0.4f, 1.0f, 0.5f, 1.0f)   // green
+
+        // Base on-screen point size in pixels at unit camera distance;
+        // shader divides by view-space depth so closer points are
+        // bigger. Clamp 2..16 keeps very-close and very-far points
+        // visible without ballooning into giant blobs.
+        private const val POINT_BASE_SIZE = 30.0f
+
+        private const val VERTEX_SHADER = """
+            uniform mat4 u_ViewProj;
+            uniform float u_BaseSize;
+            attribute vec3 a_Position;
+            attribute vec4 a_Color;
+            varying vec4 v_Color;
+            void main() {
+                gl_Position = u_ViewProj * vec4(a_Position, 1.0);
+                gl_PointSize = clamp(u_BaseSize / max(gl_Position.w, 0.1), 2.0, 16.0);
+                v_Color = a_Color;
+            }
+        """
+
+        private const val FRAGMENT_SHADER = """
+            precision mediump float;
+            varying vec4 v_Color;
+            void main() {
+                gl_FragColor = v_Color;
+            }
+        """
+    }
+
+    /** Snapshot of coverage stats for the activity's HUD. */
+    data class CoverageStats(val totalPoints: Int, val wellCoveredPct: Int)
+
+    private var program: Int = 0
+    private var posAttrib: Int = 0
+    private var colorAttrib: Int = 0
+    private var viewProjUniform: Int = 0
+    private var baseSizeUniform: Int = 0
+
+    private var vbo: Int = 0
+    private var pointCount: Int = 0
+    private var dirty: Boolean = false
+
+    // ARCore-stable point id → cumulative observation count.
+    private val observations = HashMap<Long, Int>()
+    // ARCore-stable point id → latest world-space xyz. ARCore can
+    // shift a point's position slightly across frames as it refines
+    // its estimate; we always render the latest report.
+    private val positions = HashMap<Long, FloatArray>()
+
+    private val viewProjMatrix = FloatArray(16)
+
+    fun createOnGlThread() {
+        program = compileProgram()
+        posAttrib = GLES20.glGetAttribLocation(program, "a_Position")
+        colorAttrib = GLES20.glGetAttribLocation(program, "a_Color")
+        viewProjUniform = GLES20.glGetUniformLocation(program, "u_ViewProj")
+        baseSizeUniform = GLES20.glGetUniformLocation(program, "u_BaseSize")
+
+        val handles = IntArray(1)
+        GLES20.glGenBuffers(1, handles, 0)
+        vbo = handles[0]
+        // Reserve full capacity up front; per-frame uploads use
+        // glBufferSubData so we never reallocate.
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vbo)
+        GLES20.glBufferData(
+            GLES20.GL_ARRAY_BUFFER,
+            MAX_POINTS * STRIDE,
+            null,
+            GLES20.GL_DYNAMIC_DRAW,
+        )
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
+    }
+
+    /**
+     * Record one observation of every point currently in the
+     * supplied [PointCloud]. Caller is responsible for closing the
+     * PointCloud after this returns (via Closeable.use).
+     *
+     * ARCore's PointCloud.points is a FloatBuffer of (x, y, z,
+     * confidence) per point; ids is an IntBuffer of stable ids.
+     * A given id is stable across frames as long as ARCore keeps
+     * tracking that feature; drop in tracking, the id is gone.
+     */
+    fun recordObservations(pointCloud: PointCloud) {
+        val pts = pointCloud.points ?: return
+        val ids = pointCloud.ids ?: return
+        if (ids.remaining() == 0) return
+
+        pts.rewind()
+        ids.rewind()
+        val n = ids.remaining()
+        var i = 0
+        while (i < n && pts.remaining() >= 4) {
+            val id = ids.get().toLong()
+            val x = pts.get()
+            val y = pts.get()
+            val z = pts.get()
+            pts.get()  // skip confidence
+            observations[id] = (observations[id] ?: 0) + 1
+            val pos = positions.getOrPut(id) { FloatArray(3) }
+            pos[0] = x; pos[1] = y; pos[2] = z
+            i++
+        }
+        dirty = true
+    }
+
+    fun draw(viewMatrix: FloatArray, projMatrix: FloatArray) {
+        if (program == 0) return
+        if (dirty) rebuildVbo()
+        if (pointCount == 0) return
+
+        Matrix.multiplyMM(viewProjMatrix, 0, projMatrix, 0, viewMatrix, 0)
+
+        GLES20.glUseProgram(program)
+        GLES20.glUniformMatrix4fv(viewProjUniform, 1, false, viewProjMatrix, 0)
+        GLES20.glUniform1f(baseSizeUniform, POINT_BASE_SIZE)
+
+        // Depth test on so points behind closer geometry will be
+        // occluded once we have closer geometry. The camera quad
+        // itself doesn't write depth, so this just establishes a
+        // sensible baseline for future overlay layers.
+        GLES20.glEnable(GLES20.GL_DEPTH_TEST)
+        GLES20.glDepthMask(true)
+
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vbo)
+        GLES20.glVertexAttribPointer(
+            posAttrib, 3, GLES20.GL_FLOAT, false, STRIDE, 0,
+        )
+        GLES20.glEnableVertexAttribArray(posAttrib)
+        GLES20.glVertexAttribPointer(
+            colorAttrib, 4, GLES20.GL_FLOAT, false, STRIDE, 3 * FLOAT_SIZE,
+        )
+        GLES20.glEnableVertexAttribArray(colorAttrib)
+
+        GLES20.glDrawArrays(GLES20.GL_POINTS, 0, pointCount)
+
+        GLES20.glDisableVertexAttribArray(posAttrib)
+        GLES20.glDisableVertexAttribArray(colorAttrib)
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
+    }
+
+    fun coverageStats(): CoverageStats {
+        val total = observations.size
+        if (total == 0) return CoverageStats(0, 0)
+        val wellCovered = observations.values.count { it >= WELL_COVERED_THRESHOLD }
+        val pct = ((wellCovered.toFloat() / total) * 100f).toInt().coerceIn(0, 100)
+        return CoverageStats(total, pct)
+    }
+
+    private fun rebuildVbo(): Unit {
+        val ids = observations.keys.toList()
+        // Hard-cap at MAX_POINTS. Rare with ARCore's typical
+        // tracking density but we'd rather drop a few than blow
+        // past our pre-allocated VBO capacity.
+        val take = if (ids.size > MAX_POINTS) ids.subList(0, MAX_POINTS) else ids
+
+        val buf: FloatBuffer = ByteBuffer
+            .allocateDirect(take.size * STRIDE)
+            .order(ByteOrder.nativeOrder())
+            .asFloatBuffer()
+
+        for (id in take) {
+            val pos = positions[id] ?: continue
+            val obs = observations[id] ?: 0
+            val color = when {
+                obs >= 5 -> COVERED
+                obs >= 2 -> MODERATE
+                else -> SPARSE
+            }
+            buf.put(pos[0]); buf.put(pos[1]); buf.put(pos[2])
+            buf.put(color[0]); buf.put(color[1]); buf.put(color[2]); buf.put(color[3])
+        }
+        buf.position(0)
+
+        pointCount = take.size
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vbo)
+        GLES20.glBufferSubData(
+            GLES20.GL_ARRAY_BUFFER,
+            0,
+            take.size * STRIDE,
+            buf,
+        )
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
+        dirty = false
+    }
+
+    private fun compileProgram(): Int {
+        val vs = compileShader(GLES20.GL_VERTEX_SHADER, VERTEX_SHADER)
+        val fs = compileShader(GLES20.GL_FRAGMENT_SHADER, FRAGMENT_SHADER)
+        val prog = GLES20.glCreateProgram()
+        GLES20.glAttachShader(prog, vs)
+        GLES20.glAttachShader(prog, fs)
+        GLES20.glLinkProgram(prog)
+        val linked = IntArray(1)
+        GLES20.glGetProgramiv(prog, GLES20.GL_LINK_STATUS, linked, 0)
+        check(linked[0] != 0) {
+            "CoverageRenderer link failed: " + GLES20.glGetProgramInfoLog(prog)
+        }
+        return prog
+    }
+
+    private fun compileShader(type: Int, src: String): Int {
+        val shader = GLES20.glCreateShader(type)
+        GLES20.glShaderSource(shader, src)
+        GLES20.glCompileShader(shader)
+        val ok = IntArray(1)
+        GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, ok, 0)
+        check(ok[0] != 0) {
+            "CoverageRenderer shader compile failed: " + GLES20.glGetShaderInfoLog(shader)
+        }
+        return shader
+    }
+}

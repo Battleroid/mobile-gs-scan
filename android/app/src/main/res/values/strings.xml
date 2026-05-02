@@ -44,6 +44,12 @@
     <string name="capture_idle">idle — tap Start</string>
     <string name="hint_start_capture">aim the camera at your subject\nthen tap Start when ready</string>
 
+    <!-- Capture screen coverage HUD. Top-centre overlay updated
+         from CoverageRenderer.coverageStats(). Format string takes
+         (well-covered-percent, total-points). -->
+    <string name="coverage_initial">0%% covered</string>
+    <string name="coverage_status_fmt">%1$d%% covered · %2$d points</string>
+
     <!-- Native capture-detail / job-detail screens. Replaces the
          old AlertDialog from MainActivity and the
          openProgressInBrowser hand-off from CaptureActivity. -->

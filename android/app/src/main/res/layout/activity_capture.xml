@@ -37,6 +37,24 @@
         android:fontFamily="monospace"
         android:text="@string/capture_idle" />
 
+    <!-- Top-centre: coverage HUD. Updated by
+         CoverageRenderer.coverageStats() throttled to ~2 Hz from
+         CaptureActivity.Renderer.onDrawFrame. Shows what % of
+         tracked surface points have been observed by enough
+         captured frames to be considered "well-covered". -->
+    <TextView
+        android:id="@+id/coverageHud"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|center_horizontal"
+        android:layout_marginTop="20dp"
+        android:padding="6dp"
+        android:background="#80000000"
+        android:textColor="@android:color/white"
+        android:textSize="14sp"
+        android:fontFamily="monospace"
+        android:text="@string/coverage_initial" />
+
     <!-- Pre-Start hint sitting in the middle of the preview. Goes
          away once the user taps Start. The translucent background
          keeps it readable on a bright camera image. -->
