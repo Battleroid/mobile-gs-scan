@@ -69,17 +69,12 @@ async def init_store(settings: Settings | None = None) -> None:
     _engine = create_async_engine(
         settings.db_url,
         future=True,
-        # WAL mode tolerates the api + worker-gs both holding open
-        # connections without read/write contention.
         connect_args={"timeout": 30},
     )
     _sessionmaker = async_sessionmaker(_engine, expire_on_commit=False)
 
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        # WAL gives us readers-don't-block-writers semantics, which is
-        # what we want when the api is reading job state for a WS
-        # client while the worker is writing heartbeats.
         await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
         await conn.exec_driver_sql("PRAGMA synchronous=NORMAL")
 
@@ -199,7 +194,7 @@ async def set_capture_status(
         await s.commit()
 
 
-# ─── scenes ────────────────────────────────────────
+# ─── scenes ──────────────────────────────────────
 
 
 async def create_scene(capture_id: str) -> Scene:
@@ -232,7 +227,7 @@ async def update_scene(scene_id: str, **fields) -> None:
         await s.commit()
 
 
-# ─── jobs ──────────────────────────────────────────
+# ─── jobs ────────────────────────────────────────
 
 
 async def enqueue_job(scene_id: str, kind: JobKind, payload: dict | None = None) -> Job:
@@ -327,6 +322,32 @@ async def update_job(
     async with session() as s:
         await s.execute(update(Job).where(Job.id == job_id).values(**values))
         await s.commit()
+
+
+async def cancel_job(job_id: str) -> bool:
+    """Set a job to status=canceled if it's still in flight.
+
+    Returns True if a row was updated, False if the job was already
+    in a terminal state (completed / failed / canceled) or doesn't
+    exist. Used by both the explicit POST /api/jobs/{id}/cancel
+    endpoint and DELETE /api/captures/{id} (which cancels every
+    in-flight job for the capture's scene before tearing down).
+    """
+    async with session() as s:
+        result = await s.execute(
+            update(Job)
+            .where(
+                Job.id == job_id,
+                Job.status.in_([
+                    JobStatus.queued,
+                    JobStatus.claimed,
+                    JobStatus.running,
+                ]),
+            )
+            .values(status=JobStatus.canceled, updated_at=_utcnow())
+        )
+        await s.commit()
+        return int(result.rowcount or 0) > 0
 
 
 async def reap_stale_jobs(*, stale_after_seconds: int = 60) -> int:

@@ -15,19 +15,13 @@ import shutil
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from app.pipeline import _running
 from app.pipeline._logtail import format_subprocess_error, tail_file
 
 log = logging.getLogger(__name__)
 
 ProgressCb = Callable[[float, str], Awaitable[None]]
 
-# Regex that picks up splatfacto's iteration progress lines from the
-# subprocess stdout. Splatfacto (and the rest of nerfstudio's trainer)
-# emits lines containing "Iter 1234 ..." — capitalized. The previous
-# parser used line.find(b"iter ") (lowercase) which never matched, so
-# the progress bar froze at 0 % for the entire ~15-min run. Anchored
-# to a word boundary so we don't match "Citerator 23" or other
-# substring noise. Group 1 is the integer iteration count.
 ITER_RE = re.compile(rb"\biter\s+(\d+)", re.IGNORECASE)
 
 
@@ -36,6 +30,7 @@ async def run_train(
     scene_dir: Path,
     iters: int,
     progress: ProgressCb,
+    job_id: str | None = None,
 ) -> dict:
     train_dir = scene_dir / "train"
     train_dir.mkdir(parents=True, exist_ok=True)
@@ -57,7 +52,11 @@ async def run_train(
         )
 
     return await _run_splatfacto(
-        scene_dir=scene_dir, train_dir=train_dir, iters=iters, progress=progress
+        scene_dir=scene_dir,
+        train_dir=train_dir,
+        iters=iters,
+        progress=progress,
+        job_id=job_id,
     )
 
 
@@ -67,6 +66,7 @@ async def _run_splatfacto(
     train_dir: Path,
     iters: int,
     progress: ProgressCb,
+    job_id: str | None,
 ) -> dict:
     sfm_dir = scene_dir / "sfm"
     cmd = [
@@ -86,28 +86,35 @@ async def _run_splatfacto(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )
+    # Register so the worker heartbeat can SIGKILL us on cancel.
+    if job_id is not None:
+        _running.register(job_id, proc)
+    try:
+        last_pct = 0.0
+        with log_path.open("wb") as logf:
+            assert proc.stdout is not None
+            async for raw in proc.stdout:
+                logf.write(raw)
+                m = ITER_RE.search(raw)
+                if not m:
+                    continue
+                try:
+                    current = int(m.group(1))
+                except (IndexError, ValueError):
+                    continue
+                pct = max(0.0, min(0.99, current / max(iters, 1)))
+                # Throttle to ~1 % steps so we don't flood the events
+                # bus with every iter (splatfacto can emit several
+                # lines per iteration).
+                if pct - last_pct >= 0.01:
+                    await progress(pct, f"train: iter {current}/{iters}")
+                    last_pct = pct
 
-    last_pct = 0.0
-    with log_path.open("wb") as logf:
-        assert proc.stdout is not None
-        async for raw in proc.stdout:
-            logf.write(raw)
-            m = ITER_RE.search(raw)
-            if not m:
-                continue
-            try:
-                current = int(m.group(1))
-            except (IndexError, ValueError):
-                continue
-            pct = max(0.0, min(0.99, current / max(iters, 1)))
-            # Throttle to ~1 % steps so we don't flood the events
-            # bus with every iter (splatfacto can emit several
-            # lines per iteration).
-            if pct - last_pct >= 0.01:
-                await progress(pct, f"train: iter {current}/{iters}")
-                last_pct = pct
+        rc = await proc.wait()
+    finally:
+        if job_id is not None:
+            _running.unregister(job_id)
 
-    rc = await proc.wait()
     if rc != 0:
         # Surface the tail of the just-written log file in the
         # exception so it propagates into the job row's error and

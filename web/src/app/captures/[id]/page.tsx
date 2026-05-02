@@ -1,5 +1,6 @@
 "use client";
-import { use } from "react";
+import { use, useState } from "react";
+import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import dynamic from "next/dynamic";
 import clsx from "clsx";
@@ -21,6 +22,7 @@ interface PageProps {
 
 export default function CaptureDetailPage({ params }: PageProps) {
   const { id } = use(params);
+  const router = useRouter();
 
   const { data: initial } = useQuery({
     queryKey: ["capture", id],
@@ -32,15 +34,49 @@ export default function CaptureDetailPage({ params }: PageProps) {
   const sceneId = capture?.scene_id ?? null;
   const { scene } = useSceneEvents(sceneId);
 
+  const [deleting, setDeleting] = useState(false);
+
+  const onDelete = async () => {
+    if (!capture) return;
+    if (
+      !window.confirm(
+        "Delete this capture? All frames and pipeline artifacts will be removed. In-flight jobs will be canceled.",
+      )
+    ) {
+      return;
+    }
+    setDeleting(true);
+    try {
+      const res = await api.deleteCapture(capture.id);
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      router.push("/");
+    } catch (err) {
+      window.alert(`delete failed: ${(err as Error).message}`);
+      setDeleting(false);
+    }
+  };
+
   if (!capture) return <p className="text-muted">loading…</p>;
 
   return (
     <div className="space-y-6">
-      <header>
-        <h1 className="text-lg font-semibold">{capture.name}</h1>
-        <p className="text-xs text-muted">
-          {capture.id} · {capture.source} · {capture.status}
-        </p>
+      <header className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <h1 className="text-lg font-semibold truncate">{capture.name}</h1>
+          <p className="text-xs text-muted">
+            {capture.id} · {capture.source} · {capture.status}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onDelete}
+          disabled={deleting}
+          className="text-xs text-danger underline hover:text-fg disabled:opacity-50"
+        >
+          {deleting ? "deleting…" : "delete"}
+        </button>
       </header>
 
       {capture.status === "pairing" && capture.pair_url && (
@@ -112,21 +148,52 @@ export default function CaptureDetailPage({ params }: PageProps) {
 }
 
 function JobRow({ job }: { job: Job }) {
+  const cancelable =
+    job.status === "queued" ||
+    job.status === "claimed" ||
+    job.status === "running";
+  const [cancelling, setCancelling] = useState(false);
+
+  const onCancel = async () => {
+    if (!window.confirm(`Cancel ${job.kind} job?`)) return;
+    setCancelling(true);
+    try {
+      await api.cancelJob(job.id);
+    } catch (err) {
+      window.alert(`cancel failed: ${(err as Error).message}`);
+    } finally {
+      setCancelling(false);
+    }
+  };
+
   return (
     <li className="border border-rule px-3 py-2">
       <div className="flex items-baseline justify-between text-sm">
         <span>{job.kind}</span>
-        <span
-          className={clsx(
-            "text-xs",
-            job.status === "completed" && "text-fg",
-            job.status === "running" && "text-warn",
-            job.status === "failed" && "text-danger",
-            (job.status === "queued" || job.status === "claimed") && "text-muted",
+        <div className="flex items-center gap-2">
+          <span
+            className={clsx(
+              "text-xs",
+              job.status === "completed" && "text-fg",
+              job.status === "running" && "text-warn",
+              job.status === "failed" && "text-danger",
+              job.status === "canceled" && "text-muted",
+              (job.status === "queued" || job.status === "claimed") && "text-muted",
+            )}
+          >
+            {job.status}
+          </span>
+          {cancelable && (
+            <button
+              type="button"
+              onClick={onCancel}
+              disabled={cancelling}
+              className="text-xs text-danger underline hover:text-fg disabled:opacity-50"
+            >
+              {cancelling ? "…" : "cancel"}
+            </button>
           )}
-        >
-          {job.status}
-        </span>
+        </div>
       </div>
       <div className="mt-1 h-1 bg-rule">
         <div

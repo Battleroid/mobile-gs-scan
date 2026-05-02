@@ -81,6 +81,15 @@ export const api = {
   getScene: (id: string) => jsonReq<Scene>(`/api/scenes/${id}`),
   artifactUrl: (sceneId: string, kind: "ply" | "spz") =>
     `${apiBase()}/api/scenes/${sceneId}/artifacts/${kind}`,
+  // Cancel an in-flight job. Idempotent: returns canceled=false if
+  // the job was already in a terminal state. The worker that owns
+  // the job notices the cancel on its next heartbeat (~5 s) and
+  // SIGKILLs any registered subprocess.
+  cancelJob: (id: string) =>
+    jsonReq<{ ok: boolean; canceled: boolean; status: string }>(
+      `/api/jobs/${id}/cancel`,
+      { method: "POST" },
+    ),
 };
 
 export function wsUrl(path: string): string {

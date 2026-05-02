@@ -9,6 +9,7 @@ import struct
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from app.pipeline import _running
 from app.pipeline._logtail import format_subprocess_error, tail_bytes
 
 log = logging.getLogger(__name__)
@@ -21,6 +22,7 @@ async def run_export(
     scene_dir: Path,
     formats: list[str],
     progress: ProgressCb,
+    job_id: str | None = None,
 ) -> dict:
     export_dir = scene_dir / "export"
     export_dir.mkdir(parents=True, exist_ok=True)
@@ -34,6 +36,7 @@ async def run_export(
         export_dir=export_dir,
         formats=formats,
         progress=progress,
+        job_id=job_id,
     )
 
 
@@ -43,6 +46,7 @@ async def _run_real(
     export_dir: Path,
     formats: list[str],
     progress: ProgressCb,
+    job_id: str | None,
 ) -> dict:
     candidates = sorted(train_dir.rglob("config.yml"))
     if not candidates:
@@ -63,14 +67,17 @@ async def _run_real(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
-        out = await proc.stdout.read() if proc.stdout else b""
-        rc = await proc.wait()
+        if job_id is not None:
+            _running.register(job_id, proc)
+        try:
+            out = await proc.stdout.read() if proc.stdout else b""
+            rc = await proc.wait()
+        finally:
+            if job_id is not None:
+                _running.unregister(job_id)
         log_path = export_dir / "export.log"
         log_path.write_bytes(out)
         if rc != 0:
-            # Tail of the captured stdout/stderr is what landed in
-            # the .log file we just wrote — reuse it directly
-            # instead of re-reading from disk.
             tail = tail_bytes(out)
             raise RuntimeError(
                 format_subprocess_error("ns-export", rc, log_path, tail)
@@ -91,7 +98,13 @@ async def _run_real(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
-        await proc.wait()
+        if job_id is not None:
+            _running.register(job_id, proc)
+        try:
+            await proc.wait()
+        finally:
+            if job_id is not None:
+                _running.unregister(job_id)
         if spz_dst.exists():
             artifacts["spz"] = str(spz_dst)
 
