@@ -113,6 +113,9 @@ export default function CaptureDetailPage({ params }: PageProps) {
               <h2 className="text-sm text-muted mt-6">scene</h2>
               <SplatViewer
                 url={api.base() + (scene.spz_url ?? scene.ply_url!)}
+                pointsUrl={
+                  scene.ply_url ? api.base() + scene.ply_url : undefined
+                }
               />
               <div className="flex gap-3 text-xs">
                 {scene.ply_url && (
