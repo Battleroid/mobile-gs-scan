@@ -7,6 +7,14 @@ FROM ${BASE_IMAGE}
 
 WORKDIR /app
 
+# Application source goes in here, NOT in Dockerfile.base. A code
+# change in app/ only invalidates this single layer in the api
+# image (everything before is cached); same in Dockerfile.gs.
+# Putting COPY app in the base would invalidate downstream FROM
+# layers and force a torch + nerfstudio + glomap rebuild on every
+# edit. Don't move this.
+COPY app /app/app
+
 EXPOSE 8000
 
 CMD ["python", "-m", "uvicorn", "app.main:app", \

@@ -63,4 +63,12 @@ RUN (git clone --depth 1 --branch ${SPZ_TAG} https://github.com/nianticlabs/spz.
 
 WORKDIR /app
 
+# Application source goes here, NOT in Dockerfile.base. A code
+# change in app/ only invalidates this single COPY layer; the
+# torch / nerfstudio / glomap / spz layers above all stay cached.
+# Putting COPY app in the base would invalidate downstream FROM
+# layers and force the heavy CUDA install to redo every edit.
+# Don't move this.
+COPY app /app/app
+
 CMD ["python", "-m", "app.worker_main"]

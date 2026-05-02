@@ -11,6 +11,16 @@
 # never built, for example. 12.8.0 has the cudnn-devel tag and pairs
 # cleanly with cuDNN 9.x and the cu126/cu128 torch wheels we install
 # in Dockerfile.gs.
+#
+# Layer-cache discipline (read this before adding anything below):
+# this image must NOT contain the application source. ``COPY app``
+# lives in the per-service Dockerfiles (Dockerfile.api,
+# Dockerfile.gs) as their LAST layer before CMD, so a code change
+# only invalidates one cheap layer per service. If we COPY app here,
+# the resulting base image gets a new sha on every code change, and
+# every downstream ``FROM ${BASE_IMAGE}`` invalidates the CUDA stack
+# (torch + nerfstudio + gsplat — ~15-20 minutes to reinstall) along
+# with the from-source Glomap + spz builds. Don't.
 FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -54,7 +64,13 @@ WORKDIR /app
 # in this base, plus a current CMake (≥ 3.28 required by glomap).
 # Heavy CUDA-bound packages (torch, gsplat, nerfstudio) go in
 # Dockerfile.gs only — the api doesn't need to pay for them.
-COPY pyproject.toml /app/pyproject.toml
+#
+# Note: the pip install command-line below hardcodes the deps; we do
+# NOT use ``pip install .`` against pyproject.toml. The pyproject COPY
+# is intentionally elided here so changes to pyproject.toml don't
+# invalidate this layer. If you later switch to a real pyproject
+# install, COPY just the pyproject.toml (not app/) so this layer
+# only invalidates when dependencies actually change.
 RUN python -m pip install --upgrade pip && \
     python -m pip install \
         "cmake>=3.28" \
@@ -62,6 +78,8 @@ RUN python -m pip install --upgrade pip && \
         python-multipart sqlalchemy aiosqlite httpx structlog \
         pillow numpy websockets
 
-COPY app /app/app
+# NOTE: ``COPY app`` deliberately NOT here. See the layer-cache
+# discipline note at the top of this file. Each per-service
+# Dockerfile copies app/ in itself, as the last layer.
 
 CMD ["bash"]
