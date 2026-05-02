@@ -184,6 +184,16 @@ function SplatScene({
   const monoMaterialRef = useRef<THREE.PointsMaterial | null>(null);
   const coloredMaterialRef = useRef<THREE.PointsMaterial | null>(null);
   const hasVertexColorsRef = useRef(false);
+  // The setup effect captures maxStdDev once at mount to seed the
+  // SparkRenderer constructor. Subsequent slider drags shouldn't
+  // tear the renderer down (would re-fetch + rebuild the splat on
+  // every tick), so we DELIBERATELY exclude maxStdDev from the
+  // setup-effect's deps array. The second effect at the bottom of
+  // this component applies live changes by writing to
+  // sparkRef.current.maxStdDev. This ref carries the current value
+  // through to the setup effect without making it a dep.
+  const maxStdDevRef = useRef(maxStdDev);
+  maxStdDevRef.current = maxStdDev;
 
   useEffect(() => {
     let cancelled = false;
@@ -289,7 +299,10 @@ function SplatScene({
             SplatMesh: new (opts: { url: string }) => THREE.Object3D;
           };
 
-          const spark = new SparkRenderer({ renderer: gl, maxStdDev });
+          const spark = new SparkRenderer({
+            renderer: gl,
+            maxStdDev: maxStdDevRef.current,
+          });
           scene.add(spark);
           sparkRef.current = spark;
 
