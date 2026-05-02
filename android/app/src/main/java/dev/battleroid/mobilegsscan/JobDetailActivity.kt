@@ -1,6 +1,7 @@
 package dev.battleroid.mobilegsscan
 
 import android.os.Bundle
+import android.text.method.ScrollingMovementMethod
 import android.view.View
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
@@ -26,8 +27,14 @@ import kotlinx.serialization.json.JsonElement
  * web's JobLogPanel behavior (live tail, manual re-open) with one
  * deliberate difference: on a phone there's no easy way to detect
  * "user is reading older output, don't scroll-jack me", so we
- * unconditionally pin to the latest log line on every poll. The
- * user can simply hide the log if they want it out of the way.
+ * unconditionally pin to the latest log line on every poll.
+ *
+ * The TextView is height-capped at 280dp in the layout and given
+ * its own [ScrollingMovementMethod] here, so the auto-scroll-to-
+ * bottom only moves the log's own content. The outer activity
+ * NestedScrollView stays put — the user can scroll the rest of
+ * the page (status, progress, result blob, etc.) freely while the
+ * live tail keeps updating in its bounded panel.
  *
  * The result blob is intentionally rendered as pretty-printed JSON
  * — it's worker-specific (sfm output, train metrics, export paths)
@@ -93,6 +100,12 @@ class JobDetailActivity : AppCompatActivity() {
         binding.btnLogToggle.setOnClickListener { toggleLog() }
         binding.kind.text = seedKind.ifBlank { getString(R.string.detail_loading) }
         binding.statusValue.text = getString(R.string.detail_loading)
+
+        // Make the log TextView scroll its own content. Combined
+        // with the layout-side maxHeight=280dp this turns the log
+        // into a self-contained scroll panel that doesn't push the
+        // activity's NestedScrollView around when content updates.
+        binding.logValue.movementMethod = ScrollingMovementMethod.getInstance()
 
         client = StudioClient(baseUrl)
     }
@@ -172,14 +185,32 @@ class JobDetailActivity : AppCompatActivity() {
             return
         }
         binding.logValue.text = res.log.ifBlank { getString(R.string.detail_log_empty) }
-        // Pin to the latest line on every successful render. The
-        // log lives at the bottom of the activity's NestedScrollView
-        // (binding.root *is* the NestedScrollView), so a fullScroll
-        // to FOCUS_DOWN brings the newest output into view. Posted
-        // so the scroll runs after the layout pass that sized the
-        // updated TextView — calling fullScroll synchronously would
-        // use the pre-update height and miss the new content.
-        binding.root.post { binding.root.fullScroll(View.FOCUS_DOWN) }
+        scrollLogToBottom()
+    }
+
+    /**
+     * Pin the log TextView's *internal* scroll position to its
+     * latest line. Posted so the scroll runs after the layout pass
+     * that sized the updated content — calling scrollTo
+     * synchronously would use the pre-update line count and miss
+     * the new tail.
+     *
+     * Note: this only moves [binding.logValue]'s own scroll, not
+     * the outer NestedScrollView. That is the whole point of this
+     * fix — the user keeps control of the activity-level scroll
+     * position even while the live tail keeps updating below.
+     */
+    private fun scrollLogToBottom() {
+        val tv = binding.logValue
+        tv.post {
+            val layout = tv.layout ?: return@post
+            val lineCount = tv.lineCount
+            if (lineCount <= 0) return@post
+            val bottom = layout.getLineBottom(lineCount - 1)
+            val visible = tv.height - tv.totalPaddingTop - tv.totalPaddingBottom
+            val target = (bottom - visible).coerceAtLeast(0)
+            tv.scrollTo(0, target)
+        }
     }
 
     private fun renderJob(j: StudioClient.JobDetail) {
