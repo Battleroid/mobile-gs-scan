@@ -162,7 +162,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun createNewCapture() {
         val c = client ?: return
-        val name = "Capture ${System.currentTimeMillis() / 1000}"
         val iters = ServerConfig.captureTrainIters(this)
         binding.btnNewCapture.isEnabled = false
         lifecycleScope.launch {
@@ -171,11 +170,16 @@ class MainActivity : AppCompatActivity() {
                 // through capture.meta so the worker's dispatch step
                 // can override its env-default GS_TRAIN_ITERS for
                 // this capture only.
+                //
+                // name=null lets the server pick a memorable random
+                // name (`<adjective> <color> <noun>`). Users can
+                // rename via the capture-detail screen if they want
+                // something specific.
                 val meta = buildJsonObject {
                     put("train_iters", JsonPrimitive(iters))
                 }
                 val capture = c.createCapture(
-                    name = name,
+                    name = null,
                     hasPose = true,
                     meta = meta,
                 )

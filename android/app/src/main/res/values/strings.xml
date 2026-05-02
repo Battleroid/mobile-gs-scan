@@ -10,6 +10,7 @@
     <string name="action_cancel">Cancel</string>
     <string name="action_back">Back</string>
     <string name="action_open_viewer_web">Open viewer in browser</string>
+    <string name="action_rename">Rename</string>
 
     <!-- Settings: studio URL field. Hint reflects the auto-prefix
          behaviour in ServerConfig.normalize — bare hostname or IP
@@ -87,6 +88,14 @@
     <string name="detail_frames_fmt">%1$d</string>
     <string name="detail_frames_with_drops_fmt">%1$d (%2$d dropped)</string>
     <string name="detail_progress_pct_fmt">%1$d%%</string>
+
+    <!-- Capture-detail rename UX. Tapping the name (or the explicit
+         pencil button) opens an AlertDialog with an EditText
+         pre-filled with the current name. Save fires
+         StudioClient.renameCapture; cancel closes the dialog. -->
+    <string name="rename_capture_title">Rename capture</string>
+    <string name="rename_capture_hint">capture name</string>
+    <string name="rename_failed_fmt">rename failed: %1$s</string>
 
     <!-- Job-detail subprocess log section. Mirrors the web's
          JobLogPanel: live tail polled every 3s while open + running,

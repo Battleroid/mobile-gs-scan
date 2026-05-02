@@ -59,7 +59,7 @@ export const api = {
   resolvePairToken: (token: string) =>
     jsonReq<Capture>(`/api/captures/by-token/${token}`),
   createCapture: (body: {
-    name: string;
+    name?: string;
     source: CaptureSource;
     has_pose?: boolean;
     meta?: Record<string, unknown>;
@@ -67,6 +67,13 @@ export const api = {
     jsonReq<Capture>("/api/captures", {
       method: "POST",
       body: JSON.stringify(body),
+    }),
+  // Rename a capture. Server trims + validates non-empty; throws on
+  // 4xx with the server's error body so the caller can surface it.
+  renameCapture: (id: string, name: string) =>
+    jsonReq<Capture>(`/api/captures/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name }),
     }),
   finalize: (id: string) =>
     jsonReq<{ scene_id: string }>(`/api/captures/${id}/finalize`, {

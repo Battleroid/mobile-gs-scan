@@ -194,6 +194,22 @@ async def set_capture_status(
         await s.commit()
 
 
+async def set_capture_name(capture_id: str, name: str) -> None:
+    """Update the user-facing name on a capture row.
+
+    The caller is expected to have already trimmed + validated
+    [name] (non-empty, length-bounded). The id and status are
+    untouched.
+    """
+    async with session() as s:
+        await s.execute(
+            update(Capture)
+            .where(Capture.id == capture_id)
+            .values(name=name, updated_at=_utcnow())
+        )
+        await s.commit()
+
+
 # ─── scenes ──────────────────────────────────────
 
 
