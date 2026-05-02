@@ -18,9 +18,10 @@
 //                    container div
 //   - new tab        open the same scene in a dedicated
 //                    /viewer?url=... page (shareable URL)
-//   - splats / points  toggle between the SplatMesh render and a
-//                    THREE.Points cloud loaded from the same .ply
-//                    via PLYLoader (debug / inspection view)
+//   - view mode      three-way cycle: splats (default Spark
+//                    render) → points (mono cyan PLY point cloud)
+//                    → colored points (per-vertex color from the
+//                    PLY when available, else mono fallback)
 //   - quality        slider that maps to SparkRenderer.maxStdDev,
 //                    1.0 → 6.0
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
@@ -28,11 +29,19 @@ import { Canvas, useThree } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
 
+type ViewMode = "splats" | "points" | "colored";
+
+const VIEW_MODE_LABELS: Record<ViewMode, string> = {
+  splats: "splats",
+  points: "points",
+  colored: "colored points",
+};
+
 interface Props {
   /** /api/scenes/<id>/artifacts/{ply,spz} URL for the splat. */
   url: string;
   /**
-   * Optional .ply URL for the points-mode toggle. Recommended to
+   * Optional .ply URL for the points-mode views. Recommended to
    * pass the .ply variant explicitly even when ``url`` points at
    * the .spz — the PLYLoader fallback can't read .spz.
    */
@@ -48,7 +57,7 @@ interface Props {
 
 export function SplatViewer({ url, pointsUrl, className, fillScreen }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [pointsMode, setPointsMode] = useState(false);
+  const [viewMode, setViewMode] = useState<ViewMode>("splats");
   const [maxStdDev, setMaxStdDev] = useState(3.0);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
@@ -74,6 +83,12 @@ export function SplatViewer({ url, pointsUrl, className, fillScreen }: Props) {
     window.open(`/viewer?${params.toString()}`, "_blank", "noopener");
   }, [url, pointsUrl]);
 
+  const cycleViewMode = useCallback(() => {
+    setViewMode((m) =>
+      m === "splats" ? "points" : m === "points" ? "colored" : "splats",
+    );
+  }, []);
+
   return (
     <div
       ref={containerRef}
@@ -93,7 +108,7 @@ export function SplatViewer({ url, pointsUrl, className, fillScreen }: Props) {
           <SplatScene
             url={url}
             pointsUrl={pointsUrl}
-            pointsMode={pointsMode}
+            viewMode={viewMode}
             maxStdDev={maxStdDev}
           />
         </Suspense>
@@ -120,10 +135,11 @@ export function SplatViewer({ url, pointsUrl, className, fillScreen }: Props) {
         </button>
         <button
           type="button"
-          onClick={() => setPointsMode((p) => !p)}
+          onClick={cycleViewMode}
           className="text-left hover:text-accent"
+          title="cycle view: splats → points → colored points"
         >
-          {pointsMode ? "→ splats" : "→ points"}
+          view: {VIEW_MODE_LABELS[viewMode]}
         </button>
         <label className="flex flex-col gap-0.5">
           <span className="text-muted">quality {maxStdDev.toFixed(1)}</span>
@@ -145,12 +161,12 @@ export function SplatViewer({ url, pointsUrl, className, fillScreen }: Props) {
 function SplatScene({
   url,
   pointsUrl,
-  pointsMode,
+  viewMode,
   maxStdDev,
 }: {
   url: string;
   pointsUrl?: string;
-  pointsMode: boolean;
+  viewMode: ViewMode;
   maxStdDev: number;
 }) {
   const { gl, scene } = useThree();
@@ -159,6 +175,9 @@ function SplatScene({
   const splatRef = useRef<THREE.Object3D | null>(null);
   const sparkRef = useRef<THREE.Object3D | null>(null);
   const pointsRef = useRef<THREE.Points | null>(null);
+  const monoMaterialRef = useRef<THREE.PointsMaterial | null>(null);
+  const coloredMaterialRef = useRef<THREE.PointsMaterial | null>(null);
+  const hasVertexColorsRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -173,7 +192,7 @@ function SplatScene({
         // pointsUrl when provided (caller knows .ply is available),
         // otherwise fall back to the same url — PLYLoader will
         // succeed on .ply and fail on .spz, which we treat as
-        // "no points view". Toggle hides the splat or vice versa.
+        // "no points view".
         const sourceForPoints = pointsUrl ?? url;
         try {
           const { PLYLoader } = await import(
@@ -182,14 +201,32 @@ function SplatScene({
           const loader = new PLYLoader();
           const geom = await loader.loadAsync(sourceForPoints);
           if (cancelled) return;
-          const points = new THREE.Points(
-            geom,
-            new THREE.PointsMaterial({
-              size: 0.01,
-              vertexColors: geom.hasAttribute("color"),
-              color: geom.hasAttribute("color") ? 0xffffff : 0x66ccff,
-            }),
-          );
+
+          const hasColor = geom.hasAttribute("color");
+          hasVertexColorsRef.current = hasColor;
+
+          // Mono material: always available, used for "points" mode
+          // and as the fallback for "colored" when the geometry has
+          // no color attribute.
+          const mono = new THREE.PointsMaterial({
+            size: 0.01,
+            vertexColors: false,
+            color: 0x66ccff,
+          });
+          monoMaterialRef.current = mono;
+
+          // Colored material: only meaningful when the PLY has a
+          // color attribute. Allocate it anyway so the swap path is
+          // unconditional; the "colored" view falls back to mono
+          // below when hasColor is false.
+          const colored = new THREE.PointsMaterial({
+            size: 0.01,
+            vertexColors: hasColor,
+            color: 0xffffff,
+          });
+          coloredMaterialRef.current = colored;
+
+          const points = new THREE.Points(geom, mono);
           points.visible = false;
           groupAtMount?.add(points);
           pointsRef.current = points;
@@ -239,19 +276,35 @@ function SplatScene({
       if (pointsRef.current) {
         groupAtMount?.remove(pointsRef.current);
         pointsRef.current.geometry.dispose();
-        (pointsRef.current.material as THREE.Material).dispose();
       }
+      monoMaterialRef.current?.dispose();
+      coloredMaterialRef.current?.dispose();
       splatRef.current = null;
       sparkRef.current = null;
       pointsRef.current = null;
+      monoMaterialRef.current = null;
+      coloredMaterialRef.current = null;
     };
   }, [url, pointsUrl, gl, scene]);
 
-  // Apply pointsMode toggle without re-creating either object.
+  // Apply view-mode change without re-creating either object.
+  // Swaps the points material reference for the colored variant so
+  // we don't allocate per click.
   useEffect(() => {
-    if (splatRef.current) splatRef.current.visible = !pointsMode;
-    if (pointsRef.current) pointsRef.current.visible = pointsMode;
-  }, [pointsMode]);
+    const splat = splatRef.current;
+    const points = pointsRef.current;
+    if (splat) splat.visible = viewMode === "splats";
+    if (points) {
+      points.visible = viewMode !== "splats";
+      if (viewMode === "colored" && hasVertexColorsRef.current && coloredMaterialRef.current) {
+        points.material = coloredMaterialRef.current;
+      } else if (monoMaterialRef.current) {
+        // "points" mode, or "colored" fallback when the PLY lacks
+        // vertex colors.
+        points.material = monoMaterialRef.current;
+      }
+    }
+  }, [viewMode]);
 
   // Apply maxStdDev change. SparkRenderer exposes maxStdDev as a
   // settable property; if a future Spark version drops it the
