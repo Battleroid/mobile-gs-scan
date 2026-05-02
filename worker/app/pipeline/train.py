@@ -15,6 +15,7 @@ import shutil
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from app.config import get_settings
 from app.pipeline import _running
 from app.pipeline._logtail import format_subprocess_error, tail_file
 
@@ -89,6 +90,8 @@ async def _run_splatfacto(
     job_id: str | None,
 ) -> dict:
     sfm_dir = scene_dir / "sfm"
+    settings = get_settings()
+
     cmd = [
         "ns-train", "splatfacto",
         "--data", str(sfm_dir),
@@ -96,6 +99,15 @@ async def _run_splatfacto(
         "--output-dir", str(train_dir),
         "--vis", "tensorboard",
         "--viewer.quit-on-train-completion", "True",
+        # Force splatfacto's image cache to GPU (or whatever the
+        # operator configured). Default in nerfstudio is ``gpu`` but
+        # FullImagesDataManager auto-falls-back to ``cpu`` for
+        # datasets > ~500 images, which costs a chunk of step time
+        # to slow CPU → GPU copies. With a 24GB+ card we usually
+        # have headroom; if this OOMs, set GS_TRAIN_CACHE_IMAGES=cpu
+        # in env.
+        "--pipeline.datamanager.cache-images",
+        settings.train_cache_images,
     ]
 
     await progress(0.0, f"train: ns-train splatfacto ({iters} iters)")
