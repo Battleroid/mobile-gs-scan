@@ -3,7 +3,6 @@ package dev.battleroid.mobilegsscan
 import android.content.Context
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
@@ -66,9 +65,16 @@ class DraftUploader(
             meta.train_iters?.let { put("train_iters", JsonPrimitive(it)) }
         }
 
+        // ``meta.name`` is nullable on the draft, but master's
+        // StudioClient.createCapture takes a non-null String. Send
+        // empty when we have no draft name; the server is happy
+        // with empty (Pydantic ``str`` with no min_length) and
+        // post-#45 will treat empty as the "auto-generate a random
+        // name" signal. Either way the user can rename via the
+        // detail screen.
         val capture = try {
             client.createCapture(
-                name = meta.name,
+                name = meta.name.orEmpty(),
                 hasPose = true,
                 source = "mobile_native",
                 meta = createMeta,
@@ -80,12 +86,8 @@ class DraftUploader(
         val pairToken = capture.pair_token
             ?: return@withContext Result.Failed("server returned no pair_token")
 
-        // Use a child scope so we can hard-cancel the StreamingClient
-        // listener if anything goes wrong mid-upload without
-        // bleeding into the caller's scope.
-        val streamerScope = scope
         val streamer = StreamingClient(
-            scope = streamerScope,
+            scope = scope,
             baseUrl = baseUrl,
             captureId = capture.id,
             pairToken = pairToken,
