@@ -12,7 +12,7 @@ Wire protocol:
       final             {"type":"finalize","reason":"user"|"timeout"}
 
   server → client:
-      every 16 frames   {"type":"ack","frames_received":N,"frames_dropped":M}
+      every ACK_BATCH   {"type":"ack","frames_received":N,"frames_dropped":M}
       cap reached       {"type":"limit","reason":"max_frames","cap":N}
       after finalize    {"type":"queued","scene_id":"..."}
 """
@@ -31,6 +31,13 @@ from app.jobs.schema import CaptureSource, CaptureStatus
 from app.pipeline.dispatch import enqueue_pipeline
 
 log = logging.getLogger(__name__)
+
+# Frames between server→client ack messages. The phone-side counter
+# only advances when an ack arrives, so this directly controls how
+# often the user sees the "N frames" label refresh during a capture.
+# 16 was too lumpy at 5–10 fps (4–3 second gaps); 4 keeps the counter
+# moving every ~half-second at 10 fps without flooding the WS.
+ACK_BATCH = 4
 
 
 async def run_stream_session(ws: WebSocket, *, pair_token: str) -> None:
@@ -129,9 +136,9 @@ async def run_stream_session(ws: WebSocket, *, pair_token: str) -> None:
                 accepted += 1
                 pending_header = None
 
-                if accepted % 16 == 0:
+                if accepted % ACK_BATCH == 0:
                     await store.bump_capture_frames(
-                        capture.id, accepted=16, dropped=0
+                        capture.id, accepted=ACK_BATCH, dropped=0
                     )
                     await events.publish_capture(
                         capture.id,
@@ -165,7 +172,7 @@ async def run_stream_session(ws: WebSocket, *, pair_token: str) -> None:
             capture.id, CaptureStatus.failed, error="stream crashed"
         )
     finally:
-        leftover_accepted = accepted % 16
+        leftover_accepted = accepted % ACK_BATCH
         if leftover_accepted or dropped:
             await store.bump_capture_frames(
                 capture.id, accepted=leftover_accepted, dropped=dropped

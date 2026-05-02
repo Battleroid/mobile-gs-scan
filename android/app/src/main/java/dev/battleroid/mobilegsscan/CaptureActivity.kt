@@ -51,6 +51,11 @@ import javax.microedition.khronos.opengles.GL10
  *      the home screen) so they land on the pipeline-progress view
  *      instead of the browser. CaptureDetailActivity polls
  *      /api/captures + /api/scenes for live job state.
+ *
+ * Capture rate + JPEG quality are read once at activity start from
+ * ServerConfig and passed to the ARCaptureSession constructor; the
+ * user changes them via the Settings screen, and the next session
+ * picks up the new values.
  */
 class CaptureActivity : AppCompatActivity() {
     companion object {
@@ -247,7 +252,15 @@ class CaptureActivity : AppCompatActivity() {
 
     private fun startArSession() {
         try {
-            arSession = ARCaptureSession(this)
+            // Capture rate + jpeg quality come from Settings (with
+            // sensible defaults if the user hasn't touched them).
+            // ARCaptureSession's rate-limit gate uses targetIntervalMs
+            // directly; floor at 33ms (~30 fps) inside ServerConfig.
+            arSession = ARCaptureSession(
+                context = this,
+                targetIntervalMs = ServerConfig.captureIntervalMs(this),
+                jpegQuality = ServerConfig.captureJpegQuality(this),
+            )
         } catch (e: Exception) {
             Toast.makeText(this, "ARCore session failed: ${e.message}", Toast.LENGTH_LONG).show()
             finish()
@@ -371,27 +384,11 @@ class CaptureActivity : AppCompatActivity() {
             return
         }
         streamer?.finalize("user")
-        // Give the server a beat to ack the finalize before we hop
-        // to the detail screen. If the WS round-trip beats the
-        // delay, handleStreamEvent will fire routeToCaptureDetail
-        // first and the postDelayed will short-circuit on the
-        // isFinishing() guard inside.
         binding.glSurface.postDelayed({
             if (!isFinishing) routeToCaptureDetail()
         }, 5_000)
     }
 
-    /**
-     * Hop the user to the native CaptureDetailActivity stacked on
-     * top of MainActivity. Replaces the previous behaviour of
-     * opening /captures/<id> in a browser.
-     *
-     * Intent flags:
-     *   - CLEAR_TOP + SINGLE_TOP on the MainActivity intent so we
-     *     reuse the existing instance instead of stacking a duplicate.
-     *   - NEW_TASK is implicit because we're starting from an
-     *     activity context with the MainActivity flags.
-     */
     private fun routeToCaptureDetail() {
         val cap = captureId ?: return
         val home = Intent(this, MainActivity::class.java).apply {
@@ -402,8 +399,6 @@ class CaptureActivity : AppCompatActivity() {
             putExtra(CaptureDetailActivity.EXTRA_CAPTURE_ID, cap)
             putExtra(CaptureDetailActivity.EXTRA_CAPTURE_NAME, captureName.orEmpty())
         }
-        // Stack: MainActivity (root) <- CaptureDetailActivity (top).
-        // Back from detail returns to home.
         startActivities(arrayOf(home, detail))
         finish()
     }

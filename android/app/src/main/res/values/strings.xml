@@ -18,6 +18,14 @@
     <string name="hint_studio_url_help">scheme optional — we\'ll prepend https:// for you. type http:// explicitly if your studio runs without TLS.</string>
     <string name="label_studio_url">Studio URL</string>
 
+    <!-- Settings: capture-rate + jpeg-quality sliders. -->
+    <string name="label_capture_fps">Capture rate</string>
+    <string name="hint_capture_fps">frames per second sent to the studio. higher = smoother coverage but more bandwidth and battery drain. 10 fps is the default.</string>
+    <string name="capture_fps_fmt">%1$d fps</string>
+    <string name="label_capture_jpeg_quality">JPEG quality</string>
+    <string name="hint_capture_jpeg_quality">image quality of streamed frames. higher = sharper input for splatting but more bandwidth per frame. 85%% is the default.</string>
+    <string name="capture_jpeg_quality_fmt">%1$d%%</string>
+
     <!-- home screen status indicator -->
     <string name="status_online">studio: online</string>
     <string name="status_offline">studio: offline</string>
