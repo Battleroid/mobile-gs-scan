@@ -24,14 +24,24 @@ import java.nio.FloatBuffer
  * companion HUD on the activity reports total point count + the
  * percentage of points considered well-covered (≥3 observations).
  *
- * Distance fade: each point's per-fragment alpha is also scaled
- * by `1 / (1 + d / FADE_K_M)` where d is the post-projection
- * homogeneous-w (effectively view-space depth in metres). Closer
- * points stay bright; far ones fade toward translucent so the
- * overlay reads as 3D rather than as a flat uniform sprinkle of
- * dots over the camera image. Combines naturally with the
- * existing distance-based point-size attenuation already in the
- * vertex shader (closer = bigger AND brighter).
+ * Three depth cues stack in the rendering pipeline so the eye
+ * reads the overlay as 3D rather than as a flat sprinkle of dots
+ * over the camera image:
+ *
+ *   1. Distance-attenuated point size in the vertex shader:
+ *      `gl_PointSize = clamp(BASE / max(w, 0.1), 3.0, 28.0)`.
+ *      Closer points are bigger; far points stay visible at the
+ *      lower clamp.
+ *
+ *   2. Distance-fade alpha in the fragment shader:
+ *      `1 / (1 + d / FADE_K_M)`. Closer points keep their full
+ *      colour; far ones recede toward translucent.
+ *
+ *   3. Round point sprites: the fragment shader discards
+ *      fragments outside the unit circle within `gl_PointCoord`
+ *      and softens the edge with a smoothstep. GL_POINTS draws as
+ *      square sprites by default; the discard-and-feather makes
+ *      them look like crisp circles.
  *
  * Lifecycle:
  *   1. createOnGlThread() — must run on the GL thread (i.e. inside
@@ -76,11 +86,22 @@ class CoverageRenderer {
         private val MODERATE = floatArrayOf(1.0f, 1.0f, 0.4f, 1.0f)  // yellow
         private val COVERED = floatArrayOf(0.4f, 1.0f, 0.5f, 1.0f)   // green
 
-        // Base on-screen point size in pixels at unit camera distance;
-        // shader divides by view-space depth so closer points are
-        // bigger. Clamp 2..16 keeps very-close and very-far points
-        // visible without ballooning into giant blobs.
-        private const val POINT_BASE_SIZE = 30.0f
+        // Base on-screen point size in pixels at unit camera
+        // distance; shader divides by view-space depth so closer
+        // points are bigger. Bumped up from 30 → 50 to give close
+        // points a visibly larger footprint at typical capture
+        // distances (under ~2m the previous size was clamped at
+        // 16 px and lost any close-vs-very-close size signal).
+        private const val POINT_BASE_SIZE = 50.0f
+
+        // Per-point screen-size clamp, in pixels. The lower bound
+        // keeps far points readable on hi-DPI Pixel screens (was
+        // 2 px which read as a single anti-aliased pixel and
+        // disappeared against busy backgrounds). The upper bound
+        // keeps the closest points from ballooning into giant
+        // blobs when the camera is right on top of a surface.
+        private const val POINT_MIN_SIZE = 3.0f
+        private const val POINT_MAX_SIZE = 28.0f
 
         // Default alpha if the activity never calls setAlpha. 0.7
         // matches the user-configurable default in ServerConfig
@@ -100,13 +121,15 @@ class CoverageRenderer {
         private const val VERTEX_SHADER = """
             uniform mat4 u_ViewProj;
             uniform float u_BaseSize;
+            uniform float u_MinSize;
+            uniform float u_MaxSize;
             attribute vec3 a_Position;
             attribute vec4 a_Color;
             varying vec4 v_Color;
             varying float v_Depth;
             void main() {
                 gl_Position = u_ViewProj * vec4(a_Position, 1.0);
-                gl_PointSize = clamp(u_BaseSize / max(gl_Position.w, 0.1), 2.0, 16.0);
+                gl_PointSize = clamp(u_BaseSize / max(gl_Position.w, 0.1), u_MinSize, u_MaxSize);
                 v_Color = a_Color;
                 // gl_Position.w after the perspective transform is
                 // approximately the view-space depth in metres,
@@ -122,13 +145,26 @@ class CoverageRenderer {
             varying vec4 v_Color;
             varying float v_Depth;
             void main() {
+                // Round point sprites: gl_PointCoord runs 0..1
+                // across the square. Discard fragments outside the
+                // inscribed unit circle (radius 0.5 from centre)
+                // and feather a couple of pixels at the edge for
+                // cheap anti-aliasing.
+                vec2 uv = gl_PointCoord - vec2(0.5);
+                float r = length(uv);
+                if (r > 0.5) discard;
+                float edgeAa = 1.0 - smoothstep(0.42, 0.5, r);
+
                 // Standard depth-cued opacity curve: bright at the
                 // near plane, asymptotically fading toward zero as
                 // the point recedes. Without this the overlay
                 // reads as a uniform sprinkle of dots over the
                 // camera image with no 3D cue.
                 float fade = 1.0 / (1.0 + v_Depth / u_FadeK);
-                gl_FragColor = vec4(v_Color.rgb, v_Color.a * u_Alpha * fade);
+                gl_FragColor = vec4(
+                    v_Color.rgb,
+                    v_Color.a * u_Alpha * fade * edgeAa
+                );
             }
         """
     }
@@ -141,6 +177,8 @@ class CoverageRenderer {
     private var colorAttrib: Int = 0
     private var viewProjUniform: Int = 0
     private var baseSizeUniform: Int = 0
+    private var minSizeUniform: Int = 0
+    private var maxSizeUniform: Int = 0
     private var alphaUniform: Int = 0
     private var fadeKUniform: Int = 0
 
@@ -165,6 +203,8 @@ class CoverageRenderer {
         colorAttrib = GLES20.glGetAttribLocation(program, "a_Color")
         viewProjUniform = GLES20.glGetUniformLocation(program, "u_ViewProj")
         baseSizeUniform = GLES20.glGetUniformLocation(program, "u_BaseSize")
+        minSizeUniform = GLES20.glGetUniformLocation(program, "u_MinSize")
+        maxSizeUniform = GLES20.glGetUniformLocation(program, "u_MaxSize")
         alphaUniform = GLES20.glGetUniformLocation(program, "u_Alpha")
         fadeKUniform = GLES20.glGetUniformLocation(program, "u_FadeK")
 
@@ -235,6 +275,8 @@ class CoverageRenderer {
         GLES20.glUseProgram(program)
         GLES20.glUniformMatrix4fv(viewProjUniform, 1, false, viewProjMatrix, 0)
         GLES20.glUniform1f(baseSizeUniform, POINT_BASE_SIZE)
+        GLES20.glUniform1f(minSizeUniform, POINT_MIN_SIZE)
+        GLES20.glUniform1f(maxSizeUniform, POINT_MAX_SIZE)
         GLES20.glUniform1f(alphaUniform, alpha)
         GLES20.glUniform1f(fadeKUniform, DEPTH_FADE_K_M)
 
