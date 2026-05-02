@@ -102,7 +102,7 @@ async def _run_splatfacto(
             pct = max(0.0, min(0.99, current / max(iters, 1)))
             # Throttle to ~1 % steps so we don't flood the events
             # bus with every iter (splatfacto can emit several
-            // lines per iteration).
+            # lines per iteration).
             if pct - last_pct >= 0.01:
                 await progress(pct, f"train: iter {current}/{iters}")
                 last_pct = pct
