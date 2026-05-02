@@ -34,7 +34,7 @@ export default function NewCapturePage() {
       <input
         value={name}
         onChange={(e) => setName(e.target.value)}
-        placeholder="session name"
+        placeholder="session name (optional — server picks a memorable random name if blank)"
         className="w-full bg-rule/30 border border-rule px-3 py-2 outline-none focus:border-accent"
       />
 
@@ -66,7 +66,11 @@ function PhonePairPanel({ name }: { name: string }) {
   const m = useMutation({
     mutationFn: () =>
       api.createCapture({
-        name: name || "phone capture",
+        // Pass the user's text only if non-empty after trim; let
+        // the server auto-generate a memorable name otherwise. The
+        // capture detail page surfaces a rename UI for after-the-
+        // fact corrections.
+        name: name.trim() || undefined,
         source: "mobile_native",
         has_pose: true,
         meta: {},
@@ -95,8 +99,9 @@ function PhonePairPanel({ name }: { name: string }) {
     <div className="space-y-3">
       <p className="text-sm text-muted">
         phone capture uses ARCore poses (Android app) or device-motion +
-        SfM (PWA fallback). pick a name above and start the session,
-        and we&apos;ll mint a pair token + QR.
+        SfM (PWA fallback). leave the name blank to let the server
+        pick a memorable one for you, or type your own — you can
+        rename later either way.
       </p>
       <button
         onClick={() => m.mutate()}
