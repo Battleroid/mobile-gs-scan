@@ -9,6 +9,8 @@ import struct
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from app.pipeline._logtail import format_subprocess_error, tail_bytes
+
 log = logging.getLogger(__name__)
 
 ProgressCb = Callable[[float, str], Awaitable[None]]
@@ -63,9 +65,16 @@ async def _run_real(
         )
         out = await proc.stdout.read() if proc.stdout else b""
         rc = await proc.wait()
-        (export_dir / "export.log").write_bytes(out)
+        log_path = export_dir / "export.log"
+        log_path.write_bytes(out)
         if rc != 0:
-            raise RuntimeError(f"ns-export exited {rc}")
+            # Tail of the captured stdout/stderr is what landed in
+            # the .log file we just wrote — reuse it directly
+            # instead of re-reading from disk.
+            tail = tail_bytes(out)
+            raise RuntimeError(
+                format_subprocess_error("ns-export", rc, log_path, tail)
+            )
         ply = next(export_dir.glob("*.ply"), None)
         if ply is None:
             raise RuntimeError("ns-export produced no .ply")

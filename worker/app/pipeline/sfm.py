@@ -28,6 +28,8 @@ from typing import Awaitable, Callable
 
 import numpy as np
 
+from app.pipeline._logtail import format_subprocess_error, tail_text
+
 log = logging.getLogger(__name__)
 
 
@@ -85,7 +87,14 @@ async def _run_glomap(*, sfm_dir: Path, progress: ProgressCb) -> dict:
     log_path = sfm_dir / "glomap.log"
     log_path.write_text(proc.stdout + "\n" + proc.stderr)
     if proc.returncode != 0:
-        raise RuntimeError(f"glomap exited {proc.returncode}, see {log_path}")
+        # We have stdout+stderr already in memory — prefer that to a
+        # second filesystem read. The log file still exists for full
+        # context but the tail goes into the exception so the job
+        # row's error field shows the failing message.
+        tail = tail_text(proc.stdout + "\n" + proc.stderr)
+        raise RuntimeError(
+            format_subprocess_error("glomap", proc.returncode, log_path, tail)
+        )
     await progress(0.95, "glomap: done")
     return {"backend": "glomap", "log": str(log_path)}
 
@@ -105,7 +114,10 @@ async def _run_colmap(*, sfm_dir: Path, progress: ProgressCb) -> dict:
     log_path = sfm_dir / "colmap.log"
     log_path.write_text(proc.stdout + "\n" + proc.stderr)
     if proc.returncode != 0:
-        raise RuntimeError(f"colmap exited {proc.returncode}, see {log_path}")
+        tail = tail_text(proc.stdout + "\n" + proc.stderr)
+        raise RuntimeError(
+            format_subprocess_error("colmap", proc.returncode, log_path, tail)
+        )
     await progress(0.95, "colmap: done")
     return {"backend": "colmap", "log": str(log_path), "database": str(db)}
 
@@ -130,48 +142,15 @@ async def _run_stub(*, sfm_dir: Path, progress: ProgressCb) -> dict:
 
 
 # ─── ARCore → COLMAP ──────────────────────────────────────
-#
-# Convert the per-frame ARCore poses streamed by the phone into
-# the COLMAP workspace ns-train splatfacto needs.
-#
-# The math:
-#
-# 1. ARCore writes its 4x4 pose matrices in COLUMN-major order to
-#    the float[16] buffer, so we have to transpose after reshape
-#    (numpy defaults to row-major / C order).
-#
-# 2. Each ARCore pose is camera-to-world in the OpenGL camera
-#    convention: +X right, +Y up, +Z back (camera looks down -Z).
-#
-# 3. COLMAP's images.txt expects WORLD-to-camera in the OpenCV
-#    camera convention: +X right, +Y down, +Z forward (camera looks
-#    down +Z). Two conversions:
-#      a) Switch camera-frame convention via right-multiply by
-#         diag(1, -1, -1, 1) — flip Y and Z axes of the camera frame
-#         (world frame is unchanged).
-#      b) Invert the resulting cam-to-world to get world-to-cam.
-#         For a rigid transform, the inverse is the transpose of the
-#         rotation block plus a recomputed translation — no
-#         numerical inversion needed.
-#
-# 4. COLMAP's quaternion is Hamilton convention with (qw, qx, qy, qz)
-#    field order in the file.
 
 _GL_CAM_TO_CV_CAM = np.diag([1.0, -1.0, -1.0, 1.0])
 
 
 def _arcore_pose_to_world_to_cam(pose16: list) -> tuple[np.ndarray, np.ndarray]:
-    """ARCore cam-to-world (OpenGL camera, column-major float[16])
-    → COLMAP world-to-cam (OpenCV camera). Returns (R, t) where R
-    is 3x3 and t is length-3.
-    """
     if len(pose16) != 16:
         raise ValueError(f"expected 16-float pose, got {len(pose16)}")
-    # Transpose because ARCore writes column-major.
     M_c2w_gl = np.array(pose16, dtype=np.float64).reshape(4, 4).T
-    # Switch camera convention.
     M_c2w_cv = M_c2w_gl @ _GL_CAM_TO_CV_CAM
-    # Rigid inverse: cam_to_world R, t → world_to_cam R^T, -R^T t.
     R_c2w = M_c2w_cv[:3, :3]
     t_c2w = M_c2w_cv[:3, 3]
     R_w2c = R_c2w.T
@@ -180,11 +159,6 @@ def _arcore_pose_to_world_to_cam(pose16: list) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _rot_to_quat_wxyz(R: np.ndarray) -> tuple[float, float, float, float]:
-    """Rotation matrix → (qw, qx, qy, qz) Hamilton quaternion.
-
-    Standard Shepperd's method — picks the largest diagonal element
-    branch to avoid numerical issues near gimbal poses.
-    """
     trace = R[0, 0] + R[1, 1] + R[2, 2]
     if trace > 0:
         s = math.sqrt(trace + 1.0) * 2
@@ -216,29 +190,6 @@ def _rot_to_quat_wxyz(R: np.ndarray) -> tuple[float, float, float, float]:
 async def write_arcore_poses_as_colmap(
     *, capture_dir: Path, scene_dir: Path, progress: ProgressCb
 ) -> dict:
-    """Convert poses.jsonl to a COLMAP-format workspace.
-
-    Output layout under ``scene_dir/sfm/``:
-
-      images/                   symlink to capture_dir/frames
-      poses.jsonl               copy of the streamed poses (debug)
-      arcore_native.json        marker so it's obvious which path ran
-      sparse/0/cameras.txt      single PINHOLE camera, intrinsics from
-                                the first frame's `intrinsics` payload
-      sparse/0/images.txt       one entry per pose row, with the
-                                converted (qw, qx, qy, qz, tx, ty, tz)
-      sparse/0/points3D.txt     5000 random points sampled in a
-                                sphere around the centroid of camera
-                                positions, to seed splatfacto's
-                                gaussian initialization. (Without
-                                this splatfacto either errors or
-                                produces unstable training; we have
-                                no real sparse reconstruction since
-                                no SfM solver ran.)
-
-    Falls back to the synthetic stub if poses.jsonl is missing or
-    has no usable entries — the pipeline still completes via stubs.
-    """
     sfm_dir = scene_dir / "sfm"
     sfm_dir.mkdir(parents=True, exist_ok=True)
     out = sfm_dir / "sparse" / "0"
@@ -282,15 +233,12 @@ async def write_arcore_poses_as_colmap(
     w = int(intrinsics["w"])
     h = int(intrinsics["h"])
 
-    # cameras.txt: one shared PINHOLE camera id=1.
     (out / "cameras.txt").write_text(
         "# Camera list with one line of data per camera:\n"
         "#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n"
         f"1 PINHOLE {w} {h} {fx} {fy} {cx} {cy}\n"
     )
 
-    # images.txt: two lines per image — the data row, then an empty
-    # POINTS2D row (we have no detected features to associate).
     images_lines = [
         "# Image list with two lines of data per image:\n",
         "#   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n",
@@ -310,8 +258,7 @@ async def write_arcore_poses_as_colmap(
         images_lines.append(
             f"{image_id} {qw} {qx} {qy} {qz} {t[0]} {t[1]} {t[2]} 1 {name}\n"
         )
-        images_lines.append("\n")  # empty POINTS2D line
-        # Camera position in world space, for centroid-based seed sampling.
+        images_lines.append("\n")
         cam_positions.append(-R.T @ t)
         written += 1
 
@@ -322,19 +269,12 @@ async def write_arcore_poses_as_colmap(
 
     (out / "images.txt").write_text("".join(images_lines))
 
-    # points3D.txt: splatfacto's COLMAP dataparser uses these as
-    # initial gaussian centers. With no SfM solver we have no real
-    # sparse reconstruction; seed with random points distributed in
-    # a sphere around the centroid of camera positions. Splatfacto
-    # densifies / prunes during training, so the kickoff just needs
-    # to be roughly in the right region.
     cam_positions_arr = np.array(cam_positions)
     center = cam_positions_arr.mean(axis=0)
     spread = float(np.linalg.norm(cam_positions_arr - center, axis=1).max())
     radius = max(0.5, spread)
     n_seeds = 5_000
     rng = np.random.default_rng(42)
-    # Uniform sampling inside a ball: random direction * (uniform^(1/3) * radius).
     directions = rng.normal(size=(n_seeds, 3))
     directions /= np.linalg.norm(directions, axis=1, keepdims=True)
     radii = rng.uniform(0.0, 1.0, size=n_seeds) ** (1.0 / 3.0) * radius
@@ -361,8 +301,6 @@ async def write_arcore_poses_as_colmap(
             }
         )
     )
-    # Intentionally NO synthetic.json — train.py runs the real
-    # ns-train splatfacto path against this workspace.
 
     log.info(
         "arcore: wrote COLMAP workspace (%d images, %d seed points)",
@@ -384,11 +322,6 @@ async def write_arcore_poses_as_colmap(
 async def _arcore_synthetic_fallback(
     *, sfm_dir: Path, progress: ProgressCb, reason: str
 ) -> dict:
-    """Used when the ARCore conversion can't proceed (missing
-    poses.jsonl, no usable entries, etc). Drops a synthetic stub so
-    train.py still completes and the user sees the failure mode in
-    the job result + arcore_native.json marker.
-    """
     out = sfm_dir / "sparse" / "0"
     out.mkdir(parents=True, exist_ok=True)
     (out / "cameras.txt").write_text("# stub — arcore conversion bailed\n")
