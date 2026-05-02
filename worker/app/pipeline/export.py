@@ -68,9 +68,9 @@ async def _run_real(
         log_path = export_dir / "export.log"
         log_path.write_bytes(out)
         if rc != 0:
-            # tail of the captured stdout/stderr is what landed in
-            // the .log file we just wrote — reuse it directly
-            // instead of re-reading from disk.
+            # Tail of the captured stdout/stderr is what landed in
+            # the .log file we just wrote — reuse it directly
+            # instead of re-reading from disk.
             tail = tail_bytes(out)
             raise RuntimeError(
                 format_subprocess_error("ns-export", rc, log_path, tail)

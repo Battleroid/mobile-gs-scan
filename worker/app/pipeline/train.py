@@ -99,9 +99,9 @@ async def _run_splatfacto(
     rc = await proc.wait()
     if rc != 0:
         # Surface the tail of the just-written log file in the
-        # exception so it propagates into the job row's error
-        // and renders inline on the native JobDetailActivity. No
-        // more docker-exec-into-the-worker-and-cat-the-log dance.
+        # exception so it propagates into the job row's error and
+        # renders inline on the native JobDetailActivity. No more
+        # docker-exec-into-the-worker-and-cat-the-log dance.
         tail = tail_file(log_path)
         raise RuntimeError(
             format_subprocess_error("ns-train", rc, log_path, tail)
