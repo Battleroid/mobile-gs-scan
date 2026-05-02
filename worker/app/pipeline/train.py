@@ -15,6 +15,7 @@ import shutil
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from app.config import get_settings
 from app.pipeline import _running
 from app.pipeline._logtail import format_subprocess_error, tail_file
 
@@ -22,26 +23,7 @@ log = logging.getLogger(__name__)
 
 ProgressCb = Callable[[float, str], Awaitable[None]]
 
-# Splatfacto / nerfstudio rich-progress data rows look like:
-#
-#     2900 (19.33%)       7.937 ms             1 m, 36 s            39.57 M
-#
-# i.e. ``<iter>\s+\(<percent>%\)\s+...`` repeated every refresh
-# (the trainer uses rich's live display which redraws via cursor-up
-# escapes, so the same line shows up many times during a run).
-# PROGRESS_RE captures both the iter number and the explicit percent
-# so we don't have to compute pct = current/iters ourselves — splatfacto
-# already factored in any warmup / decimation / data-loader skew.
-#
-# Anchored on the ``(NN.NN%)`` form so the table-header line
-# ``Step (% Done)`` (which has "% Done" instead of "<digit>%)")
-# doesn't false-match.
 PROGRESS_RE = re.compile(rb"(\d+)\s+\((\d+(?:\.\d+)?)%\)")
-
-# Older / non-splatfacto trainers emit ``iter 1234`` lines without
-# the parens-wrapped percent. Kept as a fallback so this code keeps
-# emitting progress when used against future nerfstudio configs that
-# print iter counts but no percent table.
 ITER_RE = re.compile(rb"\biter\s+(\d+)", re.IGNORECASE)
 
 
@@ -89,6 +71,8 @@ async def _run_splatfacto(
     job_id: str | None,
 ) -> dict:
     sfm_dir = scene_dir / "sfm"
+    settings = get_settings()
+
     cmd = [
         "ns-train", "splatfacto",
         "--data", str(sfm_dir),
@@ -96,6 +80,15 @@ async def _run_splatfacto(
         "--output-dir", str(train_dir),
         "--vis", "tensorboard",
         "--viewer.quit-on-train-completion", "True",
+        # Force splatfacto's image cache to GPU (or whatever the
+        # operator configured). Default in nerfstudio is ``gpu`` but
+        # FullImagesDataManager auto-falls-back to ``cpu`` for
+        # datasets > ~500 images, which costs a chunk of step time
+        # to slow CPU → GPU copies. With a 24GB+ card we usually
+        # have headroom; if this OOMs, set GS_TRAIN_CACHE_IMAGES=cpu
+        # in env.
+        "--pipeline.datamanager.cache-images",
+        settings.train_cache_images,
     ]
 
     await progress(0.0, f"train: ns-train splatfacto ({iters} iters)")
@@ -106,7 +99,6 @@ async def _run_splatfacto(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )
-    # Register so the worker heartbeat can SIGKILL us on cancel.
     if job_id is not None:
         _running.register(job_id, proc)
     try:
@@ -144,9 +136,6 @@ async def _run_splatfacto(
                 if pct is None:
                     continue
 
-                # Throttle to ~1 % steps so we don't flood the events
-                # bus. Splatfacto's live display refreshes every ~0.1 s,
-                # which would be far too chatty otherwise.
                 if pct - last_pct >= 0.01:
                     await progress(pct, label or f"train: {int(pct * 100)}%")
                     last_pct = pct
@@ -157,10 +146,6 @@ async def _run_splatfacto(
             _running.unregister(job_id)
 
     if rc != 0:
-        # Surface the tail of the just-written log file in the
-        # exception so it propagates into the job row's error and
-        # renders inline on the native JobDetailActivity. No more
-        # docker-exec-into-the-worker-and-cat-the-log dance.
         tail = tail_file(log_path)
         raise RuntimeError(
             format_subprocess_error("ns-train", rc, log_path, tail)

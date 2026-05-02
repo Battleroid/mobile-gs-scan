@@ -29,6 +29,17 @@ class Settings(BaseSettings):
     train_iters: int = Field(default=15000, validation_alias="GS_TRAIN_ITERS")
     sfm_backend: str = Field(default="glomap", validation_alias="GS_SFM_BACKEND")
 
+    # Splatfacto's FullImagesDataManager auto-falls-back to ``cpu``
+    # for datasets > ~500 images to avoid OOM. On a 24GB+ GPU
+    # (e.g. an RTX 4090) we have plenty of headroom for typical
+    # phone captures, so default to forcing ``gpu`` and let the
+    # user flip to ``cpu`` via env if their card is smaller. The
+    # value passes through to the ns-train command as
+    # ``--pipeline.datamanager.cache-images <value>``.
+    train_cache_images: str = Field(
+        default="gpu", validation_alias="GS_TRAIN_CACHE_IMAGES"
+    )
+
     worker_class: str = Field(default="gs", validation_alias="WORKER_CLASS")
     api_base_url: str = Field(default="http://api:8000", validation_alias="API_BASE_URL")
 
