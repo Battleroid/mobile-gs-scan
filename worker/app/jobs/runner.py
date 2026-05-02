@@ -152,7 +152,16 @@ async def _run_one(job: Job, settings: Settings) -> None:
                 ply_path=ply,
                 spz_path=spz,
             )
-        await _maybe_finalize_scene(scene)
+
+    # Always check scene finalization after a successful job. The
+    # previous "only after export" path was wrong: dispatch order is
+    # sfm → train → export → mesh, so when export completes the mesh
+    # job is still queued and _maybe_finalize_scene returns early
+    # (some-job-not-completed). Mesh then completes but nothing
+    # re-triggers the check, leaving the scene + capture stuck at
+    # `processing` forever — which also kept the web viewer hidden
+    # since it conditions on scene.status == "completed".
+    await _maybe_finalize_scene(scene)
 
 
 async def _dispatch(
