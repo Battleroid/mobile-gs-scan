@@ -1,15 +1,20 @@
 """Structure-from-motion step.
 
-`run_sfm` shells out to Glomap with a COLMAP-format output workspace
-under `scenes/<id>/sfm/`. Three backends:
+`run_sfm` produces the dataset workspace under `scenes/<id>/sfm/` that
+the train step reads. Three backends:
 
-  * ``glomap`` / ``colmap`` — real feature-based solvers; used when
-    the capture lacks per-frame pose (web upload, drag-drop).
+  * ``glomap`` / ``colmap`` — real feature-based solvers; emit a
+    COLMAP-shaped sparse/0/ workspace. Used when the capture lacks
+    per-frame pose (web upload, drag-drop).
   * ``arcore_native`` — used when the phone streamed ARCore poses
-    alongside the frames. Converts poses.jsonl into a COLMAP-shaped
-    workspace (cameras.txt + images.txt + seed points3D.txt) so
-    splatfacto can train against the known poses without running a
-    real solver.
+    alongside the frames. Emits a *nerfstudio-native* dataset:
+    transforms.json + points3D.ply. nerfstudio's splatfacto uses
+    the ``nerfstudio-data`` dataparser by default, which expects
+    transforms.json; emitting that directly is simpler than
+    forcing the colmap dataparser via tyro overrides AND makes the
+    math much easier (transforms.json wants cam-to-world in OpenGL
+    convention, which is exactly what ARCore gives us — no axis
+    flip, no inversion, no quaternion conversion).
 
 In PR #1 the real Glomap binary is built into worker-gs's image. If
 it's missing on the host (e.g. running the api container with the
@@ -20,7 +25,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import shutil
 import subprocess
 from pathlib import Path
@@ -49,7 +53,10 @@ async def run_sfm(
 
         scene_dir/sfm/
           ├── images/            (symlinks back to capture frames)
-          └── sparse/0/          (COLMAP cameras.txt / images.txt /
+          ├── transforms.json    (arcore_native path)
+          ├── points3D.ply       (arcore_native path)
+          └── sparse/0/          (glomap / colmap path: COLMAP
+                                  cameras.txt / images.txt /
                                   points3D.txt)
     """
     sfm_dir = scene_dir / "sfm"
@@ -61,7 +68,7 @@ async def run_sfm(
     await progress(0.05, f"sfm: backend={backend}")
 
     if backend == "arcore_native":
-        return await write_arcore_poses_as_colmap(
+        return await write_arcore_transforms_json(
             capture_dir=capture_dir, scene_dir=scene_dir, progress=progress
         )
     if backend == "glomap" and shutil.which("glomap"):
@@ -87,10 +94,6 @@ async def _run_glomap(*, sfm_dir: Path, progress: ProgressCb) -> dict:
     log_path = sfm_dir / "glomap.log"
     log_path.write_text(proc.stdout + "\n" + proc.stderr)
     if proc.returncode != 0:
-        # We have stdout+stderr already in memory — prefer that to a
-        # second filesystem read. The log file still exists for full
-        # context but the tail goes into the exception so the job
-        # row's error field shows the failing message.
         tail = tail_text(proc.stdout + "\n" + proc.stderr)
         raise RuntimeError(
             format_subprocess_error("glomap", proc.returncode, log_path, tail)
@@ -141,59 +144,48 @@ async def _run_stub(*, sfm_dir: Path, progress: ProgressCb) -> dict:
     return {"backend": "stub", "synthetic": True}
 
 
-# ─── ARCore → COLMAP ──────────────────────────────────────
-
-_GL_CAM_TO_CV_CAM = np.diag([1.0, -1.0, -1.0, 1.0])
-
-
-def _arcore_pose_to_world_to_cam(pose16: list) -> tuple[np.ndarray, np.ndarray]:
-    if len(pose16) != 16:
-        raise ValueError(f"expected 16-float pose, got {len(pose16)}")
-    M_c2w_gl = np.array(pose16, dtype=np.float64).reshape(4, 4).T
-    M_c2w_cv = M_c2w_gl @ _GL_CAM_TO_CV_CAM
-    R_c2w = M_c2w_cv[:3, :3]
-    t_c2w = M_c2w_cv[:3, 3]
-    R_w2c = R_c2w.T
-    t_w2c = -R_w2c @ t_c2w
-    return R_w2c, t_w2c
-
-
-def _rot_to_quat_wxyz(R: np.ndarray) -> tuple[float, float, float, float]:
-    trace = R[0, 0] + R[1, 1] + R[2, 2]
-    if trace > 0:
-        s = math.sqrt(trace + 1.0) * 2
-        qw = 0.25 * s
-        qx = (R[2, 1] - R[1, 2]) / s
-        qy = (R[0, 2] - R[2, 0]) / s
-        qz = (R[1, 0] - R[0, 1]) / s
-    elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
-        s = math.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2]) * 2
-        qw = (R[2, 1] - R[1, 2]) / s
-        qx = 0.25 * s
-        qy = (R[0, 1] + R[1, 0]) / s
-        qz = (R[0, 2] + R[2, 0]) / s
-    elif R[1, 1] > R[2, 2]:
-        s = math.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2]) * 2
-        qw = (R[0, 2] - R[2, 0]) / s
-        qx = (R[0, 1] + R[1, 0]) / s
-        qy = 0.25 * s
-        qz = (R[1, 2] + R[2, 1]) / s
-    else:
-        s = math.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1]) * 2
-        qw = (R[1, 0] - R[0, 1]) / s
-        qx = (R[0, 2] + R[2, 0]) / s
-        qy = (R[1, 2] + R[2, 1]) / s
-        qz = 0.25 * s
-    return qw, qx, qy, qz
+# ─── ARCore → transforms.json ──────────────────────────────
+#
+# nerfstudio's transforms.json format — the native dataset shape its
+# splatfacto method reads via the default ``nerfstudio-data``
+# dataparser. Two reasons we emit this instead of COLMAP files:
+#
+# 1. splatfacto auto-picks ``nerfstudio-data`` as its dataparser.
+#    PR #23 emitted COLMAP files but ns-train ignored them and
+#    crashed looking for transforms.json. Forcing the colmap
+#    dataparser via tyro override (``ns-train splatfacto colmap
+#    --data ...``) is finicky to thread through; emitting what
+#    nerfstudio expects is simpler.
+# 2. transforms.json's per-frame ``transform_matrix`` is
+#    cam-to-world in OpenGL convention (+X right, +Y up, +Z back)
+#    — EXACTLY what ARCore writes to its 16-float pose buffer.
+#    No axis flip, no inversion, no quaternion conversion. Just
+#    transpose the column-major buffer to row-major and serialize.
 
 
-async def write_arcore_poses_as_colmap(
+async def write_arcore_transforms_json(
     *, capture_dir: Path, scene_dir: Path, progress: ProgressCb
 ) -> dict:
+    """Convert ARCore poses.jsonl to a nerfstudio-native dataset.
+
+    Output layout under ``scene_dir/sfm/``:
+
+      images/                   symlink to capture_dir/frames
+      poses.jsonl               copy of the streamed poses (debug)
+      arcore_native.json        marker so it's obvious which path ran
+      transforms.json           per-frame cam-to-world (OpenGL) +
+                                shared OPENCV pinhole intrinsics +
+                                ply_file_path -> points3D.ply
+      points3D.ply              5000 random ASCII-PLY seed points
+                                sampled in a sphere around the
+                                centroid of camera positions, used
+                                by splatfacto's gaussian init.
+
+    Falls back to the synthetic stub if poses.jsonl is missing or
+    has no usable entries — the pipeline still completes via stubs.
+    """
     sfm_dir = scene_dir / "sfm"
     sfm_dir.mkdir(parents=True, exist_ok=True)
-    out = sfm_dir / "sparse" / "0"
-    out.mkdir(parents=True, exist_ok=True)
     if not (sfm_dir / "images").exists():
         (sfm_dir / "images").symlink_to(capture_dir / "frames")
 
@@ -233,33 +225,32 @@ async def write_arcore_poses_as_colmap(
     w = int(intrinsics["w"])
     h = int(intrinsics["h"])
 
-    (out / "cameras.txt").write_text(
-        "# Camera list with one line of data per camera:\n"
-        "#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n"
-        f"1 PINHOLE {w} {h} {fx} {fy} {cx} {cy}\n"
-    )
-
-    images_lines = [
-        "# Image list with two lines of data per image:\n",
-        "#   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n",
-        "#   POINTS2D[] as (X, Y, POINT3D_ID)\n",
-    ]
+    frames: list[dict] = []
     cam_positions: list[np.ndarray] = []
     written = 0
-    for image_id, entry in enumerate(poses, start=1):
+    for entry in poses:
         idx = int(entry["idx"])
-        try:
-            R, t = _arcore_pose_to_world_to_cam(entry["pose"])
-        except Exception:  # noqa: BLE001
-            log.warning("arcore: skipping unparseable pose at idx=%s", idx)
+        pose16 = entry["pose"]
+        if not isinstance(pose16, list) or len(pose16) != 16:
+            log.warning("arcore: skipping pose at idx=%s (bad shape)", idx)
             continue
-        qw, qx, qy, qz = _rot_to_quat_wxyz(R)
-        name = f"{idx:06d}.jpg"
-        images_lines.append(
-            f"{image_id} {qw} {qx} {qy} {qz} {t[0]} {t[1]} {t[2]} 1 {name}\n"
-        )
-        images_lines.append("\n")
-        cam_positions.append(-R.T @ t)
+        # ARCore writes 4x4 column-major into the 16-float buffer.
+        # numpy's reshape is row-major, so .T gives the canonical
+        # 4x4 mathematical matrix. nerfstudio wants this verbatim:
+        # cam-to-world, OpenGL camera convention, row-major nested
+        # list with the bottom row [0, 0, 0, 1].
+        M = np.array(pose16, dtype=np.float64).reshape(4, 4).T
+        # Sanity: bottom row should be (~0, 0, 0, 1) for a rigid
+        # transform. If it isn't, the pose is junk; skip.
+        bottom = M[3, :]
+        if abs(bottom[3] - 1.0) > 1e-3 or np.linalg.norm(bottom[:3]) > 1e-3:
+            log.warning("arcore: skipping pose at idx=%s (non-affine)", idx)
+            continue
+        frames.append({
+            "file_path": f"images/{idx:06d}.jpg",
+            "transform_matrix": M.tolist(),
+        })
+        cam_positions.append(M[:3, 3])
         written += 1
 
     if written == 0:
@@ -267,8 +258,30 @@ async def write_arcore_poses_as_colmap(
             sfm_dir=sfm_dir, progress=progress, reason="all poses unparseable"
         )
 
-    (out / "images.txt").write_text("".join(images_lines))
+    # Build the nerfstudio transforms.json. camera_model="OPENCV"
+    # without distortion params is equivalent to a clean PINHOLE
+    # camera — ARCore's reported intrinsics are already pinhole.
+    transforms = {
+        "camera_model": "OPENCV",
+        "fl_x": fx,
+        "fl_y": fy,
+        "cx": cx,
+        "cy": cy,
+        "w": w,
+        "h": h,
+        "frames": frames,
+        "ply_file_path": "points3D.ply",
+    }
+    (sfm_dir / "transforms.json").write_text(
+        json.dumps(transforms, indent=2)
+    )
 
+    # Seed points3D.ply: random points in a sphere around the
+    # centroid of camera positions. splatfacto's nerfstudio-data
+    # dataparser reads ply_file_path and uses these as initial
+    # gaussian centers + colors. Splatfacto densifies + prunes
+    # during training, so the seed only needs to be roughly in
+    # the right region.
     cam_positions_arr = np.array(cam_positions)
     center = cam_positions_arr.mean(axis=0)
     spread = float(np.linalg.norm(cam_positions_arr - center, axis=1).max())
@@ -278,18 +291,9 @@ async def write_arcore_poses_as_colmap(
     directions = rng.normal(size=(n_seeds, 3))
     directions /= np.linalg.norm(directions, axis=1, keepdims=True)
     radii = rng.uniform(0.0, 1.0, size=n_seeds) ** (1.0 / 3.0) * radius
-    seeds = center + directions * radii[:, None]
-    colors = rng.integers(0, 256, size=(n_seeds, 3))
-    p3d_lines = [
-        "# 3D point list with one line of data per point:\n",
-        "#   POINT3D_ID, X, Y, Z, R, G, B, ERROR, TRACK[] as (IMAGE_ID, POINT2D_IDX)\n",
-    ]
-    for i, (pt, color) in enumerate(zip(seeds, colors), start=1):
-        p3d_lines.append(
-            f"{i} {pt[0]} {pt[1]} {pt[2]} "
-            f"{int(color[0])} {int(color[1])} {int(color[2])} 0\n"
-        )
-    (out / "points3D.txt").write_text("".join(p3d_lines))
+    seed_pts = center + directions * radii[:, None]
+    seed_colors = rng.integers(0, 256, size=(n_seeds, 3))
+    _write_ascii_ply(sfm_dir / "points3D.ply", seed_pts, seed_colors)
 
     (sfm_dir / "arcore_native.json").write_text(
         json.dumps(
@@ -303,13 +307,13 @@ async def write_arcore_poses_as_colmap(
     )
 
     log.info(
-        "arcore: wrote COLMAP workspace (%d images, %d seed points)",
+        "arcore: wrote nerfstudio dataset (%d frames, %d seed points)",
         written,
         n_seeds,
     )
     await progress(
         0.95,
-        f"sfm: arcore poses → COLMAP ({written} frames, {n_seeds} seeds)",
+        f"sfm: arcore poses → transforms.json ({written} frames, {n_seeds} seeds)",
     )
     return {
         "backend": "arcore_native",
@@ -319,9 +323,44 @@ async def write_arcore_poses_as_colmap(
     }
 
 
+def _write_ascii_ply(
+    path: Path, points: np.ndarray, colors: np.ndarray
+) -> None:
+    """Minimal ASCII PLY: vertex element with float xyz + uchar rgb.
+
+    splatfacto reads this via plyfile / open3d — either accepts the
+    format. ASCII is a few KB larger than binary at 5000 points but
+    much easier to inspect and we're not bottlenecked on disk here.
+    """
+    n = len(points)
+    lines: list[str] = [
+        "ply\n",
+        "format ascii 1.0\n",
+        f"element vertex {n}\n",
+        "property float x\n",
+        "property float y\n",
+        "property float z\n",
+        "property uchar red\n",
+        "property uchar green\n",
+        "property uchar blue\n",
+        "end_header\n",
+    ]
+    for pt, col in zip(points, colors):
+        lines.append(
+            f"{float(pt[0])} {float(pt[1])} {float(pt[2])} "
+            f"{int(col[0])} {int(col[1])} {int(col[2])}\n"
+        )
+    path.write_text("".join(lines))
+
+
 async def _arcore_synthetic_fallback(
     *, sfm_dir: Path, progress: ProgressCb, reason: str
 ) -> dict:
+    """Used when the ARCore conversion can't proceed (missing
+    poses.jsonl, no usable entries, etc). Drops a synthetic stub so
+    train.py's stub branch fires and the pipeline still completes
+    end-to-end.
+    """
     out = sfm_dir / "sparse" / "0"
     out.mkdir(parents=True, exist_ok=True)
     (out / "cameras.txt").write_text("# stub — arcore conversion bailed\n")
