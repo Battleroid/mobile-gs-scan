@@ -8,6 +8,7 @@ import androidx.core.content.edit
  * Persists per-app preferences:
  *   - studio URL (which server to talk to)
  *   - capture rate + JPEG quality (frame-streaming knobs)
+ *   - training-fidelity preset (per-capture splatfacto iter count)
  *
  * Single-user, single-server — there's no list of saved servers,
  * just the most recent one.
@@ -17,6 +18,7 @@ object ServerConfig {
     private const val KEY_URL = "studio_url"
     private const val KEY_FPS = "capture_fps"
     private const val KEY_JPEG_QUALITY = "capture_jpeg_quality"
+    private const val KEY_TRAIN_ITERS = "train_iters"
 
     // Capture-rate defaults. The previous hardcoded
     // ``targetIntervalMs = 200`` (5 fps) in ARCaptureSession was too
@@ -31,6 +33,17 @@ object ServerConfig {
     const val DEFAULT_JPEG_QUALITY = 85
     const val MIN_JPEG_QUALITY = 50
     const val MAX_JPEG_QUALITY = 100
+
+    // Training-fidelity presets. Splatfacto's training cost scales
+    // roughly linearly with iters; on a 4090 that's ~3 min for 5k,
+    // ~10 min for 15k, ~25 min for 30k. Standard (15000) matches
+    // the previous server-side default in GS_TRAIN_ITERS; we use
+    // it as the app-side default too so behaviour is unchanged for
+    // users who don't touch the preset.
+    const val TRAIN_ITERS_LOW = 5_000
+    const val TRAIN_ITERS_STANDARD = 15_000
+    const val TRAIN_ITERS_HIGH = 30_000
+    const val DEFAULT_TRAIN_ITERS = TRAIN_ITERS_STANDARD
 
     fun prefs(ctx: Context): SharedPreferences =
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -60,6 +73,15 @@ object ServerConfig {
         prefs(ctx).edit {
             putInt(KEY_JPEG_QUALITY, q.coerceIn(MIN_JPEG_QUALITY, MAX_JPEG_QUALITY))
         }
+    }
+
+    fun captureTrainIters(ctx: Context): Int =
+        prefs(ctx)
+            .getInt(KEY_TRAIN_ITERS, DEFAULT_TRAIN_ITERS)
+            .coerceAtLeast(1)
+
+    fun setCaptureTrainIters(ctx: Context, iters: Int) {
+        prefs(ctx).edit { putInt(KEY_TRAIN_ITERS, iters.coerceAtLeast(1)) }
     }
 
     /**
