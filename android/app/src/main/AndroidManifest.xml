@@ -82,6 +82,11 @@
             android:parentActivityName=".MainActivity" />
 
         <activity
+            android:name=".DraftDetailActivity"
+            android:exported="false"
+            android:parentActivityName=".MainActivity" />
+
+        <activity
             android:name=".JobDetailActivity"
             android:exported="false"
             android:parentActivityName=".CaptureDetailActivity" />
