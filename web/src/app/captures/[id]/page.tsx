@@ -1,7 +1,7 @@
 "use client";
-import { use, useState } from "react";
+import { use, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import dynamic from "next/dynamic";
 import clsx from "clsx";
 import { api } from "@/lib/api";
@@ -9,7 +9,7 @@ import { useCaptureEvents } from "@/hooks/useCaptureEvents";
 import { useSceneEvents } from "@/hooks/useSceneEvents";
 import { CapturePairing } from "@/components/CapturePairing";
 import { JobLogPanel } from "@/components/JobLogPanel";
-import type { Job } from "@/lib/types";
+import type { Capture, Job } from "@/lib/types";
 
 // Heavy three.js viewer — keep it out of the SSR bundle.
 const SplatViewer = dynamic(
@@ -64,8 +64,8 @@ export default function CaptureDetailPage({ params }: PageProps) {
   return (
     <div className="space-y-6">
       <header className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <h1 className="text-lg font-semibold truncate">{capture.name}</h1>
+        <div className="min-w-0 flex-1">
+          <CaptureNameEditor capture={capture} />
           <p className="text-xs text-muted">
             {capture.id} · {capture.source} · {capture.status}
           </p>
@@ -147,6 +147,118 @@ export default function CaptureDetailPage({ params }: PageProps) {
           )}
         </section>
       )}
+    </div>
+  );
+}
+
+/**
+ * Inline rename: the name is normally rendered as a heading; click
+ * "rename" to swap into edit mode. Enter submits, Escape cancels.
+ * Keeps the rest of the page layout untouched while editing.
+ */
+function CaptureNameEditor({ capture }: { capture: Capture }) {
+  const queryClient = useQueryClient();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(capture.name);
+  const [saving, setSaving] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Resync local draft when an upstream rename event lands while we
+  // weren't editing — otherwise stale draft would clobber the live
+  // value the moment the user clicks Edit.
+  useEffect(() => {
+    if (!editing) setDraft(capture.name);
+  }, [capture.name, editing]);
+
+  const startEdit = () => {
+    setDraft(capture.name);
+    setEditing(true);
+    queueMicrotask(() => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    });
+  };
+
+  const cancel = () => {
+    setEditing(false);
+    setDraft(capture.name);
+  };
+
+  const save = async () => {
+    const trimmed = draft.trim();
+    if (!trimmed || trimmed === capture.name) {
+      cancel();
+      return;
+    }
+    setSaving(true);
+    try {
+      const updated = await api.renameCapture(capture.id, trimmed);
+      // Push the new value into the per-id cache so the rest of the
+      // app's useQuery({ queryKey: ["capture", id] }) consumers
+      // refresh without waiting for the next poll. The websocket
+      // capture.renamed event will also fire, but the cache write
+      // is what makes the page feel instantaneous.
+      queryClient.setQueryData(["capture", capture.id], updated);
+      setEditing(false);
+    } catch (err) {
+      window.alert(`rename failed: ${(err as Error).message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (editing) {
+    return (
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          void save();
+        }}
+        className="flex items-center gap-2"
+      >
+        <input
+          ref={inputRef}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") {
+              e.preventDefault();
+              cancel();
+            }
+          }}
+          maxLength={200}
+          disabled={saving}
+          className="flex-1 bg-transparent border-b border-rule text-lg font-semibold focus:outline-none focus:border-accent disabled:opacity-50"
+        />
+        <button
+          type="submit"
+          disabled={saving}
+          className="text-xs underline hover:text-fg disabled:opacity-50"
+        >
+          {saving ? "saving…" : "save"}
+        </button>
+        <button
+          type="button"
+          onClick={cancel}
+          disabled={saving}
+          className="text-xs text-muted underline hover:text-fg disabled:opacity-50"
+        >
+          cancel
+        </button>
+      </form>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      <h1 className="text-lg font-semibold truncate">{capture.name}</h1>
+      <button
+        type="button"
+        onClick={startEdit}
+        className="text-xs text-muted underline hover:text-fg"
+      >
+        rename
+      </button>
     </div>
   );
 }
