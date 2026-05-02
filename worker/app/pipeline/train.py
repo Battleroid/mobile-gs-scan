@@ -14,6 +14,8 @@ import shutil
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from app.pipeline._logtail import format_subprocess_error, tail_file
+
 log = logging.getLogger(__name__)
 
 ProgressCb = Callable[[float, str], Awaitable[None]]
@@ -28,12 +30,6 @@ async def run_train(
     train_dir = scene_dir / "train"
     train_dir.mkdir(parents=True, exist_ok=True)
 
-    # Distinguish the two stub triggers explicitly so the user can
-    # tell from the progress message + result blob WHY the training
-    # ran in stub mode. The previous "no nerfstudio installed" copy
-    # fired regardless of which condition tripped, which made it
-    # impossible to debug remote setups (nerfstudio missing? sfm
-    # output missing? both?).
     sfm_dir = scene_dir / "sfm"
     if (sfm_dir / "synthetic.json").exists():
         return await _run_stub(
@@ -88,8 +84,6 @@ async def _run_splatfacto(
         async for raw in proc.stdout:
             logf.write(raw)
             line = raw.strip()
-            # Parse splatfacto's "iter NNN" progress lines so the web
-            # UI gets a smooth bar instead of waiting on completion.
             ix = line.find(iter_marker)
             if ix >= 0:
                 tail = line[ix + len(iter_marker):]
@@ -104,7 +98,14 @@ async def _run_splatfacto(
 
     rc = await proc.wait()
     if rc != 0:
-        raise RuntimeError(f"ns-train exited {rc}, see {log_path}")
+        # Surface the tail of the just-written log file in the
+        # exception so it propagates into the job row's error
+        // and renders inline on the native JobDetailActivity. No
+        // more docker-exec-into-the-worker-and-cat-the-log dance.
+        tail = tail_file(log_path)
+        raise RuntimeError(
+            format_subprocess_error("ns-train", rc, log_path, tail)
+        )
 
     config = _find_latest_config(train_dir)
     await progress(1.0, "train: done")
