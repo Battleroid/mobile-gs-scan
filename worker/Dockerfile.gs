@@ -20,6 +20,7 @@ RUN python -m pip install --extra-index-url https://download.pytorch.org/whl/cu1
         opencv-python-headless==4.10.0.84 \
         open3d==0.18.0 \
         plyfile==1.1 \
+        scipy==1.13.1 \
         rich==13.9.4 \
         tyro==0.9.5 \
         viser==0.2.7 \

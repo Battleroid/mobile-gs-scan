@@ -9,6 +9,8 @@ import struct
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from app.pipeline._spz import run_spz_pack
+
 log = logging.getLogger(__name__)
 
 ProgressCb = Callable[[float, str], Awaitable[None]]
@@ -74,17 +76,12 @@ async def _run_real(
             ply.replace(ply_dst)
         artifacts["ply"] = str(ply_dst)
 
-    if "spz" in formats and "ply" in artifacts and shutil.which("spz_pack"):
+    if "spz" in formats and "ply" in artifacts:
         await progress(0.7, "export: spz_pack")
         spz_dst = export_dir / "scene.spz"
-        proc = await asyncio.create_subprocess_exec(
-            "spz_pack", artifacts["ply"], str(spz_dst),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        await proc.wait()
-        if spz_dst.exists():
-            artifacts["spz"] = str(spz_dst)
+        packed = await run_spz_pack(Path(artifacts["ply"]), spz_dst)
+        if packed is not None:
+            artifacts["spz"] = str(packed)
 
     await progress(1.0, "export: done")
     return artifacts
