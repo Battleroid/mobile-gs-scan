@@ -389,7 +389,19 @@ async def _run_mesh(*, job: Job, scene: Scene, settings: Settings) -> None:
     scene_dir = settings.scenes_dir() / scene.id
     train_dir = scene_dir / "train"
     if not train_dir.exists():
-        raise RuntimeError("scene has no train/ output to mesh")
+        # Bare raise here would skip the scene-status update path
+        # (it lives inside the dispatch_task try/except below) and
+        # leave mesh_status pinned at "queued" — the outer
+        # run_forever handler intentionally skips scene-state for
+        # mesh jobs. Mark failed + emit before we re-raise so the
+        # UI doesn't strand a failed mesh as "queued" for
+        # completed-but-cleaned scenes / legacy rows.
+        msg = "scene has no train/ output to mesh"
+        await store.update_scene(
+            scene.id, mesh_status=MeshStatus.failed, mesh_error=msg,
+        )
+        await events.publish_scene(scene.id, "scene.mesh_failed", error=msg)
+        raise RuntimeError(msg)
 
     params = scene.mesh_params or {}
 
