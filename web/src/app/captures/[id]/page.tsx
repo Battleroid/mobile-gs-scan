@@ -9,6 +9,7 @@ import { useCaptureEvents } from "@/hooks/useCaptureEvents";
 import { useSceneEvents } from "@/hooks/useSceneEvents";
 import { CapturePairing } from "@/components/CapturePairing";
 import { JobLogPanel } from "@/components/JobLogPanel";
+import { MeshPanel } from "@/components/MeshPanel";
 import { SplatEditor, type SplatEditorHandle } from "@/components/SplatEditor";
 import type { SelectionWidget } from "@/components/SplatViewer";
 import type { Capture, Job } from "@/lib/types";
@@ -35,7 +36,7 @@ export default function CaptureDetailPage({ params }: PageProps) {
   const capture = live ?? initial ?? null;
 
   const sceneId = capture?.scene_id ?? null;
-  const { scene, editProgress, lastEditResult } = useSceneEvents(sceneId);
+  const { scene, editProgress, lastEditResult, meshProgress } = useSceneEvents(sceneId);
 
   const [deleting, setDeleting] = useState(false);
   // Which artifact the SplatViewer is showing. Auto-promotes to
@@ -190,6 +191,7 @@ export default function CaptureDetailPage({ params }: PageProps) {
                 onActivateWidget={handleActivateWidget}
                 onWidgetFormChange={setWidgetSelection}
               />
+              <MeshPanel scene={scene} meshProgress={meshProgress} />
               <div className="flex flex-wrap gap-3 text-xs">
                 {scene.ply_url && (
                   <a

@@ -14,8 +14,9 @@ from pydantic import BaseModel
 
 from app.config import get_settings
 from app.jobs import events, store
-from app.jobs.schema import EditStatus, JobKind, JobStatus, Scene
+from app.jobs.schema import EditStatus, JobKind, JobStatus, MeshStatus, Scene
 from app.pipeline.filter import validate_recipe
+from app.pipeline.mesh import DEFAULT_PARAMS as MESH_DEFAULT_PARAMS
 
 log = logging.getLogger(__name__)
 
@@ -43,6 +44,11 @@ class SceneView(BaseModel):
     edit_status: str
     edit_error: str | None
     edit_recipe: dict | None
+    mesh_obj_url: str | None
+    mesh_glb_url: str | None
+    mesh_status: str
+    mesh_error: str | None
+    mesh_params: dict | None
     jobs: list[JobView]
     created_at: str
     completed_at: str | None
@@ -54,6 +60,11 @@ async def _to_view(scene: Scene) -> SceneView:
         scene.edit_status.value
         if scene.edit_status is not None
         else EditStatus.none.value
+    )
+    mesh_status = (
+        scene.mesh_status.value
+        if scene.mesh_status is not None
+        else MeshStatus.none.value
     )
     return SceneView(
         id=scene.id,
@@ -75,6 +86,19 @@ async def _to_view(scene: Scene) -> SceneView:
         edit_status=edit_status,
         edit_error=scene.edit_error,
         edit_recipe=scene.edit_recipe,
+        mesh_obj_url=(
+            f"/api/scenes/{scene.id}/artifacts/obj"
+            if scene.mesh_obj_path
+            else None
+        ),
+        mesh_glb_url=(
+            f"/api/scenes/{scene.id}/artifacts/glb"
+            if scene.mesh_glb_path
+            else None
+        ),
+        mesh_status=mesh_status,
+        mesh_error=scene.mesh_error,
+        mesh_params=scene.mesh_params,
         jobs=[
             JobView(
                 id=j.id,
@@ -105,6 +129,24 @@ async def download_artifact(scene_id: str, kind: str, edit: bool = False) -> Any
     if scene is None:
         raise HTTPException(404, "scene not found")
     path: str | None
+    media_type = "application/octet-stream"
+    # Mesh artifacts (obj / glb) live on dedicated columns; ?edit
+    # only applies to the splat (ply / spz). The mesh is reconstructed
+    # from the trained checkpoint independently of any edits.
+    if kind in ("obj", "glb"):
+        if edit:
+            raise HTTPException(400, "?edit=true is not valid for mesh artifacts")
+        if kind == "obj":
+            path = scene.mesh_obj_path
+            filename = "scene.obj"
+            media_type = "model/obj"
+        else:
+            path = scene.mesh_glb_path
+            filename = "scene.glb"
+            media_type = "model/gltf-binary"
+        if not path or not Path(path).exists():
+            raise HTTPException(404, f"mesh {kind!r} not yet produced")
+        return FileResponse(path, media_type=media_type, filename=filename)
     if edit:
         if kind == "ply":
             path = scene.edited_ply_path
@@ -127,7 +169,7 @@ async def download_artifact(scene_id: str, kind: str, edit: bool = False) -> Any
             raise HTTPException(400, f"unknown artifact kind {kind!r}")
         if not path or not Path(path).exists():
             raise HTTPException(404, f"artifact {kind!r} not yet produced")
-    return FileResponse(path, media_type="application/octet-stream", filename=filename)
+    return FileResponse(path, media_type=media_type, filename=filename)
 
 
 # ─── edit recipe (filter pipeline) ─────────────────
@@ -227,6 +269,113 @@ async def clear_edit(scene_id: str) -> SceneView:
         edit_error=None,
     )
     await events.publish_scene(scene.id, "scene.edit_cleared")
+
+    refreshed = await store.get_scene(scene.id)
+    assert refreshed is not None
+    return await _to_view(refreshed)
+
+
+# ─── mesh extraction (Poisson via ns-export) ────────
+
+
+class MeshRequest(BaseModel):
+    """Optional override for the Poisson extraction params. Anything
+    omitted falls back to ``mesh.DEFAULT_PARAMS``; unknown keys are
+    rejected so a typo doesn't silently no-op."""
+    params: dict | None = None
+
+
+_ALLOWED_MESH_KEYS = set(MESH_DEFAULT_PARAMS.keys())
+
+
+def _validate_mesh_params(raw: dict | None) -> dict:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise HTTPException(422, "params must be a JSON object")
+    bad = set(raw.keys()) - _ALLOWED_MESH_KEYS
+    if bad:
+        raise HTTPException(
+            422,
+            f"unknown mesh param(s) {sorted(bad)}; allowed: {sorted(_ALLOWED_MESH_KEYS)}",
+        )
+    return dict(raw)
+
+
+@router.post("/{scene_id}/mesh")
+async def trigger_mesh(scene_id: str, body: MeshRequest | None = None) -> SceneView:
+    """Kick off Poisson mesh extraction for this scene.
+
+    Idempotent in spirit: re-posting cancels any in-flight mesh job,
+    swaps the params, and enqueues a fresh extraction. Existing mesh
+    artefacts on disk are left in place until the new run overwrites
+    them; that way a running re-extract doesn't temporarily 404 the
+    download link the user just clicked.
+    """
+    scene = await store.get_scene(scene_id)
+    if scene is None:
+        raise HTTPException(404, "scene not found")
+    if scene.status.value != "completed":
+        raise HTTPException(
+            409,
+            "scene pipeline is not complete; mesh needs the trained checkpoint",
+        )
+
+    params = _validate_mesh_params(body.params if body else None)
+
+    for j in await store.list_jobs_for_scene(scene.id):
+        if j.kind != JobKind.mesh:
+            continue
+        if j.status in (JobStatus.queued, JobStatus.claimed, JobStatus.running):
+            if await store.cancel_job(j.id):
+                await events.publish_job(j.id, "job.canceled")
+
+    # Same canonical-row dance as filter: drop completed/failed (and
+    # acked-canceled) prior mesh rows so the pipeline list stays
+    # tidy.
+    await store.delete_terminal_jobs_of_kind(scene.id, JobKind.mesh)
+
+    await store.update_scene(
+        scene.id,
+        mesh_params=params or scene.mesh_params,
+        mesh_status=MeshStatus.queued,
+        mesh_error=None,
+    )
+    job = await store.enqueue_job(scene.id, JobKind.mesh, payload={})
+    await events.publish_scene(scene.id, "scene.mesh_queued", job_id=job.id)
+
+    refreshed = await store.get_scene(scene.id)
+    assert refreshed is not None
+    return await _to_view(refreshed)
+
+
+@router.delete("/{scene_id}/mesh")
+async def clear_mesh(scene_id: str) -> SceneView:
+    """Cancel any in-flight mesh job and remove the mesh artefacts."""
+    scene = await store.get_scene(scene_id)
+    if scene is None:
+        raise HTTPException(404, "scene not found")
+
+    for j in await store.list_jobs_for_scene(scene.id):
+        if j.kind != JobKind.mesh:
+            continue
+        if j.status in (JobStatus.queued, JobStatus.claimed, JobStatus.running):
+            if await store.cancel_job(j.id):
+                await events.publish_job(j.id, "job.canceled")
+
+    settings = get_settings()
+    mesh_dir = settings.scenes_dir() / scene.id / "mesh"
+    if mesh_dir.exists():
+        shutil.rmtree(mesh_dir, ignore_errors=True)
+
+    await store.update_scene(
+        scene.id,
+        mesh_obj_path=None,
+        mesh_glb_path=None,
+        mesh_status=MeshStatus.none,
+        mesh_error=None,
+    )
+    await events.publish_scene(scene.id, "scene.mesh_cleared")
 
     refreshed = await store.get_scene(scene.id)
     assert refreshed is not None

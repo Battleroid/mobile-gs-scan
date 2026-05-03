@@ -99,6 +99,11 @@ async def _apply_lightweight_migrations(conn) -> None:
         "ALTER TABLE scenes ADD COLUMN edit_recipe JSON",
         "ALTER TABLE scenes ADD COLUMN edit_status VARCHAR DEFAULT 'none' NOT NULL",
         "ALTER TABLE scenes ADD COLUMN edit_error TEXT",
+        "ALTER TABLE scenes ADD COLUMN mesh_obj_path VARCHAR",
+        "ALTER TABLE scenes ADD COLUMN mesh_glb_path VARCHAR",
+        "ALTER TABLE scenes ADD COLUMN mesh_status VARCHAR DEFAULT 'none' NOT NULL",
+        "ALTER TABLE scenes ADD COLUMN mesh_error TEXT",
+        "ALTER TABLE scenes ADD COLUMN mesh_params JSON",
     ]
     for stmt in statements:
         try:

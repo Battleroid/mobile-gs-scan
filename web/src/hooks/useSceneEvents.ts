@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { wsUrl } from "@/lib/api";
-import type { EditStatus, Scene, ServerEvent } from "@/lib/types";
+import type { EditStatus, MeshStatus, Scene, ServerEvent } from "@/lib/types";
 
 export interface EditResult {
   kept: number;
@@ -24,6 +24,8 @@ export function useSceneEvents(sceneId: string | null): {
   editProgress: { progress: number; message: string | null } | null;
   /** Result of the most recently completed filter (kept/total). */
   lastEditResult: EditResult | null;
+  /** Same shape as editProgress, for the mesh job. */
+  meshProgress: { progress: number; message: string | null } | null;
 } {
   const [scene, setScene] = useState<Scene | null>(null);
   const [lastEvent, setLastEvent] = useState<ServerEvent | null>(null);
@@ -32,6 +34,10 @@ export function useSceneEvents(sceneId: string | null): {
     message: string | null;
   } | null>(null);
   const [lastEditResult, setLastEditResult] = useState<EditResult | null>(null);
+  const [meshProgress, setMeshProgress] = useState<{
+    progress: number;
+    message: string | null;
+  } | null>(null);
 
   // Monotonic counter for refreshScene roundtrips. The hook fires an
   // out-of-band re-fetch on both scene.edit_queued and scene.edited
@@ -142,6 +148,55 @@ export function useSceneEvents(sceneId: string | null): {
             );
             setEditProgress(null);
             setLastEditResult(null);
+          } else if (evt.kind === "scene.mesh_queued") {
+            setScene((s) => (s ? { ...s, mesh_status: "queued" } : s));
+            setMeshProgress({ progress: 0, message: "queued" });
+            // Same rationale as scene.edit_queued: mesh job arrived
+            // after the WS opened so the snapshot's jobs list +
+            // per-job WS subscription don't include it. Re-fetch
+            // pulls the row in.
+            const gen = ++refreshGen.current;
+            void refreshScene(sceneId).then((next) => {
+              if (next && gen === refreshGen.current) setScene(next);
+            });
+          } else if (evt.kind === "scene.mesh_running") {
+            setScene((s) => (s ? { ...s, mesh_status: "running" } : s));
+          } else if (evt.kind === "scene.mesh_progress") {
+            setMeshProgress({
+              progress: (evt.data.progress as number) ?? 0,
+              message: (evt.data.message as string | null) ?? null,
+            });
+          } else if (evt.kind === "scene.mesh_failed") {
+            setScene((s) =>
+              s
+                ? {
+                    ...s,
+                    mesh_status: "failed",
+                    mesh_error: (evt.data.error as string | null) ?? null,
+                  }
+                : s,
+            );
+            setMeshProgress(null);
+          } else if (evt.kind === "scene.meshed") {
+            setMeshProgress({ progress: 1, message: "done" });
+            setScene((s) => (s ? { ...s, mesh_status: "completed" } : s));
+            const gen = ++refreshGen.current;
+            void refreshScene(sceneId).then((next) => {
+              if (next && gen === refreshGen.current) setScene(next);
+            });
+          } else if (evt.kind === "scene.mesh_cleared") {
+            setScene((s) =>
+              s
+                ? {
+                    ...s,
+                    mesh_status: "none" as MeshStatus,
+                    mesh_obj_url: null,
+                    mesh_glb_url: null,
+                    mesh_error: null,
+                  }
+                : s,
+            );
+            setMeshProgress(null);
           }
         }
       } catch {
@@ -151,7 +206,7 @@ export function useSceneEvents(sceneId: string | null): {
     return () => ws.close();
   }, [sceneId]);
 
-  return { scene, lastEvent, editProgress, lastEditResult };
+  return { scene, lastEvent, editProgress, lastEditResult, meshProgress };
 }
 
 function kindToStatus(kind: string, fallback: Scene["jobs"][number]["status"]) {

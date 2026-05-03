@@ -40,6 +40,20 @@ export type EditStatus =
   | "completed"
   | "failed";
 
+export type MeshStatus =
+  | "none"
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed";
+
+export interface MeshParams {
+  num_points?: number;
+  remove_outliers?: boolean;
+  normal_method?: "open3d" | "open3d_with_normals";
+  use_bounding_box?: boolean;
+}
+
 export type EditOp =
   | { type: "opacity_threshold"; min: number }
   | { type: "scale_clamp"; max_scale: number }
@@ -85,6 +99,11 @@ export interface Scene {
   edit_status: EditStatus;
   edit_error: string | null;
   edit_recipe: EditRecipe | null;
+  mesh_obj_url: string | null;
+  mesh_glb_url: string | null;
+  mesh_status: MeshStatus;
+  mesh_error: string | null;
+  mesh_params: MeshParams | null;
   jobs: Job[];
   created_at: string;
   completed_at: string | null;

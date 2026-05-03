@@ -128,4 +128,6 @@ def _log_path_for_kind(kind: JobKind, scene_dir: Path) -> Path | None:
         if primary.exists():
             return primary
         return scene_dir / "edit" / "spz_pack.log"
+    if kind == JobKind.mesh:
+        return scene_dir / "mesh" / "mesh.log"
     return None
