@@ -43,6 +43,14 @@ interface OpsState {
   };
   sor: { enabled: boolean; k: number; std_multiplier: number };
   dbscan: { enabled: boolean; eps: number; min_samples: number };
+  /**
+   * Ops the form doesn't render UI for (today: keep_indices from a
+   * future lasso flow / hand-edited recipes; tomorrow: anything we
+   * add server-side ahead of UI). Captured verbatim so the round-
+   * trip through the form preserves them — otherwise applying the
+   * recipe via the UI would silently drop them.
+   */
+  extras: EditOp[];
 }
 
 const DEFAULT_OPS: OpsState = {
@@ -52,6 +60,7 @@ const DEFAULT_OPS: OpsState = {
   sphere: { enabled: false, center: [0, 0, 0], radius: 0.3 },
   sor: { enabled: false, k: 24, std_multiplier: 2.0 },
   dbscan: { enabled: false, eps: 0.05, min_samples: 30 },
+  extras: [],
 };
 
 interface Props {
@@ -659,6 +668,12 @@ function recipeToOps(recipe: EditRecipe | null): OpsState {
           min_samples: op.min_samples,
         };
         break;
+      default:
+        // Unknown to the form (today: keep_indices). Hold onto the
+        // raw op so opsToRecipe can re-emit it; otherwise the user's
+        // hand-edited or lasso-authored recipe gets silently
+        // shredded the first time they click Apply.
+        out.extras.push(op);
     }
   }
   return out;
@@ -667,6 +682,10 @@ function recipeToOps(recipe: EditRecipe | null): OpsState {
 function opsToRecipe(ops: OpsState): EditRecipe {
   // Order matters: cheap point-wise filters first, expensive
   // neighbourhood filters last so they only see the trimmed set.
+  // Unknown extras (e.g. keep_indices from a future lasso flow)
+  // ride along at the end — every supported op is an AND-mask, so
+  // tail position keeps the result identical to whatever the user
+  // intended.
   const out: EditOp[] = [];
   if (ops.opacity.enabled) {
     out.push({ type: "opacity_threshold", min: ops.opacity.min });
@@ -697,6 +716,9 @@ function opsToRecipe(ops: OpsState): EditRecipe {
       eps: ops.dbscan.eps,
       min_samples: ops.dbscan.min_samples,
     });
+  }
+  for (const extra of ops.extras) {
+    out.push(extra);
   }
   return { ops: out };
 }

@@ -46,7 +46,11 @@ export type EditOp =
   | { type: "bbox_crop"; min: [number, number, number]; max: [number, number, number] }
   | { type: "sphere_remove"; center: [number, number, number]; radius: number }
   | { type: "sor"; k: number; std_multiplier: number }
-  | { type: "dbscan_keep_largest"; eps: number; min_samples: number };
+  | { type: "dbscan_keep_largest"; eps: number; min_samples: number }
+  // Source-PLY index set authored by the lasso flow (Phase 2.5) or
+  // hand-edited recipes. UI doesn't render controls for it but the
+  // editor preserves it through the apply round-trip.
+  | { type: "keep_indices"; indices: number[] };
 
 export interface EditRecipe {
   ops: EditOp[];
