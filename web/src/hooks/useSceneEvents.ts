@@ -185,18 +185,20 @@ export function useSceneEvents(sceneId: string | null): {
               if (next && gen === refreshGen.current) setScene(next);
             });
           } else if (evt.kind === "scene.mesh_cleared") {
-            setScene((s) =>
-              s
-                ? {
-                    ...s,
-                    mesh_status: "none" as MeshStatus,
-                    mesh_obj_url: null,
-                    mesh_glb_url: null,
-                    mesh_error: null,
-                  }
-                : s,
-            );
+            // Don't naively null mesh_*_url in local state: cancel
+            // paths emit scene.mesh_cleared *without* deleting the
+            // prior mesh artefacts from disk (only DELETE /mesh
+            // does that). Re-fetch the canonical snapshot — if the
+            // server nulled the paths (discard) the fetch returns
+            // them as null; if the artefacts are still on disk
+            // (cancel of a re-extract over an existing mesh) the
+            // fetch returns them, and a still-valid mesh stays
+            // visible.
             setMeshProgress(null);
+            const gen = ++refreshGen.current;
+            void refreshScene(sceneId).then((next) => {
+              if (next && gen === refreshGen.current) setScene(next);
+            });
           }
         }
       } catch {

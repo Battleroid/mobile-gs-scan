@@ -289,6 +289,17 @@ function MeshContent({ url, kind }: { url: string; kind: "glb" | "obj" }) {
   const { scene } = useThree();
   const groupRef = useRef<THREE.Group>(null);
   const [error, setError] = useState<string | null>(null);
+  // Reset error when the asset identity changes so a transient
+  // parse / network failure doesn't pin the fallback wireframe
+  // forever — the next load attempt deserves a clean slate.
+  // Render-time adjust pattern (same as JobLogPanel) keeps us out
+  // of the react-hooks/set-state-in-effect penalty box.
+  const assetKey = `${kind}|${url}`;
+  const [prevAssetKey, setPrevAssetKey] = useState(assetKey);
+  if (prevAssetKey !== assetKey) {
+    setPrevAssetKey(assetKey);
+    if (error !== null) setError(null);
+  }
 
   useEffect(() => {
     let cancelled = false;
