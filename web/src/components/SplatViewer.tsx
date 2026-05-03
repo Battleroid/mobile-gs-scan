@@ -600,7 +600,19 @@ function SelectionGizmo({
       size={1.6}
       space="world"
     >
-      <mesh ref={meshRef}>
+      <mesh
+        ref={meshRef}
+        // Disable raycast on the wireframe outline. Without this,
+        // R3F's pointer event manager picks the visual mesh (which
+        // is much bigger than the gizmo handles) on every
+        // pointerdown, the gizmo never sees the click, and
+        // OrbitControls — also listening on the canvas — pans the
+        // camera instead. The user-visible symptom is "I can only
+        // interact while moving the mouse, clicks do nothing." Mesh
+        // is purely visual; only the gizmo's own handles should be
+        // hit-testable.
+        raycast={NOOP_RAYCAST}
+      >
         {selection.kind === "bbox" ? (
           <boxGeometry args={[1, 1, 1]} />
         ) : (
@@ -617,3 +629,8 @@ function SelectionGizmo({
     </TransformControls>
   );
 }
+
+// Hoisted so it's reference-stable across renders — assigning a new
+// fn each render would defeat r3f's prop-equality short-circuit on
+// the mesh node and cause spurious re-attaches.
+const NOOP_RAYCAST = () => {};
