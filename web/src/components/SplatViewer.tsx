@@ -26,10 +26,36 @@
 //                    1.0 → 6.0
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { Canvas, useThree } from "@react-three/fiber";
-import { OrbitControls } from "@react-three/drei";
+import { OrbitControls, TransformControls } from "@react-three/drei";
 import * as THREE from "three";
 
 type ViewMode = "splats" | "points" | "colored";
+
+/**
+ * In-viewer selection widget driven by the editor panel. The viewer
+ * renders a draggable wireframe box or sphere and reports its
+ * world-space transform back to the parent on mouseup so the recipe
+ * state stays canonical (recipe = source of truth, widget = editor).
+ *
+ *   - bbox: position = centre, scale = full extent (geometry is unit
+ *           cube centred at origin, so scale.x is the full x extent
+ *           — half-extent maths happens at the round-trip boundary).
+ *   - sphere: position = centre, scale = diameter (geometry is a
+ *             sphere of radius 0.5, so scale.x is the diameter).
+ */
+export type SelectionWidget =
+  | {
+      kind: "bbox";
+      min: [number, number, number];
+      max: [number, number, number];
+    }
+  | {
+      kind: "sphere";
+      center: [number, number, number];
+      radius: number;
+    };
+
+export type WidgetMode = "translate" | "scale";
 
 const VIEW_MODE_LABELS: Record<ViewMode, string> = {
   splats: "splats",
@@ -59,13 +85,30 @@ interface Props {
    * embedded mode with full controls overlay.
    */
   fillScreen?: boolean;
+  /**
+   * Optional in-scene selection widget. When set, the viewer
+   * renders a draggable wireframe gizmo over the splat; on
+   * mouseup it reports the new transform back via
+   * onSelectionCommit. Editor panels use this to author bbox /
+   * sphere recipe ops visually.
+   */
+  selection?: SelectionWidget | null;
+  onSelectionCommit?: (next: SelectionWidget) => void;
 }
 
-export function SplatViewer({ url, pointsUrl, className, fillScreen }: Props) {
+export function SplatViewer({
+  url,
+  pointsUrl,
+  className,
+  fillScreen,
+  selection,
+  onSelectionCommit,
+}: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("splats");
   const [maxStdDev, setMaxStdDev] = useState(3.0);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [widgetMode, setWidgetMode] = useState<WidgetMode>("translate");
 
   const onFullscreen = useCallback(() => {
     const el = containerRef.current;
@@ -82,6 +125,23 @@ export function SplatViewer({ url, pointsUrl, className, fillScreen }: Props) {
     document.addEventListener("fullscreenchange", handler);
     return () => document.removeEventListener("fullscreenchange", handler);
   }, []);
+
+  // T / S toggle the widget mode while a selection is active. We
+  // gate on the input target so typing in a number field elsewhere
+  // on the page doesn't accidentally swap modes.
+  useEffect(() => {
+    if (!selection) return;
+    const handler = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) {
+        return;
+      }
+      if (e.key === "t" || e.key === "T") setWidgetMode("translate");
+      if (e.key === "s" || e.key === "S") setWidgetMode("scale");
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [selection]);
 
   const onPopOut = useCallback(() => {
     const params = new URLSearchParams({ url });
@@ -117,9 +177,44 @@ export function SplatViewer({ url, pointsUrl, className, fillScreen }: Props) {
             viewMode={viewMode}
             maxStdDev={maxStdDev}
           />
+          {selection && onSelectionCommit && (
+            <SelectionGizmo
+              selection={selection}
+              mode={widgetMode}
+              onCommit={onSelectionCommit}
+            />
+          )}
         </Suspense>
         <OrbitControls makeDefault enableDamping target={[0, 0, 0]} />
       </Canvas>
+
+      {selection && onSelectionCommit && (
+        <div className="absolute top-2 left-2 flex flex-col gap-1 bg-black/70 px-3 py-2 text-xs font-mono text-fg">
+          <span className="text-muted">
+            editing {selection.kind} (drag handles to {widgetMode})
+          </span>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => setWidgetMode("translate")}
+              className={
+                widgetMode === "translate" ? "text-accent" : "hover:text-accent"
+              }
+            >
+              translate (T)
+            </button>
+            <button
+              type="button"
+              onClick={() => setWidgetMode("scale")}
+              className={
+                widgetMode === "scale" ? "text-accent" : "hover:text-accent"
+              }
+            >
+              scale (S)
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Controls overlay. Top-right corner so it doesn't cover the
           subject most users orbit around the centre of. Translucent
@@ -387,4 +482,130 @@ function SplatScene({
     );
   }
   return <group ref={groupRef} />;
+}
+
+/**
+ * In-scene draggable bbox / sphere widget driven by the editor.
+ *
+ * Geometry choice keeps the world-space ↔ recipe round-trip simple:
+ *   - bbox uses a unit cube; mesh.scale.{x,y,z} = the full extent.
+ *   - sphere uses a radius-0.5 sphere; mesh.scale.x = the diameter.
+ *
+ * We re-seed the mesh transform every time the incoming `selection`
+ * key changes (recipe was applied, edit cleared, switched between
+ * bbox/sphere, etc) so the gizmo follows the source of truth. Mid-
+ * drag, TransformControls writes directly to the mesh; we only push
+ * the new transform back to the recipe on dragging-changed=false to
+ * avoid 60 fps recipe state churn.
+ */
+function SelectionGizmo({
+  selection,
+  mode,
+  onCommit,
+}: {
+  selection: SelectionWidget;
+  mode: WidgetMode;
+  onCommit: (next: SelectionWidget) => void;
+}) {
+  const meshRef = useRef<THREE.Mesh>(null);
+  // Seed the mesh transform from the incoming selection in an effect
+  // so it runs AFTER mount/update — TransformControls mutates the
+  // mesh directly mid-drag, so we deliberately re-seed only when
+  // the recipe-derived key changes (parent commits a new value or
+  // switches kinds).
+  const seedKey = JSON.stringify(selection);
+  useEffect(() => {
+    const m = meshRef.current;
+    if (!m) return;
+    if (selection.kind === "bbox") {
+      const [mnx, mny, mnz] = selection.min;
+      const [mxx, mxy, mxz] = selection.max;
+      m.position.set((mnx + mxx) / 2, (mny + mxy) / 2, (mnz + mxz) / 2);
+      m.scale.set(
+        Math.max(0.001, mxx - mnx),
+        Math.max(0.001, mxy - mny),
+        Math.max(0.001, mxz - mnz),
+      );
+    } else {
+      m.position.set(...selection.center);
+      const d = Math.max(0.001, selection.radius * 2);
+      m.scale.set(d, d, d);
+    }
+    // Seed key threads through deps so the effect re-runs only on
+    // a meaningful selection change, not on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seedKey]);
+
+  const commit = useCallback(() => {
+    const m = meshRef.current;
+    if (!m) return;
+    if (selection.kind === "bbox") {
+      const cx = m.position.x, cy = m.position.y, cz = m.position.z;
+      const sx = Math.abs(m.scale.x) / 2;
+      const sy = Math.abs(m.scale.y) / 2;
+      const sz = Math.abs(m.scale.z) / 2;
+      onCommit({
+        kind: "bbox",
+        min: [cx - sx, cy - sy, cz - sz],
+        max: [cx + sx, cy + sy, cz + sz],
+      });
+    } else {
+      // For the sphere we treat the geometry as uniformly scaled —
+      // even if the user managed a non-uniform scale (the gizmo
+      // does support per-axis), collapse to the average so the
+      // recipe remains a true sphere.
+      const avg =
+        (Math.abs(m.scale.x) + Math.abs(m.scale.y) + Math.abs(m.scale.z)) / 3;
+      onCommit({
+        kind: "sphere",
+        center: [m.position.x, m.position.y, m.position.z],
+        radius: avg / 2,
+      });
+    }
+  }, [selection.kind, onCommit]);
+
+  // Wire TransformControls' dragging-changed event so we commit on
+  // mouse-up (and pause the OrbitControls during drag).
+  const tcRef = useRef<unknown>(null);
+  const { invalidate } = useThree();
+  useEffect(() => {
+    const tc = tcRef.current as unknown as
+      | { addEventListener: (k: string, fn: (e: { value: boolean }) => void) => void;
+          removeEventListener: (k: string, fn: (e: { value: boolean }) => void) => void; }
+      | null;
+    if (!tc) return;
+    const onDrag = (e: { value: boolean }) => {
+      if (!e.value) commit();
+      invalidate();
+    };
+    tc.addEventListener("dragging-changed", onDrag);
+    return () => tc.removeEventListener("dragging-changed", onDrag);
+  }, [commit, invalidate]);
+
+  const color = selection.kind === "bbox" ? "#ffae42" : "#ff5fa2";
+
+  return (
+    <TransformControls
+      ref={(value: unknown) => {
+        tcRef.current = value;
+      }}
+      mode={mode}
+      size={0.7}
+    >
+      <mesh ref={meshRef}>
+        {selection.kind === "bbox" ? (
+          <boxGeometry args={[1, 1, 1]} />
+        ) : (
+          <sphereGeometry args={[0.5, 24, 16]} />
+        )}
+        <meshBasicMaterial
+          color={color}
+          wireframe
+          transparent
+          opacity={0.55}
+          depthTest={false}
+        />
+      </mesh>
+    </TransformControls>
+  );
 }

@@ -49,6 +49,7 @@ ALLOWED_OPS = {
     "sphere_remove",
     "sor",
     "dbscan_keep_largest",
+    "keep_indices",
 }
 
 
@@ -87,17 +88,35 @@ async def filter_splat(
 
     Returns ``{'ply': path, 'spz': path?, 'kept': N, 'total': M}``.
     """
+    import json
+    import time
+
     import numpy as np
     from plyfile import PlyData, PlyElement
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    # Per-op log file the JobLogPanel polls. spz_pack appends its own
+    # output later. Truncate fresh on every run so the panel doesn't
+    # accumulate stale data from prior applies.
+    log_path = out_dir / "filter.log"
+    log_path.write_text("")
 
-    await progress(0.05, "filter: parse ply")
+    def _log(msg: str) -> None:
+        try:
+            with log_path.open("a") as f:
+                f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
+        except OSError:
+            pass
+
+    _log(f"recipe: {json.dumps(recipe, separators=(',', ':'))}")
+
+    await progress(0.05, "parse ply")
     ply = PlyData.read(str(src_ply))
     vertex = ply["vertex"]
     n_total = int(vertex.count)
     if n_total == 0:
         raise RuntimeError("source PLY has no vertices to filter")
+    _log(f"loaded {n_total} gaussians from {src_ply.name}")
 
     xyz = np.column_stack([
         np.asarray(vertex["x"], dtype=np.float32),
@@ -108,27 +127,37 @@ async def filter_splat(
     keep = np.ones(n_total, dtype=bool)
     ops = recipe.get("ops", [])
 
-    await progress(0.15, f"filter: applying {len(ops)} op(s) to {n_total} gaussians")
+    await progress(0.15, f"applying {len(ops)} op(s)")
     for i, op in enumerate(ops):
         kind = op.get("type")
         log.info("filter op %d/%d: %s", i + 1, len(ops), kind)
+        before = int(keep.sum())
+        op_start = time.monotonic()
         try:
             mask = _apply_op(op, xyz=xyz, vertex=vertex)
         except Exception as exc:
+            _log(f"op[{i}] {kind} FAILED: {exc}")
             raise RuntimeError(f"op {kind!r} failed: {exc}") from exc
         keep &= mask
+        kept_so_far = int(keep.sum())
+        dt_ms = int((time.monotonic() - op_start) * 1000)
+        _log(
+            f"op[{i}] {kind} ({dt_ms} ms): "
+            f"{before} → {kept_so_far} (-{before - kept_so_far})"
+        )
         # Per-op progress between 0.15 → 0.60
         frac = 0.15 + 0.45 * ((i + 1) / max(1, len(ops)))
-        kept_so_far = int(keep.sum())
-        await progress(frac, f"filter: {kind} → {kept_so_far} kept")
+        await progress(frac, f"{kind}: kept {kept_so_far}")
 
     n_kept = int(keep.sum())
     if n_kept == 0:
+        _log("ABORT: every gaussian dropped by recipe")
         raise RuntimeError("recipe filtered out every gaussian; aborting")
 
-    await progress(0.7, f"filter: write ply ({n_kept}/{n_total})")
+    await progress(0.7, f"write ply ({n_kept}/{n_total})")
     out_ply = out_dir / "scene.ply"
     _write_filtered_ply(ply, vertex, keep, out_ply, PlyData=PlyData, PlyElement=PlyElement)
+    _log(f"wrote {out_ply.name} ({n_kept}/{n_total} kept)")
 
     result: dict[str, str | int] = {
         "ply": str(out_ply),
@@ -136,7 +165,7 @@ async def filter_splat(
         "total": n_total,
     }
 
-    await progress(0.9, "filter: spz_pack")
+    await progress(0.9, "spz_pack")
     out_spz = out_dir / "scene.spz"
     ok = await run_spz_pack(
         out_ply, out_spz,
@@ -145,8 +174,12 @@ async def filter_splat(
     )
     if ok:
         result["spz"] = str(out_spz)
+        _log(f"wrote {out_spz.name}")
+    else:
+        _log("spz_pack unavailable or failed; ply only")
 
-    await progress(1.0, "filter: done")
+    _log("done")
+    await progress(1.0, "done")
     return result
 
 
@@ -210,6 +243,26 @@ def _apply_op(op: dict, *, xyz, vertex) -> Any:
         mean_dist = neigh.mean(axis=1)
         threshold = float(mean_dist.mean() + sigma * mean_dist.std())
         return mean_dist < threshold
+
+    if kind == "keep_indices":
+        # Explicit per-vertex keep set, indices into the SOURCE PLY's
+        # vertex order. Phase-2 lasso / 3D widget selections drop into
+        # the recipe via this op so server-side dispatch stays
+        # uniform with the parameterised ops above. Out-of-range
+        # indices are silently dropped (the user might have edited
+        # the recipe by hand or the source PLY changed since the
+        # selection was made) so the apply doesn't 422 on edge cases.
+        raw = op.get("indices", [])
+        if not isinstance(raw, list):
+            raise ValueError("keep_indices.indices must be a list")
+        n = xyz.shape[0]
+        idx = np.asarray(raw, dtype=np.int64)
+        if idx.size == 0:
+            return np.zeros(n, dtype=bool)
+        idx = idx[(idx >= 0) & (idx < n)]
+        mask = np.zeros(n, dtype=bool)
+        mask[idx] = True
+        return mask
 
     if kind == "dbscan_keep_largest":
         from sklearn.cluster import DBSCAN

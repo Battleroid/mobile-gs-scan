@@ -171,6 +171,13 @@ async def upsert_edit(scene_id: str, body: EditRequest) -> SceneView:
             if await store.cancel_job(j.id):
                 await events.publish_job(j.id, "job.canceled")
 
+    # Drop terminal filter rows so the scene's job list converges on
+    # a single, canonical filter row rather than accumulating one per
+    # apply. The web pipeline UI keys off scene.jobs and would
+    # otherwise grow a "filter / filter / filter / …" list as the
+    # user iterates on the recipe.
+    await store.delete_terminal_jobs_of_kind(scene.id, JobKind.filter)
+
     await store.update_scene(
         scene.id,
         edit_recipe=recipe,
@@ -178,7 +185,13 @@ async def upsert_edit(scene_id: str, body: EditRequest) -> SceneView:
         edit_error=None,
     )
     job = await store.enqueue_job(scene.id, JobKind.filter, payload={})
-    await events.publish_scene(scene.id, "scene.edit_queued", job_id=job.id)
+    # Just the bare event — the client only uses scene.edit_queued
+    # to flip its local edit_status and re-fetch the snapshot, so
+    # broadcasting the recipe (which can be MB-scale once
+    # keep_indices lands) is pure waste on the WS hot path.
+    await events.publish_scene(
+        scene.id, "scene.edit_queued", job_id=job.id,
+    )
 
     refreshed = await store.get_scene(scene.id)
     assert refreshed is not None

@@ -22,7 +22,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -394,6 +394,44 @@ async def cancel_job(job_id: str) -> bool:
         )
         await s.commit()
         return int(result.rowcount or 0) > 0
+
+
+async def delete_terminal_jobs_of_kind(scene_id: str, kind: JobKind) -> int:
+    """Drop fully-acked terminal rows of a given kind for a scene.
+
+    Used by the filter/edit upsert path so re-applying a recipe leaves
+    a single canonical filter-job row in the scene's job list rather
+    than one per apply. We delete:
+      * completed / failed rows unconditionally (the worker is done
+        with them by the time their status flips).
+      * canceled rows where ``completed_at IS NOT NULL`` — that's
+        the marker ``_ack_user_cancel`` sets after the runner has
+        observed the cancel, killed any subprocess, and finished
+        the post-cancel bookkeeping. Earlier canceled rows are
+        load-bearing for the runner's heartbeat + ``_run_filter``
+        pre-commit re-fetch (deleting them out from under an
+        in-flight worker would let the late completion overwrite
+        the new recipe's artifacts), but once the worker has acked
+        them they're safe to GC.
+    We DELIBERATELY don't touch in-flight rows (queued / claimed /
+    running) — the caller cancels those first.
+    """
+    async with session() as s:
+        result = await s.execute(
+            delete(Job).where(
+                Job.scene_id == scene_id,
+                Job.kind == kind,
+                or_(
+                    Job.status.in_([JobStatus.completed, JobStatus.failed]),
+                    and_(
+                        Job.status == JobStatus.canceled,
+                        Job.completed_at.is_not(None),
+                    ),
+                ),
+            )
+        )
+        await s.commit()
+        return int(result.rowcount or 0)
 
 
 async def reap_stale_jobs(*, stale_after_seconds: int = 60) -> int:

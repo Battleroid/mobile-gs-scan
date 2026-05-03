@@ -119,8 +119,13 @@ def _log_path_for_kind(kind: JobKind, scene_dir: Path) -> Path | None:
     if kind == JobKind.export:
         return scene_dir / "export" / "export.log"
     if kind == JobKind.filter:
-        # Filter is in-process, not a subprocess — but spz_pack writes
-        # its own log so the panel still has something useful when
-        # something goes wrong on the pack.
+        # filter_splat writes a per-op trace to filter.log (recipe,
+        # per-op kept/dropped counts, timings); spz_pack appends its
+        # own log next to it. The trace is the more useful one for
+        # the JobLogPanel; fall back to spz_pack if it doesn't exist
+        # (interrupted before any op ran).
+        primary = scene_dir / "edit" / "filter.log"
+        if primary.exists():
+            return primary
         return scene_dir / "edit" / "spz_pack.log"
     return None

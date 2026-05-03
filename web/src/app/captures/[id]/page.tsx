@@ -9,7 +9,8 @@ import { useCaptureEvents } from "@/hooks/useCaptureEvents";
 import { useSceneEvents } from "@/hooks/useSceneEvents";
 import { CapturePairing } from "@/components/CapturePairing";
 import { JobLogPanel } from "@/components/JobLogPanel";
-import { SplatEditor } from "@/components/SplatEditor";
+import { SplatEditor, type SplatEditorHandle } from "@/components/SplatEditor";
+import type { SelectionWidget } from "@/components/SplatViewer";
 import type { Capture, Job } from "@/lib/types";
 
 // Heavy three.js viewer — keep it out of the SSR bundle.
@@ -34,13 +35,35 @@ export default function CaptureDetailPage({ params }: PageProps) {
   const capture = live ?? initial ?? null;
 
   const sceneId = capture?.scene_id ?? null;
-  const { scene, editProgress } = useSceneEvents(sceneId);
+  const { scene, editProgress, lastEditResult } = useSceneEvents(sceneId);
 
   const [deleting, setDeleting] = useState(false);
   // Which artifact the SplatViewer is showing. Auto-promotes to
   // "edited" when an edit lands and the user hasn't explicitly
   // overridden the choice; reverts to "original" on discard.
   const [viewing, setViewing] = useState<"original" | "edited">("original");
+  // 3D widget state — null = no gizmo, "bbox"|"sphere" = render the
+  // matching draggable wireframe in the viewer. Initial value is
+  // snapshot from the editor's current form state when activated.
+  const editorRef = useRef<SplatEditorHandle | null>(null);
+  const [activeWidget, setActiveWidget] = useState<"bbox" | "sphere" | null>(null);
+  const [widgetSelection, setWidgetSelection] = useState<SelectionWidget | null>(null);
+  const handleActivateWidget = (next: "bbox" | "sphere" | null) => {
+    setActiveWidget(next);
+    if (next === null) {
+      setWidgetSelection(null);
+      return;
+    }
+    setWidgetSelection(editorRef.current?.snapshotWidget(next) ?? null);
+  };
+  const handleWidgetCommit = (next: SelectionWidget) => {
+    // Mirror the new transform into both local state (so the
+    // gizmo's seed key changes — no-op visually since the mesh
+    // already matches) and the editor's form state (so when the
+    // user clicks Apply, the recipe carries the latest geometry).
+    setWidgetSelection(next);
+    editorRef.current?.commitWidget(next);
+  };
   const hasEdit =
     !!scene && scene.edit_status === "completed" && !!scene.edited_ply_url;
   // Promote-to-edited when the very first edit lands. We track the
@@ -151,14 +174,21 @@ export default function CaptureDetailPage({ params }: PageProps) {
                     key={splatUrl}
                     url={api.base() + splatUrl}
                     pointsUrl={pointsRel ? api.base() + pointsRel : undefined}
+                    selection={widgetSelection}
+                    onSelectionCommit={handleWidgetCommit}
                   />
                 );
               })()}
               <SplatEditor
+                ref={editorRef}
                 scene={scene}
                 editProgress={editProgress}
+                lastEditResult={lastEditResult}
                 viewing={viewing}
                 onChangeView={setViewing}
+                activeWidget={activeWidget}
+                onActivateWidget={handleActivateWidget}
+                onWidgetFormChange={setWidgetSelection}
               />
               <div className="flex flex-wrap gap-3 text-xs">
                 {scene.ply_url && (
