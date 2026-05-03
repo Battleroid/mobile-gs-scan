@@ -46,6 +46,7 @@ ALLOWED_OPS = {
     "opacity_threshold",
     "scale_clamp",
     "bbox_crop",
+    "sphere_crop",
     "sphere_remove",
     "sor",
     "dbscan_keep_largest",
@@ -216,6 +217,16 @@ def _apply_op(op: dict, *, xyz, vertex) -> Any:
         d2 = ((xyz - center) ** 2).sum(axis=1)
         # Keep points OUTSIDE the sphere (the sphere defines what to nuke).
         return d2 > (radius * radius)
+
+    if kind == "sphere_crop":
+        # Counterpart to sphere_remove: keep only what's INSIDE the
+        # sphere. Pairs with the in-viewer sphere widget the same way
+        # bbox_crop pairs with the box widget — drag the gizmo to
+        # select the region you want to retain.
+        center = np.asarray(op.get("center", [0.0, 0.0, 0.0]), dtype=np.float32)
+        radius = float(op.get("radius", 0.0))
+        d2 = ((xyz - center) ** 2).sum(axis=1)
+        return d2 <= (radius * radius)
 
     if kind == "sor":
         from scipy.spatial import cKDTree

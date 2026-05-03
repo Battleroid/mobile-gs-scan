@@ -38,6 +38,13 @@ interface OpsState {
   };
   sphere: {
     enabled: boolean;
+    /**
+     * "crop" keeps everything INSIDE the sphere (paired with the
+     * 3D widget for visual selection). "remove" drops everything
+     * inside (the original semantics — useful for nuking a
+     * spherical noise cluster around the origin).
+     */
+    mode: "crop" | "remove";
     center: [number, number, number];
     radius: number;
   };
@@ -57,7 +64,7 @@ const DEFAULT_OPS: OpsState = {
   opacity: { enabled: false, min: 0.05 },
   scale: { enabled: false, max_scale: 0.5 },
   bbox: { enabled: false, min: [-2, -1, -2], max: [2, 2, 2] },
-  sphere: { enabled: false, center: [0, 0, 0], radius: 0.3 },
+  sphere: { enabled: false, mode: "crop", center: [0, 0, 0], radius: 1.0 },
   sor: { enabled: false, k: 24, std_multiplier: 2.0 },
   dbscan: { enabled: false, eps: 0.05, min_samples: 30 },
   extras: [],
@@ -162,6 +169,9 @@ export const SplatEditor = forwardRef<SplatEditorHandle, Props>(function SplatEd
             ...s,
             sphere: {
               enabled: true,
+              // Preserve whichever mode the user picked in the UI;
+              // a fresh widget defaults to "crop" via DEFAULT_OPS.
+              mode: s.sphere.mode,
               center: next.center,
               radius: Math.max(0, next.radius),
             },
@@ -393,14 +403,36 @@ export const SplatEditor = forwardRef<SplatEditorHandle, Props>(function SplatEd
         </Toggle>
 
         <Toggle
-          label="sphere remove"
-          help="Drop everything inside a sphere. Use 'nuke origin cloud' for the classic spherical noise around (0,0,0); drag the magenta sphere widget for arbitrary cleanup."
+          label="sphere selection"
+          help="Pick a sphere in the viewer (drag the magenta widget). Mode crop = keep only what's inside; mode remove = drop what's inside (handy for nuking the spherical noise cluster around the origin)."
           checked={ops.sphere.enabled}
           onChange={(v) => {
             setOps((s) => ({ ...s, sphere: { ...s.sphere, enabled: v } }));
             if (!v && activeWidget === "sphere") onActivateWidget(null);
           }}
         >
+          <label
+            className="flex flex-col gap-0.5 text-xs"
+            title="crop = keep only the gaussians inside the sphere (the visual default — pairs with the widget). remove = drop everything inside (use the nuke-origin preset for the classic noise-cluster cleanup)."
+          >
+            <span className="text-muted">mode</span>
+            <select
+              value={ops.sphere.mode}
+              onChange={(e) =>
+                setOps((s) => ({
+                  ...s,
+                  sphere: {
+                    ...s.sphere,
+                    mode: e.target.value as "crop" | "remove",
+                  },
+                }))
+              }
+              className="w-32 bg-transparent border-b border-rule px-1 focus:outline-none focus:border-accent"
+            >
+              <option value="crop">crop (keep inside)</option>
+              <option value="remove">remove (drop inside)</option>
+            </select>
+          </label>
           <Vec3Field
             label="center"
             value={ops.sphere.center}
@@ -428,6 +460,10 @@ export const SplatEditor = forwardRef<SplatEditorHandle, Props>(function SplatEd
                 ...s,
                 sphere: {
                   enabled: true,
+                  // Origin cloud is a remove-inside use case; the
+                  // 0.3 m radius matches the typical artefact
+                  // produced when SfM init is weak.
+                  mode: "remove",
                   center: [0, 0, 0],
                   radius: 0.3,
                 },
@@ -677,6 +713,7 @@ export function applyWidgetSelectionToRecipe(
   } else {
     ops.sphere = {
       enabled: true,
+      mode: ops.sphere.mode,
       center: next.center,
       radius: Math.max(0, next.radius),
     };
@@ -701,6 +738,15 @@ function recipeToOps(recipe: EditRecipe | null): OpsState {
       case "sphere_remove":
         out.sphere = {
           enabled: true,
+          mode: "remove",
+          center: op.center,
+          radius: op.radius,
+        };
+        break;
+      case "sphere_crop":
+        out.sphere = {
+          enabled: true,
+          mode: "crop",
           center: op.center,
           radius: op.radius,
         };
@@ -749,7 +795,7 @@ function opsToRecipe(ops: OpsState): EditRecipe {
   }
   if (ops.sphere.enabled) {
     out.push({
-      type: "sphere_remove",
+      type: ops.sphere.mode === "crop" ? "sphere_crop" : "sphere_remove",
       center: ops.sphere.center,
       radius: ops.sphere.radius,
     });

@@ -202,6 +202,29 @@ def test_sphere_remove_drops_origin_cluster(synthetic_ply):
     assert res["kept"] == info["n_far"]
 
 
+def test_sphere_crop_keeps_origin_cluster(synthetic_ply):
+    """Inverse of sphere_remove — keep only what's INSIDE the sphere.
+    Same radius as the remove test, so the result is the complement
+    (n_total minus the surviving far cluster)."""
+    src, info, tmp = synthetic_ply
+    out_dir = tmp / "out"
+    res = asyncio.run(
+        filter_splat(
+            src_ply=src,
+            out_dir=out_dir,
+            recipe={
+                "ops": [{
+                    "type": "sphere_crop",
+                    "center": [0, 0, 0],
+                    "radius": 1.5,
+                }],
+            },
+            progress=_noop_progress,
+        )
+    )
+    assert res["kept"] == info["n_total"] - info["n_far"]
+
+
 def test_attributes_round_trip(synthetic_ply):
     """Run a permissive op and assert per-vertex attributes are
     preserved bit-for-bit on the survivors."""
