@@ -12,7 +12,7 @@
 // SplatMesh.setSplat) is a Phase-1.5 follow-up; the recipe DSL +
 // apply/download flow is the load-bearing piece and works without
 // it.
-import { forwardRef, useImperativeHandle, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useState } from "react";
 import { api } from "@/lib/api";
 import type { EditOp, EditRecipe, Scene } from "@/lib/types";
 import type { SelectionWidget } from "@/components/SplatViewer";
@@ -80,6 +80,13 @@ interface Props {
    */
   activeWidget: "bbox" | "sphere" | null;
   onActivateWidget: (next: "bbox" | "sphere" | null) => void;
+  /**
+   * Fires whenever the bbox / sphere form values change while a
+   * widget is active. Lets the page re-seed the gizmo so number-
+   * field edits, Reset, and recipe re-seeds all keep the 3D
+   * volume in lock-step with what apply & save will submit.
+   */
+  onWidgetFormChange?: (next: SelectionWidget) => void;
 }
 
 export const SplatEditor = forwardRef<SplatEditorHandle, Props>(function SplatEditor(
@@ -91,10 +98,40 @@ export const SplatEditor = forwardRef<SplatEditorHandle, Props>(function SplatEd
     onChangeView,
     activeWidget,
     onActivateWidget,
+    onWidgetFormChange,
   }: Props,
   ref,
 ) {
   const [ops, setOps] = useState<OpsState>(() => recipeToOps(scene.edit_recipe));
+
+  // While a widget is active, mirror form-side edits (number fields,
+  // Reset, recipe re-seeds from prop) back to the gizmo so the
+  // displayed volume always matches what apply will submit. Without
+  // this, widgetSelection only moved on viewer commits and could
+  // diverge from the form.
+  useEffect(() => {
+    if (!activeWidget || !onWidgetFormChange) return;
+    if (activeWidget === "bbox") {
+      onWidgetFormChange({
+        kind: "bbox",
+        min: ops.bbox.min,
+        max: ops.bbox.max,
+      });
+    } else {
+      onWidgetFormChange({
+        kind: "sphere",
+        center: ops.sphere.center,
+        radius: ops.sphere.radius,
+      });
+    }
+  }, [
+    activeWidget,
+    onWidgetFormChange,
+    ops.bbox.min,
+    ops.bbox.max,
+    ops.sphere.center,
+    ops.sphere.radius,
+  ]);
 
   useImperativeHandle(
     ref,

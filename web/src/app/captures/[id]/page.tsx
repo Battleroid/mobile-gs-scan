@@ -188,6 +188,7 @@ export default function CaptureDetailPage({ params }: PageProps) {
                 onChangeView={setViewing}
                 activeWidget={activeWidget}
                 onActivateWidget={handleActivateWidget}
+                onWidgetFormChange={setWidgetSelection}
               />
               <div className="flex flex-wrap gap-3 text-xs">
                 {scene.ply_url && (
