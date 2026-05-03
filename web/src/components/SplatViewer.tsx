@@ -626,12 +626,30 @@ function SelectionGizmo({
   }, []);
   useEffect(() => {
     const canvas = gl.domElement;
-    const onPointerDown = () => {
+    const onPointerDown = (event: PointerEvent) => {
       const tc = tcRef.current;
+      // Only the left button starts a TransformControls drag —
+      // right/middle clicks would otherwise disable OC without
+      // ever firing dragging-changed=false to re-enable it,
+      // stranding the orbit broken for the rest of the session.
+      if (event.button !== 0) return;
       // tc.axis is non-null when the cursor is over a handle; TC
       // has already set it from earlier pointermove processing.
       if (tc && tc.axis !== null) {
         setOcEnabled(false);
+        // Belt-and-braces: even on a left-button down we might
+        // not get a drag-end if the user releases without
+        // moving (TC starts dragging on first move). Hook a
+        // one-shot pointerup that always re-enables OC if the
+        // drag listener didn't already do it. document-level so
+        // we catch releases off-canvas too.
+        const onUp = () => {
+          setOcEnabled(true);
+          document.removeEventListener("pointerup", onUp);
+          document.removeEventListener("pointercancel", onUp);
+        };
+        document.addEventListener("pointerup", onUp);
+        document.addEventListener("pointercancel", onUp);
       }
     };
     canvas.addEventListener("pointerdown", onPointerDown, { capture: true });
