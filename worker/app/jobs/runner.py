@@ -27,6 +27,7 @@ from app.config import Settings, get_settings
 from app.jobs import events, store
 from app.jobs.schema import (
     CaptureStatus,
+    EditStatus,
     Job,
     JobKind,
     JobStatus,
@@ -34,6 +35,7 @@ from app.jobs.schema import (
 )
 from app.pipeline import _running
 from app.pipeline import export as export_step
+from app.pipeline import filter as filter_step
 from app.pipeline import mesh as mesh_step
 from app.pipeline import sfm as sfm_step
 from app.pipeline import train as train_step
@@ -55,7 +57,13 @@ async def run_forever(settings: Settings | None = None) -> None:
     log.info("worker %s starting (class=%s)", worker, settings.worker_class)
 
     kinds_for_class: dict[str, list[JobKind]] = {
-        "gs": [JobKind.sfm, JobKind.train, JobKind.export, JobKind.mesh],
+        "gs": [
+            JobKind.sfm,
+            JobKind.train,
+            JobKind.export,
+            JobKind.mesh,
+            JobKind.filter,
+        ],
     }
     kinds = kinds_for_class.get(settings.worker_class)
     if not kinds:
@@ -94,6 +102,12 @@ async def run_forever(settings: Settings | None = None) -> None:
                     error=f"{exc}\n{tb}",
                 )
                 await events.publish_job(job.id, "job.failed", error=str(exc))
+                # Filter is post-processing on an already-completed
+                # scene; a failed recipe should NOT demote the scene
+                # / capture back to ``failed``. _run_filter has
+                # already updated edit_status + edit_error.
+                if job.kind == JobKind.filter:
+                    continue
                 scene = await store.get_scene(job.scene_id)
                 if scene:
                     await store.update_scene(scene.id, status=CaptureStatus.failed)
@@ -146,6 +160,13 @@ async def _run_one(job: Job, settings: Settings) -> None:
     capture = await store.get_capture(scene.capture_id)
     if capture is None:
         raise RuntimeError("capture vanished")
+
+    if job.kind == JobKind.filter:
+        # Filter jobs are post-processing on an already-completed
+        # scene; we don't churn the scene/capture status. Edit
+        # progress lives on the dedicated edit_status column.
+        await _run_filter(job=job, scene=scene, settings=settings)
+        return
 
     await store.update_scene(scene.id, status=CaptureStatus.processing)
     await store.set_capture_status(capture.id, CaptureStatus.processing)
@@ -207,6 +228,92 @@ async def _run_one(job: Job, settings: Settings) -> None:
     # `processing` forever — which also kept the web viewer hidden
     # since it conditions on scene.status == "completed".
     await _maybe_finalize_scene(scene)
+
+
+async def _run_filter(*, job: Job, scene: Scene, settings: Settings) -> None:
+    """Run the filter step on an already-exported scene.
+
+    Maintains ``Scene.edit_status`` + ``edit_error`` independently
+    of the main pipeline status — a failed filter never demotes a
+    completed scene back to ``failed``. On success writes the edited
+    artifact paths to the scene row so the api download endpoint
+    can serve them.
+    """
+    src_ply = scene.ply_path
+    if not src_ply or not Path(src_ply).exists():
+        raise RuntimeError("scene has no source .ply to filter")
+
+    recipe = scene.edit_recipe or {"ops": []}
+
+    await store.update_scene(scene.id, edit_status=EditStatus.running, edit_error=None)
+    await events.publish_scene(scene.id, "scene.edit_running")
+
+    edit_dir = settings.scenes_dir() / scene.id / "edit"
+
+    async def progress(pct: float, msg: str) -> None:
+        await store.update_job(
+            job.id, progress=pct, progress_msg=msg, heartbeat=True
+        )
+        await events.publish_job(job.id, "job.progress", progress=pct, message=msg)
+        # Also surface on the scene topic — the web client opened
+        # its scene WS before the filter job existed, so it has no
+        # per-job subscription to listen on. Mirroring on the scene
+        # topic gives it a live progress stream without needing a
+        # WS reconnect dance.
+        await events.publish_scene(
+            scene.id, "scene.edit_progress", progress=pct, message=msg,
+        )
+
+    dispatch_task = asyncio.create_task(
+        filter_step.filter_splat(
+            src_ply=Path(src_ply),
+            out_dir=edit_dir,
+            recipe=recipe,
+            progress=progress,
+            job_id=job.id,
+        )
+    )
+    hb_task = asyncio.create_task(_heartbeat(job.id, dispatch_task))
+    try:
+        try:
+            result = await dispatch_task
+        finally:
+            hb_task.cancel()
+    except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001
+        # User cancel path: leave edit_status alone if cancelled (the
+        # outer run_forever handles _ack_user_cancel) — otherwise mark
+        # failed so the UI surfaces the recipe error.
+        if await _ack_user_cancel(job):
+            await store.update_scene(scene.id, edit_status=EditStatus.none)
+            return
+        msg = f"{exc}"
+        await store.update_scene(
+            scene.id, edit_status=EditStatus.failed, edit_error=msg,
+        )
+        await events.publish_scene(scene.id, "scene.edit_failed", error=msg)
+        raise
+
+    await store.update_scene(
+        scene.id,
+        edited_ply_path=str(result.get("ply")) if result.get("ply") else None,
+        edited_spz_path=str(result.get("spz")) if result.get("spz") else None,
+        edit_status=EditStatus.completed,
+        edit_error=None,
+    )
+    await store.update_job(
+        job.id,
+        status=JobStatus.completed,
+        progress=1.0,
+        progress_msg="done",
+        completed=True,
+        result=result,
+    )
+    await events.publish_job(job.id, "job.completed", result=result)
+    await events.publish_scene(
+        scene.id, "scene.edited",
+        kept=result.get("kept"),
+        total=result.get("total"),
+    )
 
 
 async def _dispatch(

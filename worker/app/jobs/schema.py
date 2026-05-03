@@ -80,6 +80,15 @@ class JobKind(str, enum.Enum):
     train = "train"
     export = "export"
     mesh = "mesh"  # PR #2; always no-op in PR #1
+    filter = "filter"  # user-triggered post-processing of an existing splat
+
+
+class EditStatus(str, enum.Enum):
+    none = "none"           # no edit has been applied
+    queued = "queued"       # filter job enqueued, worker hasn't picked up yet
+    running = "running"     # worker is applying the recipe
+    completed = "completed" # edit artifacts are on disk and downloadable
+    failed = "failed"       # last apply attempt failed; see edit_error
 
 
 class Capture(Base):
@@ -137,6 +146,17 @@ class Scene(Base):
     ply_path: Mapped[str | None] = mapped_column(String, nullable=True)
     spz_path: Mapped[str | None] = mapped_column(String, nullable=True)
     thumbnail_path: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Edited artifacts written by the filter job (single replaceable
+    # edit per scene; re-apply overwrites). The original ply_path /
+    # spz_path above are never touched by edits.
+    edited_ply_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    edited_spz_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    edit_recipe: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    edit_status: Mapped[EditStatus] = mapped_column(
+        Enum(EditStatus, native_enum=False), default=EditStatus.none, nullable=False,
+    )
+    edit_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

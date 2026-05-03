@@ -77,6 +77,36 @@ async def init_store(settings: Settings | None = None) -> None:
         await conn.run_sync(Base.metadata.create_all)
         await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
         await conn.exec_driver_sql("PRAGMA synchronous=NORMAL")
+        # SQLAlchemy's create_all() is no-op for existing tables, so
+        # newly-added columns on long-lived rows (Scene's edit_*
+        # fields, etc.) need an explicit ALTER. SQLite supports
+        # ADD COLUMN and tolerates the IF NOT EXISTS-style retry
+        # below: we just attempt each add and ignore the duplicate-
+        # column error so the boot path is idempotent.
+        await _apply_lightweight_migrations(conn)
+
+
+async def _apply_lightweight_migrations(conn) -> None:
+    """Add new columns to existing tables on boot.
+
+    SQLite's ``ALTER TABLE ADD COLUMN`` is cheap (metadata-only) and
+    safe on a live db. We attempt each add and swallow the duplicate-
+    column error so re-runs are no-ops.
+    """
+    statements = [
+        "ALTER TABLE scenes ADD COLUMN edited_ply_path VARCHAR",
+        "ALTER TABLE scenes ADD COLUMN edited_spz_path VARCHAR",
+        "ALTER TABLE scenes ADD COLUMN edit_recipe JSON",
+        "ALTER TABLE scenes ADD COLUMN edit_status VARCHAR DEFAULT 'none' NOT NULL",
+        "ALTER TABLE scenes ADD COLUMN edit_error TEXT",
+    ]
+    for stmt in statements:
+        try:
+            await conn.exec_driver_sql(stmt)
+        except Exception:
+            # Already present — fine. Anything else (corrupt schema,
+            # missing table) will surface on the next read.
+            pass
 
 
 async def shutdown_store() -> None:
