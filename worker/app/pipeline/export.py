@@ -9,8 +9,7 @@ import struct
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from app.pipeline import _running
-from app.pipeline._logtail import format_subprocess_error, tail_bytes
+from app.pipeline._spz import run_spz_pack
 
 log = logging.getLogger(__name__)
 
@@ -22,7 +21,6 @@ async def run_export(
     scene_dir: Path,
     formats: list[str],
     progress: ProgressCb,
-    job_id: str | None = None,
 ) -> dict:
     export_dir = scene_dir / "export"
     export_dir.mkdir(parents=True, exist_ok=True)
@@ -36,7 +34,6 @@ async def run_export(
         export_dir=export_dir,
         formats=formats,
         progress=progress,
-        job_id=job_id,
     )
 
 
@@ -46,7 +43,6 @@ async def _run_real(
     export_dir: Path,
     formats: list[str],
     progress: ProgressCb,
-    job_id: str | None,
 ) -> dict:
     candidates = sorted(train_dir.rglob("config.yml"))
     if not candidates:
@@ -67,21 +63,11 @@ async def _run_real(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
-        if job_id is not None:
-            _running.register(job_id, proc)
-        try:
-            out = await proc.stdout.read() if proc.stdout else b""
-            rc = await proc.wait()
-        finally:
-            if job_id is not None:
-                _running.unregister(job_id)
-        log_path = export_dir / "export.log"
-        log_path.write_bytes(out)
+        out = await proc.stdout.read() if proc.stdout else b""
+        rc = await proc.wait()
+        (export_dir / "export.log").write_bytes(out)
         if rc != 0:
-            tail = tail_bytes(out)
-            raise RuntimeError(
-                format_subprocess_error("ns-export", rc, log_path, tail)
-            )
+            raise RuntimeError(f"ns-export exited {rc}")
         ply = next(export_dir.glob("*.ply"), None)
         if ply is None:
             raise RuntimeError("ns-export produced no .ply")
@@ -90,23 +76,12 @@ async def _run_real(
             ply.replace(ply_dst)
         artifacts["ply"] = str(ply_dst)
 
-    if "spz" in formats and "ply" in artifacts and shutil.which("spz_pack"):
+    if "spz" in formats and "ply" in artifacts:
         await progress(0.7, "export: spz_pack")
         spz_dst = export_dir / "scene.spz"
-        proc = await asyncio.create_subprocess_exec(
-            "spz_pack", artifacts["ply"], str(spz_dst),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        if job_id is not None:
-            _running.register(job_id, proc)
-        try:
-            await proc.wait()
-        finally:
-            if job_id is not None:
-                _running.unregister(job_id)
-        if spz_dst.exists():
-            artifacts["spz"] = str(spz_dst)
+        packed = await run_spz_pack(Path(artifacts["ply"]), spz_dst)
+        if packed is not None:
+            artifacts["spz"] = str(packed)
 
     await progress(1.0, "export: done")
     return artifacts

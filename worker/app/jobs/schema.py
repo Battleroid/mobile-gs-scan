@@ -8,16 +8,6 @@ Single SQLite db at $DATA_DIR/studio.sqlite. Three tables:
 
 Events (the in-memory pub/sub for live progress) are *not* persisted;
 they're only useful to clients connected at the moment a step runs.
-
-Datetime convention: every datetime in this codebase is a *naive*
-UTC value. SQLite has no native TIMESTAMP-WITH-TIMEZONE support, and
-SQLAlchemy's `DateTime(timezone=True)` emits a SAWarning + silently
-strips the tzinfo on store on the SQLite dialect — so trying to
-store tz-aware values gets you naive reads anyway. The simpler,
-consistent move is to keep everything naive UTC end-to-end:
-``_utcnow()`` returns ``datetime.utcnow()``-equivalent (the modern
-spelling: ``datetime.now(timezone.utc).replace(tzinfo=None)``), and
-every comparison site stays naive↔naive.
 """
 from __future__ import annotations
 
@@ -38,10 +28,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 def _utcnow() -> datetime:
-    # Naive UTC — see module docstring. ``datetime.utcnow()`` is
-    # deprecated in 3.12+; this is the canonical replacement that
-    # still produces a naive value.
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(timezone.utc)
 
 
 class Base(DeclarativeBase):
@@ -80,6 +67,15 @@ class JobKind(str, enum.Enum):
     train = "train"
     export = "export"
     mesh = "mesh"  # PR #2; always no-op in PR #1
+    filter = "filter"  # user-triggered post-processing of an existing scene
+
+
+class EditStatus(str, enum.Enum):
+    none = "none"
+    queued = "queued"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
 
 
 class Capture(Base):
@@ -137,6 +133,18 @@ class Scene(Base):
     ply_path: Mapped[str | None] = mapped_column(String, nullable=True)
     spz_path: Mapped[str | None] = mapped_column(String, nullable=True)
     thumbnail_path: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Filter / edit pipeline. The original ply/spz above are immutable;
+    # an edit produces a derived copy alongside, plus the recipe used so
+    # we can replay or audit it. One edit per scene — re-applying with a
+    # new recipe overwrites these paths.
+    edited_ply_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    edited_spz_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    edit_recipe: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    edit_status: Mapped[EditStatus] = mapped_column(
+        Enum(EditStatus, native_enum=False), default=EditStatus.none, nullable=False,
+    )
+    edit_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
