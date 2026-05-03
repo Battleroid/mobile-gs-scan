@@ -507,15 +507,28 @@ function SelectionGizmo({
   mode: WidgetMode;
   onCommit: (next: SelectionWidget) => void;
 }) {
-  const meshRef = useRef<THREE.Mesh>(null);
-  // Seed the mesh transform from the incoming selection in an effect
-  // so it runs AFTER mount/update — TransformControls mutates the
-  // mesh directly mid-drag, so we deliberately re-seed only when
-  // the recipe-derived key changes (parent commits a new value or
-  // switches kinds).
+  // Use a state-tracked target rather than nesting <mesh> inside
+  // <TransformControls>. drei v10's TransformControls binds via the
+  // `object` prop; passing an external ref + a re-render trigger
+  // (the useState below) is the documented "stable" way to attach
+  // it. Nesting the mesh as a child caused the gizmo's pointer
+  // listeners to detach on every parent re-render, which manifested
+  // as "I can only interact while moving the mouse, no click ever
+  // takes" — listeners were torn down between pointerdown and the
+  // raycast that would have grabbed the handle.
+  const [targetMesh, setTargetMesh] = useState<THREE.Mesh | null>(null);
+  const meshCallbackRef = useCallback((node: THREE.Mesh | null) => {
+    setTargetMesh(node);
+  }, []);
+
+  // Seed the mesh transform from the incoming selection. Runs after
+  // mount + on selection identity change. TransformControls mutates
+  // mesh.position/scale directly mid-drag, so we deliberately
+  // re-seed only when the recipe-derived key changes (parent
+  // commits a new value or switches kinds).
   const seedKey = JSON.stringify(selection);
   useEffect(() => {
-    const m = meshRef.current;
+    const m = targetMesh;
     if (!m) return;
     if (selection.kind === "bbox") {
       const [mnx, mny, mnz] = selection.min;
@@ -531,13 +544,11 @@ function SelectionGizmo({
       const d = Math.max(0.001, selection.radius * 2);
       m.scale.set(d, d, d);
     }
-    // Seed key threads through deps so the effect re-runs only on
-    // a meaningful selection change, not on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [seedKey]);
+  }, [seedKey, targetMesh]);
 
   const commit = useCallback(() => {
-    const m = meshRef.current;
+    const m = targetMesh;
     if (!m) return;
     if (selection.kind === "bbox") {
       const cx = m.position.x, cy = m.position.y, cz = m.position.z;
@@ -550,10 +561,9 @@ function SelectionGizmo({
         max: [cx + sx, cy + sy, cz + sz],
       });
     } else {
-      // For the sphere we treat the geometry as uniformly scaled —
-      // even if the user managed a non-uniform scale (the gizmo
-      // does support per-axis), collapse to the average so the
-      // recipe remains a true sphere.
+      // Sphere is uniformly scaled even if the user wrangled a
+      // non-uniform scale: collapse to the average so the recipe
+      // stays a true sphere.
       const avg =
         (Math.abs(m.scale.x) + Math.abs(m.scale.y) + Math.abs(m.scale.z)) / 3;
       onCommit({
@@ -562,17 +572,22 @@ function SelectionGizmo({
         radius: avg / 2,
       });
     }
-  }, [selection.kind, onCommit]);
+  }, [selection.kind, onCommit, targetMesh]);
 
-  // Wire TransformControls' dragging-changed event so we commit on
-  // mouse-up (and pause the OrbitControls during drag).
-  const tcRef = useRef<unknown>(null);
+  // dragging-changed → commit on mouse-up. Stable ref callback so
+  // we don't churn TransformControls' attached listeners every
+  // render (an inline `ref={(v) => { ... }}` would, and that was
+  // the second half of the "clicks don't register" symptom).
+  const tcRef = useRef<{
+    addEventListener: (k: string, fn: (e: { value: boolean }) => void) => void;
+    removeEventListener: (k: string, fn: (e: { value: boolean }) => void) => void;
+  } | null>(null);
+  const setTcRef = useCallback((v: unknown) => {
+    tcRef.current = v as typeof tcRef.current;
+  }, []);
   const { invalidate } = useThree();
   useEffect(() => {
-    const tc = tcRef.current as unknown as
-      | { addEventListener: (k: string, fn: (e: { value: boolean }) => void) => void;
-          removeEventListener: (k: string, fn: (e: { value: boolean }) => void) => void; }
-      | null;
+    const tc = tcRef.current;
     if (!tc) return;
     const onDrag = (e: { value: boolean }) => {
       if (!e.value) commit();
@@ -580,57 +595,38 @@ function SelectionGizmo({
     };
     tc.addEventListener("dragging-changed", onDrag);
     return () => tc.removeEventListener("dragging-changed", onDrag);
-  }, [commit, invalidate]);
+  }, [commit, invalidate, targetMesh]);
 
   const color = selection.kind === "bbox" ? "#ffae42" : "#ff5fa2";
 
   return (
-    // size bumped from the original 0.7 → 1.6 so the handles are
-    // actually grabbable with a mouse — the smaller default gizmo
-    // had a hit-area too tight to drag without losing the cursor
-    // every few pixels, which presented as the gizmo "flickering"
-    // the highlight on/off. Keeping space="world" so the axes stay
-    // aligned with the global frame instead of inheriting the
-    // mesh's rotation, which is also more predictable for crops.
-    <TransformControls
-      ref={(value: unknown) => {
-        tcRef.current = value;
-      }}
-      mode={mode}
-      size={1.6}
-      space="world"
-    >
-      <mesh
-        ref={meshRef}
-        // Disable raycast on the wireframe outline. Without this,
-        // R3F's pointer event manager picks the visual mesh (which
-        // is much bigger than the gizmo handles) on every
-        // pointerdown, the gizmo never sees the click, and
-        // OrbitControls — also listening on the canvas — pans the
-        // camera instead. The user-visible symptom is "I can only
-        // interact while moving the mouse, clicks do nothing." Mesh
-        // is purely visual; only the gizmo's own handles should be
-        // hit-testable.
-        raycast={NOOP_RAYCAST}
-      >
+    <>
+      <mesh ref={meshCallbackRef} raycast={NOOP_RAYCAST}>
         {selection.kind === "bbox" ? (
           <boxGeometry args={[1, 1, 1]} />
         ) : (
           <sphereGeometry args={[0.5, 24, 16]} />
         )}
-        {/* Wireframe material has to NOT be transparent — the prior
-            `transparent` + `depthTest={false}` combo was the second
-            half of the flicker problem: alpha sorting against the
-            gizmo's own handles thrashed the depth state every
-            frame. Opaque wireframe with depth-test on renders
-            cleanly + plays nicely with the gizmo. */}
         <meshBasicMaterial color={color} wireframe />
       </mesh>
-    </TransformControls>
+      {targetMesh && (
+        <TransformControls
+          ref={setTcRef}
+          object={targetMesh}
+          mode={mode}
+          size={1.6}
+          space="world"
+          // makeDefault on the gizmo + the existing makeDefault on
+          // OrbitControls is what wires drei's auto-disable: the
+          // gizmo registers itself with the default OrbitControls
+          // and pauses it during drag so pointer events on the
+          // handles aren't competed for.
+          makeDefault
+        />
+      )}
+    </>
   );
 }
 
-// Hoisted so it's reference-stable across renders — assigning a new
-// fn each render would defeat r3f's prop-equality short-circuit on
-// the mesh node and cause spurious re-attaches.
+// Hoisted so it's reference-stable across renders.
 const NOOP_RAYCAST = () => {};
