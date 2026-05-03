@@ -106,11 +106,22 @@ export const SplatEditor = forwardRef<SplatEditorHandle, Props>(function SplatEd
 
   // While a widget is active, mirror form-side edits (number fields,
   // Reset, recipe re-seeds from prop) back to the gizmo so the
-  // displayed volume always matches what apply will submit. Without
-  // this, widgetSelection only moved on viewer commits and could
-  // diverge from the form.
+  // displayed volume always matches what apply will submit. If the
+  // form has flipped the bound op OFF (Reset, Discard, or a fresh
+  // server snapshot without that op), force-deactivate the gizmo
+  // instead of pushing geometry — leaving it active would (a) let a
+  // drag silently re-enable an op the form shows as off, and (b)
+  // strand the user without the "stop editing in 3D" button which
+  // only shows while the toggle is open.
   useEffect(() => {
-    if (!activeWidget || !onWidgetFormChange) return;
+    if (!activeWidget) return;
+    const enabled =
+      activeWidget === "bbox" ? ops.bbox.enabled : ops.sphere.enabled;
+    if (!enabled) {
+      onActivateWidget(null);
+      return;
+    }
+    if (!onWidgetFormChange) return;
     if (activeWidget === "bbox") {
       onWidgetFormChange({
         kind: "bbox",
@@ -126,9 +137,12 @@ export const SplatEditor = forwardRef<SplatEditorHandle, Props>(function SplatEd
     }
   }, [
     activeWidget,
+    onActivateWidget,
     onWidgetFormChange,
+    ops.bbox.enabled,
     ops.bbox.min,
     ops.bbox.max,
+    ops.sphere.enabled,
     ops.sphere.center,
     ops.sphere.radius,
   ]);
