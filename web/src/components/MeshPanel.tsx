@@ -20,7 +20,7 @@ import type { MeshParams, MeshStatus, Scene } from "@/lib/types";
 
 const NORMAL_METHODS: MeshParams["normal_method"][] = [
   "open3d",
-  "open3d_with_normals",
+  "model_output",
 ];
 
 interface ParamsState {
@@ -187,7 +187,7 @@ export function MeshPanel({ scene, meshProgress }: Props) {
         </label>
         <label
           className="flex flex-col gap-0.5 text-xs"
-          title="How point normals are estimated. open3d uses a local PCA fit; open3d_with_normals reuses any normals attached to the trained gaussians (better when the scan covered most viewing angles)."
+          title="How point normals are estimated. open3d uses a local PCA fit on the sampled point cloud; model_output reuses normals predicted by the trained gaussian model (better when the scan covered most viewing angles)."
         >
           <span className="text-muted">normal method</span>
           <select

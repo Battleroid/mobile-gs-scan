@@ -286,7 +286,14 @@ class MeshRequest(BaseModel):
 
 
 _ALLOWED_MESH_KEYS = set(MESH_DEFAULT_PARAMS.keys())
-_ALLOWED_NORMAL_METHODS = {"open3d", "open3d_with_normals"}
+# Match nerfstudio 1.1.5's ns-export poisson --normal-method choices:
+# the binary accepts ``open3d`` (Open3D's local PCA fit) or
+# ``model_output`` (reuse normals predicted by the trained model).
+# An older value name (open3d_with_normals) was never part of the
+# upstream CLI; allowlisting it 422-rejected the only valid
+# alternative to "open3d" while letting through a value that
+# would crash ns-export on apply.
+_ALLOWED_NORMAL_METHODS = {"open3d", "model_output"}
 
 
 def _validate_mesh_params(raw: dict | None) -> dict:

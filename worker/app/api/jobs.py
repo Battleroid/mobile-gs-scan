@@ -126,12 +126,31 @@ async def _reset_scene_status_for_canceled_job(
 ) -> None:
     """Cascade a job-level cancel into the scene-level status column.
 
-    Race-safe: only flips when the column is still in an in-flight
-    value (queued/running). If a replacement POST has already moved
-    it forward, leave it alone so the new pending job stays visible.
+    Race-safe in two dimensions:
+      * Only flips when the column is still in an in-flight value
+        (queued/running) — never demotes a completed/failed/none
+        state.
+      * Skips entirely when ANY other non-terminal job of the same
+        kind exists for the scene. That covers the common
+        cancel-and-immediately-re-POST flow: cancelling the old
+        queued job sees the replacement's queued state and would
+        otherwise clobber it back to none, hiding the new pending
+        extraction. The replacement's own start path will own the
+        next status transition.
     Emits the matching ``scene.*_cleared`` event so the web client
     picks up the reset without a refresh.
     """
+    in_flight = (JobStatus.queued, JobStatus.claimed, JobStatus.running)
+    other_jobs = [
+        j
+        for j in await store.list_jobs_for_scene(scene_id)
+        if j.kind == kind and j.status in in_flight
+    ]
+    if other_jobs:
+        # A replacement (or coexisting) job is in flight; let it
+        # drive the next status transition.
+        return
+
     scene = await store.get_scene(scene_id)
     if scene is None:
         return
