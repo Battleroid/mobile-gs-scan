@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { wsUrl } from "@/lib/api";
-import type { EditStatus, MeshStatus, Scene, ServerEvent } from "@/lib/types";
+import type { Scene, ServerEvent } from "@/lib/types";
 
 export interface EditResult {
   kept: number;
@@ -134,20 +134,18 @@ export function useSceneEvents(sceneId: string | null): {
               if (next && gen === refreshGen.current) setScene(next);
             });
           } else if (evt.kind === "scene.edit_cleared") {
-            setScene((s) =>
-              s
-                ? {
-                    ...s,
-                    edit_status: "none" as EditStatus,
-                    edit_recipe: null,
-                    edit_error: null,
-                    edited_ply_url: null,
-                    edited_spz_url: null,
-                  }
-                : s,
-            );
+            // Same trade-off as scene.mesh_cleared: cancel paths
+            // emit this event without deleting the prior recipe /
+            // edited artefacts (only DELETE /edit does that).
+            // Re-fetch instead of clobbering URLs locally so a
+            // canceled re-apply doesn't drop a still-valid edit
+            // from the UI.
             setEditProgress(null);
             setLastEditResult(null);
+            const gen = ++refreshGen.current;
+            void refreshScene(sceneId).then((next) => {
+              if (next && gen === refreshGen.current) setScene(next);
+            });
           } else if (evt.kind === "scene.mesh_queued") {
             setScene((s) => (s ? { ...s, mesh_status: "queued" } : s));
             setMeshProgress({ progress: 0, message: "queued" });
