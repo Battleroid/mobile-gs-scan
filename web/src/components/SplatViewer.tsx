@@ -75,6 +75,12 @@ export interface PointsHighlightApi {
   liveColors: Float32Array;
   /** the BufferAttribute backing liveColors. */
   attribute: THREE.BufferAttribute;
+  /** Set by SelectionGizmo while a widget is mounted; cleared on
+   *  unmount. SplatScene calls this after its view-mode palette
+   *  reset so the yellow mask gets re-applied immediately rather
+   *  than waiting for the next TC change event (which doesn't
+   *  fire on viewMode swaps). */
+  repaint?: () => void;
 }
 
 // Yellow used to paint points inside the active bbox / sphere
@@ -560,6 +566,12 @@ function SplatScene({
       api.liveColors.set(base);
       api.baseColors = base;
       api.attribute.needsUpdate = true;
+      // If a SelectionGizmo is mounted, ask it to re-apply the
+      // yellow mask against the freshly-restored base palette.
+      // Without this, switching mono ↔ colored ↔ splats with an
+      // active widget would clear the highlight until the user
+      // touched the gizmo again.
+      api.repaint?.();
     }
   }, [viewMode, highlightApiRef]);
 
@@ -878,17 +890,23 @@ function SelectionGizmo({
     // ~10 ms on a modern machine.
     onChange();
     tc.addEventListener("change", onChange);
+    // Register so SplatScene's view-mode effect can re-apply the
+    // mask after a palette reset (mono↔colored↔splats swaps
+    // overwrite the live buffer with the base palette and would
+    // otherwise drop the yellow until the next TC interaction).
     // Capture the ref into the closure so the cleanup uses the
     // same handle the effect saw at fire-time. SplatScene only
     // replaces highlightApiRef.current on a full URL/Spark
     // remount, but capturing here silences the stale-ref lint
     // rule and reads cleaner.
     const apiAtMount = highlightApiRef.current;
+    if (apiAtMount) apiAtMount.repaint = repaintHighlight;
     return () => {
       tc.removeEventListener("change", onChange);
       // Restore base palette so deactivating the widget removes
       // the yellow highlight.
       if (apiAtMount) {
+        apiAtMount.repaint = undefined;
         apiAtMount.liveColors.set(apiAtMount.baseColors);
         apiAtMount.attribute.needsUpdate = true;
         invalidate();
