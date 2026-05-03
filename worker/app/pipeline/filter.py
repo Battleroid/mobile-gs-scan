@@ -188,11 +188,25 @@ def _apply_op(op: dict, *, xyz, vertex) -> Any:
         from scipy.spatial import cKDTree
         k = int(op.get("k", 24))
         sigma = float(op.get("std_multiplier", 2.0))
+        n = len(xyz)
+        # SOR needs at least one neighbour OTHER than each point's
+        # self-match for a mean-distance reduction. With ≤ 1 point
+        # there are no neighbours; with very small populations the
+        # statistic is degenerate. Skip the op (keep everything) so
+        # the recipe stays composable on tiny scenes instead of
+        # raising an axis error mid-apply.
+        if n < 2:
+            return np.ones(n, dtype=bool)
+        # cKDTree.query returns a 1-D ndarray when k=1 and 2-D when
+        # k > 1 — clamp k to the available neighbour count and force
+        # the result back to 2-D so the slice + axis-1 reduction
+        # below is shape-stable.
+        k_eff = max(2, min(k + 1, n))
         tree = cKDTree(xyz)
-        # +1 because the nearest neighbour of a point is itself.
-        dists, _ = tree.query(xyz, k=min(k + 1, len(xyz)))
-        # Drop the self-distance column when present.
-        neigh = dists[:, 1:] if dists.ndim == 2 and dists.shape[1] > 1 else dists
+        dists, _ = tree.query(xyz, k=k_eff)
+        dists = np.atleast_2d(dists)
+        # Drop the self-distance column.
+        neigh = dists[:, 1:]
         mean_dist = neigh.mean(axis=1)
         threshold = float(mean_dist.mean() + sigma * mean_dist.std())
         return mean_dist < threshold

@@ -254,6 +254,37 @@ def test_dbscan_keeps_largest_cluster(synthetic_ply):
     assert res["kept"] <= info["n_total"] - info["n_far"]
 
 
+def test_sor_handles_single_point(tmp_path):
+    """Regression: SOR on n≤1 used to blow up with an axis error
+    because cKDTree.query returns a 1-D array for k=1. The op now
+    short-circuits to keep-everything on degenerate input."""
+    src = tmp_path / "single.ply"
+    out_dir = tmp_path / "out"
+
+    dtype = [
+        ("x", "f4"), ("y", "f4"), ("z", "f4"),
+        ("opacity", "f4"),
+        ("scale_0", "f4"), ("scale_1", "f4"), ("scale_2", "f4"),
+        ("rot_0", "f4"), ("rot_1", "f4"), ("rot_2", "f4"), ("rot_3", "f4"),
+    ]
+    arr = np.zeros(1, dtype=dtype)
+    arr["rot_0"] = 1.0
+    arr["opacity"] = 2.0
+    el = plyfile.PlyElement.describe(arr, "vertex")
+    plyfile.PlyData([el], byte_order="<").write(str(src))
+
+    res = asyncio.run(
+        filter_splat(
+            src_ply=src,
+            out_dir=out_dir,
+            recipe={"ops": [{"type": "sor", "k": 24, "std_multiplier": 2.0}]},
+            progress=_noop_progress,
+        )
+    )
+    assert res["kept"] == 1
+    assert res["total"] == 1
+
+
 def test_empty_result_raises(synthetic_ply):
     src, _info, tmp = synthetic_ply
     out_dir = tmp / "out"

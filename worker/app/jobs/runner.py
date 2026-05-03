@@ -293,6 +293,27 @@ async def _run_filter(*, job: Job, scene: Scene, settings: Settings) -> None:
         await events.publish_scene(scene.id, "scene.edit_failed", error=msg)
         raise
 
+    # Re-check the job's row before committing the result: a fast
+    # filter (≤ 5 s) can finish before the heartbeat loop notices a
+    # PUT-replace or DELETE-discard, in which case `result` is stale
+    # data from a recipe the user has already abandoned. Acking the
+    # cancel here keeps the next-queued filter job authoritative
+    # rather than racing with our late write. Edit artifacts are
+    # left on disk; the discard / replace endpoint cleans them up
+    # (DELETE) or the next job overwrites them (PUT).
+    refreshed = await store.get_job(job.id)
+    if refreshed is not None and refreshed.status == JobStatus.canceled:
+        log.info(
+            "filter %s finished but DB row is canceled; skipping commit",
+            job.id,
+        )
+        await store.update_job(job.id, completed=True)
+        await events.publish_job(job.id, "job.canceled")
+        # Don't touch edit_status — the cancel path on the api side
+        # has already moved it to its next state (queued for the
+        # replacement, or none for the discard).
+        return
+
     await store.update_scene(
         scene.id,
         edited_ply_path=str(result.get("ply")) if result.get("ply") else None,
