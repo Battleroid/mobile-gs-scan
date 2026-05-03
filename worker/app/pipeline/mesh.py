@@ -99,23 +99,27 @@ async def _run_poisson(
         raise RuntimeError("no nerfstudio config.yml under train/")
     config = candidates[-1]
 
-    # Sweep stale artefacts from prior runs before invoking ns-export.
-    # The post-run lookup uses ``next(glob('*.obj'), None)`` to pick
-    # whichever file the binary produced, but if ns-export writes only
-    # .ply (versions vary), a leftover scene.obj from an earlier run
-    # would get returned and the job would report success while
-    # serving stale geometry. Clean every potential output file so
-    # the glob below can't see anything but freshly-written content.
-    for stale in (
-        *mesh_dir.glob("*.obj"),
-        *mesh_dir.glob("*.ply"),
-        *mesh_dir.glob("*.glb"),
-        *mesh_dir.glob("*.mtl"),
-    ):
-        try:
-            stale.unlink()
-        except OSError:
-            pass
+    # Stage the run in a sibling temp dir + atomically swap the
+    # canonical scene.obj / scene.glb at the end. Two reasons:
+    #
+    # 1. ns-export poisson has flipped between writing .obj and
+    #    .ply across nerfstudio versions; a post-run glob('*.obj')
+    #    in mesh_dir would happily return a leftover scene.obj
+    #    from a prior run if the new run only wrote .ply, so the
+    #    job would report success while serving stale geometry.
+    #    The earlier b4040a1 fix swept stale artefacts BEFORE the
+    #    run — but that broke the trigger_mesh contract that old
+    #    artefacts stay downloadable while a re-extract is in
+    #    flight. Staging gives us both: nothing in mesh_dir
+    #    moves until the new outputs are ready.
+    # 2. If ns-export crashes mid-write, the staging dir gets
+    #    nuked on failure rather than half-overwriting the prior
+    #    mesh.
+    staging_dir = mesh_dir / ".staging"
+    if staging_dir.exists():
+        # Last run probably crashed; clean it out before we start.
+        shutil.rmtree(staging_dir, ignore_errors=True)
+    staging_dir.mkdir(parents=True)
 
     await progress(0.05, "ns-export poisson")
     log_path = mesh_dir / "mesh.log"
@@ -123,7 +127,7 @@ async def _run_poisson(
     cmd: list[str] = [
         "ns-export", "poisson",
         "--load-config", str(config),
-        "--output-dir", str(mesh_dir),
+        "--output-dir", str(staging_dir),
         "--num-points", str(int(params["num_points"])),
         "--remove-outliers", str(bool(params["remove_outliers"])),
         "--normal-method", str(params["normal_method"]),
@@ -163,31 +167,61 @@ async def _run_poisson(
 
     if rc != 0:
         tail = tail_file(log_path)
+        # Failed run: drop the staging dir so the next attempt
+        # starts clean. Prior mesh in mesh_dir is untouched.
+        shutil.rmtree(staging_dir, ignore_errors=True)
         raise RuntimeError(
             format_subprocess_error("ns-export poisson", rc, log_path, tail)
         )
 
-    obj = next(mesh_dir.glob("*.obj"), None)
-    if obj is None:
-        # ns-export poisson has flipped between writing .ply and .obj
-        # across nerfstudio versions; convert ply → obj via trimesh
-        # so the viewer always gets the canonical .obj artefact.
-        ply_candidates = sorted(mesh_dir.glob("*.ply"))
+    # All output now lives under staging_dir/. Build the .obj first
+    # (converting from .ply if that's what ns-export produced),
+    # then mint the .glb sibling — both inside the staging dir.
+    staged_obj = next(staging_dir.glob("*.obj"), None)
+    if staged_obj is None:
+        ply_candidates = sorted(staging_dir.glob("*.ply"))
         if not ply_candidates:
+            shutil.rmtree(staging_dir, ignore_errors=True)
             raise RuntimeError("ns-export poisson produced no mesh artifact")
         await progress(0.92, "convert ply → obj")
-        obj = mesh_dir / "scene.obj"
-        _ply_to_obj(ply_candidates[-1], obj)
+        staged_obj = staging_dir / "scene.obj"
+        _ply_to_obj(ply_candidates[-1], staged_obj)
 
-    obj_dst = mesh_dir / "scene.obj"
-    if obj.resolve() != obj_dst.resolve():
-        obj.replace(obj_dst)
-
-    result: dict[str, str | int] = {"obj": str(obj_dst)}
+    staged_obj_canon = staging_dir / "scene.obj"
+    if staged_obj.resolve() != staged_obj_canon.resolve():
+        staged_obj.replace(staged_obj_canon)
 
     await progress(0.96, "convert obj → glb")
+    staged_glb = staging_dir / "scene.glb"
+    has_glb = _obj_to_glb(staged_obj_canon, staged_glb)
+
+    # Atomic swap: replace canonical mesh files in mesh_dir from
+    # staging. Path.replace is atomic on POSIX within the same
+    # filesystem; we're staging inside mesh_dir/.staging so we're
+    # always on the same device. Now is when the prior mesh becomes
+    # the new mesh — until this moment, /artifacts/{obj,glb} still
+    # serves the old files.
+    obj_dst = mesh_dir / "scene.obj"
     glb_dst = mesh_dir / "scene.glb"
-    if _obj_to_glb(obj_dst, glb_dst):
+    staged_obj_canon.replace(obj_dst)
+    if has_glb:
+        staged_glb.replace(glb_dst)
+    elif glb_dst.exists():
+        # New run produced no glb (trimesh hiccup) but a prior glb
+        # still sits next to obj_dst. That's stale — drop it so we
+        # don't serve a glb derived from an older obj.
+        try:
+            glb_dst.unlink()
+        except OSError:
+            pass
+
+    # Sweep any leftover ply / mtl / etc that ns-export wrote
+    # alongside the obj — we don't ship them and they'd accumulate
+    # forever in mesh_dir otherwise.
+    shutil.rmtree(staging_dir, ignore_errors=True)
+
+    result: dict[str, str | int] = {"obj": str(obj_dst)}
+    if has_glb:
         result["glb"] = str(glb_dst)
 
     await progress(1.0, "mesh: done")
