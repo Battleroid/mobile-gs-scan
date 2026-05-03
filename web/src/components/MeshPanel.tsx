@@ -72,7 +72,12 @@ export function MeshPanel({ scene, meshProgress }: Props) {
 
   const status: MeshStatus = scene.mesh_status;
   const isRunning = status === "queued" || status === "running";
-  const hasMesh = status === "completed" && !!scene.mesh_obj_url;
+  // Gate the viewer + discard button on artefact URL presence, not
+  // on `status === "completed"`. The server keeps mesh_obj_path /
+  // mesh_glb_path populated through a failed or canceled re-extract
+  // (only DELETE /mesh nulls them), so a strict status check would
+  // hide a still-valid prior mesh from the UI on every retry.
+  const hasMesh = !!scene.mesh_obj_url;
   const progressPct = Math.round((meshProgress?.progress ?? 0) * 100);
 
   const onExtract = async () => {
