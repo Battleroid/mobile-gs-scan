@@ -185,8 +185,12 @@ async def upsert_edit(scene_id: str, body: EditRequest) -> SceneView:
         edit_error=None,
     )
     job = await store.enqueue_job(scene.id, JobKind.filter, payload={})
+    # Just the bare event — the client only uses scene.edit_queued
+    # to flip its local edit_status and re-fetch the snapshot, so
+    # broadcasting the recipe (which can be MB-scale once
+    # keep_indices lands) is pure waste on the WS hot path.
     await events.publish_scene(
-        scene.id, "scene.edit_queued", job_id=job.id, recipe=recipe,
+        scene.id, "scene.edit_queued", job_id=job.id,
     )
 
     refreshed = await store.get_scene(scene.id)
