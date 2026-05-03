@@ -44,6 +44,10 @@ export type EditOp =
   | { type: "opacity_threshold"; min: number }
   | { type: "scale_clamp"; max_scale: number }
   | { type: "bbox_crop"; min: [number, number, number]; max: [number, number, number] }
+  // Sphere ops are siblings: crop keeps everything INSIDE the
+  // sphere (paired with the in-viewer widget), remove drops what's
+  // inside (used by the nuke-origin preset for noise cleanup).
+  | { type: "sphere_crop"; center: [number, number, number]; radius: number }
   | { type: "sphere_remove"; center: [number, number, number]; radius: number }
   | { type: "sor"; k: number; std_multiplier: number }
   | { type: "dbscan_keep_largest"; eps: number; min_samples: number }

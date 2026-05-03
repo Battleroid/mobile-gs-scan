@@ -585,12 +585,20 @@ function SelectionGizmo({
   const color = selection.kind === "bbox" ? "#ffae42" : "#ff5fa2";
 
   return (
+    // size bumped from the original 0.7 → 1.6 so the handles are
+    // actually grabbable with a mouse — the smaller default gizmo
+    // had a hit-area too tight to drag without losing the cursor
+    // every few pixels, which presented as the gizmo "flickering"
+    // the highlight on/off. Keeping space="world" so the axes stay
+    // aligned with the global frame instead of inheriting the
+    // mesh's rotation, which is also more predictable for crops.
     <TransformControls
       ref={(value: unknown) => {
         tcRef.current = value;
       }}
       mode={mode}
-      size={0.7}
+      size={1.6}
+      space="world"
     >
       <mesh ref={meshRef}>
         {selection.kind === "bbox" ? (
@@ -598,13 +606,13 @@ function SelectionGizmo({
         ) : (
           <sphereGeometry args={[0.5, 24, 16]} />
         )}
-        <meshBasicMaterial
-          color={color}
-          wireframe
-          transparent
-          opacity={0.55}
-          depthTest={false}
-        />
+        {/* Wireframe material has to NOT be transparent — the prior
+            `transparent` + `depthTest={false}` combo was the second
+            half of the flicker problem: alpha sorting against the
+            gizmo's own handles thrashed the depth state every
+            frame. Opaque wireframe with depth-test on renders
+            cleanly + plays nicely with the gizmo. */}
+        <meshBasicMaterial color={color} wireframe />
       </mesh>
     </TransformControls>
   );
