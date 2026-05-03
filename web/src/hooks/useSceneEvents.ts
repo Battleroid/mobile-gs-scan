@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { wsUrl } from "@/lib/api";
 import type { EditStatus, Scene, ServerEvent } from "@/lib/types";
 
@@ -32,6 +32,16 @@ export function useSceneEvents(sceneId: string | null): {
     message: string | null;
   } | null>(null);
   const [lastEditResult, setLastEditResult] = useState<EditResult | null>(null);
+
+  // Monotonic counter for refreshScene roundtrips. The hook fires an
+  // out-of-band re-fetch on both scene.edit_queued and scene.edited
+  // so the freshly-enqueued / completed filter job lands in the
+  // snapshot's jobs list. Because both promises race independently
+  // of each other, a slow queued-time response can resolve AFTER a
+  // fast edited-time one and stomp the completed snapshot back to
+  // queued. Each refresh captures gen at fire-time and only commits
+  // its result if no later refresh has fired since.
+  const refreshGen = useRef(0);
 
   useEffect(() => {
     if (!sceneId) return;
@@ -79,8 +89,9 @@ export function useSceneEvents(sceneId: string | null): {
             // progress, but the JobRow + JobLogPanel for the
             // filter need the row to render). Re-fetching the scene
             // pulls the row in so the UI catches up.
+            const gen = ++refreshGen.current;
             void refreshScene(sceneId).then((next) => {
-              if (next) setScene(next);
+              if (next && gen === refreshGen.current) setScene(next);
             });
           } else if (evt.kind === "scene.edit_running") {
             setScene((s) => (s ? { ...s, edit_status: "running" } : s));
@@ -112,8 +123,9 @@ export function useSceneEvents(sceneId: string | null): {
             if (typeof kept === "number" && typeof total === "number") {
               setLastEditResult({ kept, total, at: Date.now() });
             }
+            const gen = ++refreshGen.current;
             void refreshScene(sceneId).then((next) => {
-              if (next) setScene(next);
+              if (next && gen === refreshGen.current) setScene(next);
             });
           } else if (evt.kind === "scene.edit_cleared") {
             setScene((s) =>
