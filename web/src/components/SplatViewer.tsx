@@ -57,6 +57,32 @@ export type SelectionWidget =
 
 export type WidgetMode = "translate" | "scale";
 
+/**
+ * Mutable handle the points geometry exposes to the SelectionGizmo
+ * so the gizmo can paint points inside the bbox / sphere yellow on
+ * every drag tick. Stored as a ref so writes don't trigger React
+ * renders. SplatScene writes; SelectionGizmo reads.
+ */
+export interface PointsHighlightApi {
+  /** xyz triples — read-only. */
+  positions: Float32Array;
+  /** rgb triples used as the base palette (cyan in mono mode,
+   *  SH-derived RGB in colored mode). The gizmo writes selectively
+   *  into ``liveColors`` and falls back to this for outside points. */
+  baseColors: Float32Array;
+  /** rgb triples actually rendered — gizmo overwrites then sets
+   *  attribute.needsUpdate. */
+  liveColors: Float32Array;
+  /** the BufferAttribute backing liveColors. */
+  attribute: THREE.BufferAttribute;
+}
+
+// Yellow used to paint points inside the active bbox / sphere
+// widget. Matches the bbox widget's orange family without being
+// too close to it; the magenta sphere widget's color contrasts
+// fine against it too.
+const HIGHLIGHT_RGB = [1.0, 0.85, 0.0] as const;
+
 const VIEW_MODE_LABELS: Record<ViewMode, string> = {
   splats: "splats",
   points: "points",
@@ -109,6 +135,11 @@ export function SplatViewer({
   const [maxStdDev, setMaxStdDev] = useState(3.0);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [widgetMode, setWidgetMode] = useState<WidgetMode>("translate");
+  // Shared by SplatScene (writes the points geometry handle) and
+  // SelectionGizmo (reads positions + writes highlight colors). Ref
+  // rather than state so the per-tick highlight redraws don't
+  // re-render React.
+  const highlightApiRef = useRef<PointsHighlightApi | null>(null);
 
   const onFullscreen = useCallback(() => {
     const el = containerRef.current;
@@ -176,12 +207,14 @@ export function SplatViewer({
             pointsUrl={pointsUrl}
             viewMode={viewMode}
             maxStdDev={maxStdDev}
+            highlightApiRef={highlightApiRef}
           />
           {selection && onSelectionCommit && (
             <SelectionGizmo
               selection={selection}
               mode={widgetMode}
               onCommit={onSelectionCommit}
+              highlightApiRef={highlightApiRef}
             />
           )}
         </Suspense>
@@ -264,11 +297,13 @@ function SplatScene({
   pointsUrl,
   viewMode,
   maxStdDev,
+  highlightApiRef,
 }: {
   url: string;
   pointsUrl?: string;
   viewMode: ViewMode;
   maxStdDev: number;
+  highlightApiRef: React.MutableRefObject<PointsHighlightApi | null>;
 }) {
   const { gl, scene } = useThree();
   const groupRef = useRef<THREE.Group>(null);
@@ -279,6 +314,12 @@ function SplatScene({
   const monoMaterialRef = useRef<THREE.PointsMaterial | null>(null);
   const coloredMaterialRef = useRef<THREE.PointsMaterial | null>(null);
   const hasVertexColorsRef = useRef(false);
+  // Base color palettes per view mode. The active geometry color
+  // attribute is the "live" buffer; viewMode switches and gizmo
+  // highlights both write into it. Restored to monoBase /
+  // coloredBase on view-mode change.
+  const monoBaseRef = useRef<Float32Array | null>(null);
+  const coloredBaseRef = useRef<Float32Array | null>(null);
   // The setup effect captures maxStdDev once at mount to seed the
   // SparkRenderer constructor. Subsequent slider drags shouldn't
   // tear the renderer down (would re-fetch + rebuild the splat on
@@ -332,7 +373,17 @@ function SplatScene({
           // clamp before assigning since PointsMaterial expects
           // normalized RGB.
           let hasColor = geom.hasAttribute("color");
-          if (!hasColor && geom.hasAttribute("shDc")) {
+          // Capture the SH-derived RGB into a separate Float32Array
+          // we can use as the "colored mode" base palette; the
+          // active color attribute on the geometry becomes a
+          // mutable live buffer that the SelectionGizmo overwrites
+          // when highlighting points inside the active bbox / sphere.
+          let coloredBase: Float32Array | null = null;
+          if (geom.hasAttribute("color")) {
+            // Real RGB attribute (e.g. points3D.ply seed file).
+            const c = geom.getAttribute("color") as THREE.BufferAttribute;
+            coloredBase = new Float32Array(c.array as Float32Array);
+          } else if (geom.hasAttribute("shDc")) {
             const sh = geom.getAttribute("shDc") as THREE.BufferAttribute;
             const colors = new Float32Array(sh.count * 3);
             for (let i = 0; i < sh.count; i++) {
@@ -352,24 +403,45 @@ function SplatScene({
             // the per-vertex memory cost.
             geom.deleteAttribute("shDc");
             hasColor = true;
+            coloredBase = new Float32Array(colors);
           }
           hasVertexColorsRef.current = hasColor;
 
-          // Mono material: always available, used for "points" mode
-          // and as the fallback for "colored" when the geometry has
-          // no color attribute.
+          // Build a mono base palette (uniform cyan per-vertex). We
+          // use a per-vertex color attribute even in mono mode so
+          // the SelectionGizmo can paint individual points yellow
+          // without having to thrash material types.
+          const positionAttr = geom.getAttribute("position") as THREE.BufferAttribute;
+          const monoBase = new Float32Array(positionAttr.count * 3);
+          // 0x66ccff → r=0.4, g=0.8, b=1.0
+          for (let i = 0; i < positionAttr.count; i++) {
+            monoBase[i * 3 + 0] = 0.4;
+            monoBase[i * 3 + 1] = 0.8;
+            monoBase[i * 3 + 2] = 1.0;
+          }
+          // If we don't already have a color attribute (no SH, no
+          // RGB), seed the live one with the mono palette.
+          if (!geom.hasAttribute("color")) {
+            geom.setAttribute(
+              "color",
+              new THREE.BufferAttribute(new Float32Array(monoBase), 3),
+            );
+          }
+          monoBaseRef.current = monoBase;
+          coloredBaseRef.current = coloredBase;
+
+          // Both materials now use vertexColors=true; the difference
+          // between mono / colored modes is which base palette gets
+          // copied into the geometry's color attribute on view-mode
+          // change. A separate "live" material per mode would make
+          // the highlight gizmo's life harder.
           const mono = new THREE.PointsMaterial({
             size: 0.01,
-            vertexColors: false,
-            color: 0x66ccff,
+            vertexColors: true,
+            color: 0xffffff,
           });
           monoMaterialRef.current = mono;
 
-          // Colored material: only meaningful when the PLY has a
-          // color attribute (real RGB or synthesized from SH DC).
-          // Allocate it anyway so the swap path is unconditional;
-          // the "colored" view falls back to mono below when
-          // hasColor is false.
           const colored = new THREE.PointsMaterial({
             size: 0.01,
             vertexColors: hasColor,
@@ -381,6 +453,16 @@ function SplatScene({
           points.visible = false;
           groupAtMount?.add(points);
           pointsRef.current = points;
+          // Publish the highlight handle for SelectionGizmo. Default
+          // base = mono palette since the initial view is splats /
+          // points (mono). Updated on every viewMode swap below.
+          const colorAttr = geom.getAttribute("color") as THREE.BufferAttribute;
+          highlightApiRef.current = {
+            positions: positionAttr.array as Float32Array,
+            baseColors: monoBase,
+            liveColors: colorAttr.array as Float32Array,
+            attribute: colorAttr,
+          };
         } catch {
           // Points-mode unavailable. Toggle still flips state but
           // there's nothing to show; splat path keeps working.
@@ -438,27 +520,46 @@ function SplatScene({
       pointsRef.current = null;
       monoMaterialRef.current = null;
       coloredMaterialRef.current = null;
+      monoBaseRef.current = null;
+      coloredBaseRef.current = null;
+      highlightApiRef.current = null;
     };
   }, [url, pointsUrl, gl, scene]);
 
   // Apply view-mode change without re-creating either object.
-  // Swaps the points material reference for the colored variant so
-  // we don't allocate per click.
+  // Swaps the points material AND the live color buffer's contents
+  // so the gizmo highlight + the new base palette agree.
   useEffect(() => {
     const splat = splatRef.current;
     const points = pointsRef.current;
     if (splat) splat.visible = viewMode === "splats";
-    if (points) {
-      points.visible = viewMode !== "splats";
-      if (viewMode === "colored" && hasVertexColorsRef.current && coloredMaterialRef.current) {
-        points.material = coloredMaterialRef.current;
-      } else if (monoMaterialRef.current) {
-        // "points" mode, or "colored" fallback when the PLY lacks
-        // vertex colors.
-        points.material = monoMaterialRef.current;
-      }
+    if (!points) return;
+    points.visible = viewMode !== "splats";
+
+    const useColored =
+      viewMode === "colored" &&
+      hasVertexColorsRef.current &&
+      coloredMaterialRef.current !== null;
+    const material = useColored
+      ? coloredMaterialRef.current
+      : monoMaterialRef.current;
+    if (material) points.material = material;
+
+    // Decide the active base palette and copy it into the live
+    // color buffer so the new view starts un-highlighted. Update
+    // the SelectionGizmo's handle so a subsequent highlight pass
+    // writes against the correct base.
+    const base =
+      useColored && coloredBaseRef.current !== null
+        ? coloredBaseRef.current
+        : monoBaseRef.current;
+    const api = highlightApiRef.current;
+    if (api && base) {
+      api.liveColors.set(base);
+      api.baseColors = base;
+      api.attribute.needsUpdate = true;
     }
-  }, [viewMode]);
+  }, [viewMode, highlightApiRef]);
 
   // Apply maxStdDev change. SparkRenderer exposes maxStdDev as a
   // settable property; if a future Spark version drops it the
@@ -502,10 +603,12 @@ function SelectionGizmo({
   selection,
   mode,
   onCommit,
+  highlightApiRef,
 }: {
   selection: SelectionWidget;
   mode: WidgetMode;
   onCommit: (next: SelectionWidget) => void;
+  highlightApiRef: React.MutableRefObject<PointsHighlightApi | null>;
 }) {
   // Use a state-tracked target rather than nesting <mesh> inside
   // <TransformControls>. drei v10's TransformControls binds via the
@@ -550,11 +653,25 @@ function SelectionGizmo({
   const commit = useCallback(() => {
     const m = targetMesh;
     if (!m) return;
+    // Normalize the mesh to abs scale BEFORE building the recipe.
+    // three.js TransformControls in scale mode lets the user drag
+    // a handle past origin, which leaves mesh.scale negative; the
+    // gizmo then renders its arrows mirror-flipped because the
+    // group is mirrored along that axis. The recipe was already
+    // pulling Math.abs() so the saved bounds were correct, but the
+    // mesh kept the negative scale, so the next drag started with
+    // an inverted arrow. Pin the live mesh transform to positive
+    // here so the very next render shows the gizmo right way round.
+    m.scale.set(
+      Math.abs(m.scale.x) || 0.001,
+      Math.abs(m.scale.y) || 0.001,
+      Math.abs(m.scale.z) || 0.001,
+    );
     if (selection.kind === "bbox") {
       const cx = m.position.x, cy = m.position.y, cz = m.position.z;
-      const sx = Math.abs(m.scale.x) / 2;
-      const sy = Math.abs(m.scale.y) / 2;
-      const sz = Math.abs(m.scale.z) / 2;
+      const sx = m.scale.x / 2;
+      const sy = m.scale.y / 2;
+      const sz = m.scale.z / 2;
       onCommit({
         kind: "bbox",
         min: [cx - sx, cy - sy, cz - sz],
@@ -564,8 +681,7 @@ function SelectionGizmo({
       // Sphere is uniformly scaled even if the user wrangled a
       // non-uniform scale: collapse to the average so the recipe
       // stays a true sphere.
-      const avg =
-        (Math.abs(m.scale.x) + Math.abs(m.scale.y) + Math.abs(m.scale.z)) / 3;
+      const avg = (m.scale.x + m.scale.y + m.scale.z) / 3;
       onCommit({
         kind: "sphere",
         center: [m.position.x, m.position.y, m.position.z],
@@ -681,6 +797,88 @@ function SelectionGizmo({
       setOcEnabled(true);
     };
   }, [commit, invalidate, targetMesh, setOcEnabled]);
+
+  // Highlight points inside the active widget yellow on every TC
+  // change (hover, drag, axis swap). Reads positions + base palette
+  // from the highlightApiRef populated by SplatScene; writes the
+  // result back into the same color attribute SplatScene allocated.
+  // Restores the base palette on unmount so deactivating the widget
+  // un-paints the yellow.
+  useEffect(() => {
+    const tc = tcRef.current;
+    if (!tc) return;
+    const m = targetMesh;
+    if (!m) return;
+
+    const repaint = () => {
+      const api = highlightApiRef.current;
+      if (!api) return;
+      const { positions, baseColors, liveColors, attribute } = api;
+      const cx = m.position.x, cy = m.position.y, cz = m.position.z;
+      // mesh.scale is the unit cube's full extent / sphere's
+      // diameter; halve to compare against |p - center|. Math.abs
+      // guards against an in-progress negative scale (commit
+      // pins to abs on drag-end but the live mesh can be negative
+      // mid-drag in scale mode).
+      const sx = Math.abs(m.scale.x) / 2;
+      const sy = Math.abs(m.scale.y) / 2;
+      const sz = Math.abs(m.scale.z) / 2;
+      const r = (Math.abs(m.scale.x) + Math.abs(m.scale.y) + Math.abs(m.scale.z)) / 6;
+      const r2 = r * r;
+      const isBbox = selection.kind === "bbox";
+      const n = positions.length / 3;
+      const [hr, hg, hb] = HIGHLIGHT_RGB;
+      for (let i = 0; i < n; i++) {
+        const px = positions[i * 3];
+        const py = positions[i * 3 + 1];
+        const pz = positions[i * 3 + 2];
+        let inside: boolean;
+        if (isBbox) {
+          inside =
+            Math.abs(px - cx) <= sx &&
+            Math.abs(py - cy) <= sy &&
+            Math.abs(pz - cz) <= sz;
+        } else {
+          const dx = px - cx, dy = py - cy, dz = pz - cz;
+          inside = dx * dx + dy * dy + dz * dz <= r2;
+        }
+        if (inside) {
+          liveColors[i * 3] = hr;
+          liveColors[i * 3 + 1] = hg;
+          liveColors[i * 3 + 2] = hb;
+        } else {
+          liveColors[i * 3] = baseColors[i * 3];
+          liveColors[i * 3 + 1] = baseColors[i * 3 + 1];
+          liveColors[i * 3 + 2] = baseColors[i * 3 + 2];
+        }
+      }
+      attribute.needsUpdate = true;
+      invalidate();
+    };
+
+    // First pass on mount + every TC change (hover, drag, axis
+    // swap). 'change' fires often during a drag — that's what we
+    // want for live tracking, and at ~1M points a single pass is
+    // ~10 ms on a modern machine.
+    repaint();
+    tc.addEventListener("change", repaint);
+    return () => {
+      tc.removeEventListener("change", repaint);
+      // Restore base palette so deactivating the widget removes
+      // the yellow highlight.
+      const api = highlightApiRef.current;
+      if (api) {
+        api.liveColors.set(api.baseColors);
+        api.attribute.needsUpdate = true;
+        invalidate();
+      }
+    };
+  }, [
+    selection.kind,
+    targetMesh,
+    invalidate,
+    highlightApiRef,
+  ]);
 
   const color = selection.kind === "bbox" ? "#ffae42" : "#ff5fa2";
 
