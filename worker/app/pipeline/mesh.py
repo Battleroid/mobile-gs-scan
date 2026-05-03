@@ -99,8 +99,8 @@ async def _run_poisson(
         raise RuntimeError("no nerfstudio config.yml under train/")
     config = candidates[-1]
 
-    # Stage the run in a sibling temp dir + atomically swap the
-    # canonical scene.obj / scene.glb at the end. Two reasons:
+    # Stage the run in a per-job sibling temp dir + atomically swap
+    # the canonical scene.obj / scene.glb at the end. Three reasons:
     #
     # 1. ns-export poisson has flipped between writing .obj and
     #    .ply across nerfstudio versions; a post-run glob('*.obj')
@@ -115,9 +115,16 @@ async def _run_poisson(
     # 2. If ns-export crashes mid-write, the staging dir gets
     #    nuked on failure rather than half-overwriting the prior
     #    mesh.
-    staging_dir = mesh_dir / ".staging"
+    # 3. Per-JOB staging prevents the cancel-and-replace overlap
+    #    case from clobbering an older run that's still active. A
+    #    shared mesh/.staging would have a newer run rmtree the
+    #    older run's output mid-write; suffixing with job_id
+    #    isolates them. Job ids fall back to "anon" only when the
+    #    runner isn't passing one (stub paths in tests etc).
+    staging_dir = mesh_dir / f".staging-{job_id or 'anon'}"
     if staging_dir.exists():
-        # Last run probably crashed; clean it out before we start.
+        # Same job_id ran before and crashed; clear its scratch
+        # before we start. Other jobs' staging dirs are untouched.
         shutil.rmtree(staging_dir, ignore_errors=True)
     staging_dir.mkdir(parents=True)
 
