@@ -574,46 +574,95 @@ function SelectionGizmo({
     }
   }, [selection.kind, onCommit, targetMesh]);
 
-  // dragging-changed → commit on mouse-up + manually pause/resume
-  // OrbitControls. The auto-pause that drei is supposed to wire up
-  // when both controls have makeDefault doesn't fire reliably here
-  // (presumably because TC and OC fight over which is the "default"
-  // when both ask for it), so OrbitControls was happily eating the
-  // drag — handles highlighted on click but the camera rotated
-  // instead of the gizmo moving. Reach into useThree's controls
-  // slot and flip enabled directly.
-  const tcRef = useRef<{
-    addEventListener: (k: string, fn: (e: { value: boolean }) => void) => void;
-    removeEventListener: (k: string, fn: (e: { value: boolean }) => void) => void;
-  } | null>(null);
+  // OrbitControls coordination is gated on whether the pointerdown
+  // landed on a TC handle, NOT on hover. Earlier attempts:
+  //
+  // - Listening to `dragging-changed`: OC's pointerdown handler
+  //   runs before TC's (both listen on the same canvas; OC was
+  //   registered first because TC mounts after the targetMesh
+  //   state pattern), so OC starts orbiting before we can flip
+  //   its enabled flag.
+  // - Listening to TC's `change` event (axis or dragging flip):
+  //   solves the pointerdown timing because hover sets axis well
+  //   before click, but then breaks an in-progress orbit when
+  //   the user's cursor passes over a handle mid-drag. OC's
+  //   pointermove bails as soon as enabled flips false.
+  //
+  // Capture-phase listener on the canvas runs BEFORE any bubble-
+  // phase same-element listeners (including OC's pointerdown).
+  // At that moment, TC's hover state has already populated
+  // `tc.axis` from prior pointermove events, so we can tell
+  // whether the click is on a handle and only disable OC then.
+  // A mid-orbit cursor pass over a handle never triggers a
+  // pointerdown, so OC keeps running.
+  type TcInstance = {
+    addEventListener: (k: string, fn: (e: { value?: boolean }) => void) => void;
+    removeEventListener: (k: string, fn: (e: { value?: boolean }) => void) => void;
+    axis: string | null;
+    dragging: boolean;
+  };
+  const tcRef = useRef<TcInstance | null>(null);
   const setTcRef = useCallback((v: unknown) => {
-    tcRef.current = v as typeof tcRef.current;
+    tcRef.current = v as TcInstance | null;
   }, []);
-  const { invalidate, controls } = useThree();
+  const { invalidate, controls, gl } = useThree();
+  // Read the default controls (OrbitControls, the only one with
+  // makeDefault) through a ref so the helper below doesn't capture
+  // `controls` as a dep — that rerouting keeps the
+  // react-hooks/immutability lint happy with the imperative mutation
+  // of `controls.enabled` we have to do here. There's no reactive
+  // setter on three.js OrbitControls; toggling .enabled directly is
+  // the documented API. Sync via effect to dodge the
+  // "Cannot update refs during render" rule.
+  const controlsRef = useRef<unknown>(null);
+  useEffect(() => {
+    controlsRef.current = controls;
+  }, [controls]);
+  const setOcEnabled = useCallback((enabled: boolean) => {
+    const oc = controlsRef.current as { enabled?: boolean } | null;
+    if (oc && "enabled" in oc) {
+      oc.enabled = enabled;
+    }
+  }, []);
+  useEffect(() => {
+    const canvas = gl.domElement;
+    const onPointerDown = () => {
+      const tc = tcRef.current;
+      // tc.axis is non-null when the cursor is over a handle; TC
+      // has already set it from earlier pointermove processing.
+      if (tc && tc.axis !== null) {
+        setOcEnabled(false);
+      }
+    };
+    canvas.addEventListener("pointerdown", onPointerDown, { capture: true });
+    return () => {
+      canvas.removeEventListener("pointerdown", onPointerDown, {
+        capture: true,
+      });
+    };
+  }, [gl, setOcEnabled]);
+
   useEffect(() => {
     const tc = tcRef.current;
     if (!tc) return;
-    const onDrag = (e: { value: boolean }) => {
-      // Toggle the OrbitControls (or whatever is registered as the
-      // default Drei controls) on/off based on whether we're
-      // mid-drag. Doing it manually because drei's auto-pause was
-      // unreliable in this combo of versions.
-      const oc = controls as { enabled?: boolean } | null;
-      if (oc && "enabled" in oc) {
-        oc.enabled = !e.value;
+    const onDrag = (e: { value?: boolean }) => {
+      if (e.value === false) {
+        // Drag ended — commit the recipe and restore OC. (If the
+        // drag never started because the click missed all handles,
+        // this branch doesn't fire and OC stays enabled.)
+        commit();
+        setOcEnabled(true);
+        invalidate();
       }
-      if (!e.value) commit();
-      invalidate();
     };
     tc.addEventListener("dragging-changed", onDrag);
     return () => {
       tc.removeEventListener("dragging-changed", onDrag);
-      // If the gizmo unmounts mid-drag we'd otherwise leave
-      // OrbitControls disabled forever.
-      const oc = controls as { enabled?: boolean } | null;
-      if (oc && "enabled" in oc) oc.enabled = true;
+      // Belt-and-braces: an unmount mid-drag without a final
+      // drag-end event would otherwise leave OC stranded.
+      setOcEnabled(true);
     };
-  }, [commit, invalidate, targetMesh, controls]);
+  }, [commit, invalidate, targetMesh, setOcEnabled]);
 
   const color = selection.kind === "bbox" ? "#ffae42" : "#ff5fa2";
 
