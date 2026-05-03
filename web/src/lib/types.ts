@@ -31,7 +31,27 @@ export interface Capture {
   updated_at: string;
 }
 
-export type JobKind = "sfm" | "train" | "export" | "mesh";
+export type JobKind = "sfm" | "train" | "export" | "mesh" | "filter";
+
+export type EditStatus =
+  | "none"
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed";
+
+export type EditOp =
+  | { type: "opacity_threshold"; min: number }
+  | { type: "scale_clamp"; max_scale: number }
+  | { type: "bbox_crop"; min: [number, number, number]; max: [number, number, number] }
+  | { type: "sphere_remove"; center: [number, number, number]; radius: number }
+  | { type: "sor"; k: number; std_multiplier: number }
+  | { type: "dbscan_keep_largest"; eps: number; min_samples: number };
+
+export interface EditRecipe {
+  ops: EditOp[];
+}
+
 export type JobStatus =
   | "queued"
   | "claimed"
@@ -56,6 +76,11 @@ export interface Scene {
   error: string | null;
   ply_url: string | null;
   spz_url: string | null;
+  edited_ply_url: string | null;
+  edited_spz_url: string | null;
+  edit_status: EditStatus;
+  edit_error: string | null;
+  edit_recipe: EditRecipe | null;
   jobs: Job[];
   created_at: string;
   completed_at: string | null;

@@ -118,4 +118,9 @@ def _log_path_for_kind(kind: JobKind, scene_dir: Path) -> Path | None:
         return scene_dir / "train" / "train.log"
     if kind == JobKind.export:
         return scene_dir / "export" / "export.log"
+    if kind == JobKind.filter:
+        # Filter is in-process, not a subprocess — but spz_pack writes
+        # its own log so the panel still has something useful when
+        # something goes wrong on the pack.
+        return scene_dir / "edit" / "spz_pack.log"
     return None

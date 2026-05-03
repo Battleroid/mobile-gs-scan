@@ -9,6 +9,7 @@ import { useCaptureEvents } from "@/hooks/useCaptureEvents";
 import { useSceneEvents } from "@/hooks/useSceneEvents";
 import { CapturePairing } from "@/components/CapturePairing";
 import { JobLogPanel } from "@/components/JobLogPanel";
+import { SplatEditor } from "@/components/SplatEditor";
 import type { Capture, Job } from "@/lib/types";
 
 // Heavy three.js viewer — keep it out of the SSR bundle.
@@ -33,9 +34,31 @@ export default function CaptureDetailPage({ params }: PageProps) {
   const capture = live ?? initial ?? null;
 
   const sceneId = capture?.scene_id ?? null;
-  const { scene } = useSceneEvents(sceneId);
+  const { scene, editProgress } = useSceneEvents(sceneId);
 
   const [deleting, setDeleting] = useState(false);
+  // Which artifact the SplatViewer is showing. Auto-promotes to
+  // "edited" when an edit lands and the user hasn't explicitly
+  // overridden the choice; reverts to "original" on discard.
+  const [viewing, setViewing] = useState<"original" | "edited">("original");
+  const hasEdit =
+    !!scene && scene.edit_status === "completed" && !!scene.edited_ply_url;
+  // Promote-to-edited when the very first edit lands. We track the
+  // previous edit_status and only flip the view on the rising edge,
+  // not on every render — otherwise toggling back to "original"
+  // would be fought by this effect on the next snapshot.
+  const [prevEditStatus, setPrevEditStatus] = useState(
+    scene?.edit_status ?? null,
+  );
+  if (scene && prevEditStatus !== scene.edit_status) {
+    setPrevEditStatus(scene.edit_status);
+    if (scene.edit_status === "completed" && viewing === "original") {
+      setViewing("edited");
+    }
+    if (scene.edit_status === "none") {
+      setViewing("original");
+    }
+  }
 
   const onDelete = async () => {
     if (!capture) return;
@@ -111,20 +134,40 @@ export default function CaptureDetailPage({ params }: PageProps) {
           {scene.status === "completed" && (scene.ply_url || scene.spz_url) && (
             <div className="space-y-3">
               <h2 className="text-sm text-muted mt-6">scene</h2>
-              <SplatViewer
-                url={api.base() + (scene.spz_url ?? scene.ply_url!)}
-                pointsUrl={
-                  scene.ply_url ? api.base() + scene.ply_url : undefined
-                }
+              {(() => {
+                const useEdited = viewing === "edited" && hasEdit;
+                const splatUrl = useEdited
+                  ? scene.edited_spz_url ?? scene.edited_ply_url!
+                  : scene.spz_url ?? scene.ply_url!;
+                const pointsRel = useEdited
+                  ? scene.edited_ply_url ?? scene.ply_url
+                  : scene.ply_url;
+                return (
+                  <SplatViewer
+                    // Force a remount when switching source so Spark
+                    // tears down the prior splat + reloads against
+                    // the new url, instead of silently keeping the
+                    // old buffer in place.
+                    key={splatUrl}
+                    url={api.base() + splatUrl}
+                    pointsUrl={pointsRel ? api.base() + pointsRel : undefined}
+                  />
+                );
+              })()}
+              <SplatEditor
+                scene={scene}
+                editProgress={editProgress}
+                viewing={viewing}
+                onChangeView={setViewing}
               />
-              <div className="flex gap-3 text-xs">
+              <div className="flex flex-wrap gap-3 text-xs">
                 {scene.ply_url && (
                   <a
                     href={api.base() + scene.ply_url}
                     download
                     className="underline hover:text-fg"
                   >
-                    download .ply
+                    download original .ply
                   </a>
                 )}
                 {scene.spz_url && (
@@ -133,7 +176,25 @@ export default function CaptureDetailPage({ params }: PageProps) {
                     download
                     className="underline hover:text-fg"
                   >
-                    download .spz
+                    download original .spz
+                  </a>
+                )}
+                {scene.edited_ply_url && (
+                  <a
+                    href={api.base() + scene.edited_ply_url}
+                    download
+                    className="underline hover:text-fg"
+                  >
+                    download edited .ply
+                  </a>
+                )}
+                {scene.edited_spz_url && (
+                  <a
+                    href={api.base() + scene.edited_spz_url}
+                    download
+                    className="underline hover:text-fg"
+                  >
+                    download edited .spz
                   </a>
                 )}
               </div>

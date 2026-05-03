@@ -1,14 +1,27 @@
 "use client";
 import { useEffect, useState } from "react";
 import { wsUrl } from "@/lib/api";
-import type { Scene, ServerEvent } from "@/lib/types";
+import type { EditStatus, Scene, ServerEvent } from "@/lib/types";
 
 export function useSceneEvents(sceneId: string | null): {
   scene: Scene | null;
   lastEvent: ServerEvent | null;
+  /**
+   * Latest filter-job progress snapshot (if any). Mirrored on the
+   * scene WS via `scene.edit_progress` events from the worker —
+   * the per-job WS topic for the filter job exists too, but the
+   * scene WS doesn't subscribe to jobs that arrived AFTER the WS
+   * connected (the filter job is enqueued mid-session). Mirroring
+   * on the scene topic keeps a single subscription sufficient.
+   */
+  editProgress: { progress: number; message: string | null } | null;
 } {
   const [scene, setScene] = useState<Scene | null>(null);
   const [lastEvent, setLastEvent] = useState<ServerEvent | null>(null);
+  const [editProgress, setEditProgress] = useState<{
+    progress: number;
+    message: string | null;
+  } | null>(null);
 
   useEffect(() => {
     if (!sceneId) return;
@@ -46,6 +59,51 @@ export function useSceneEvents(sceneId: string | null): {
             setScene((s) => (s ? { ...s, status: "completed" } : s));
           } else if (evt.kind === "scene.failed") {
             setScene((s) => (s ? { ...s, status: "failed" } : s));
+          } else if (evt.kind === "scene.edit_queued") {
+            setScene((s) => (s ? { ...s, edit_status: "queued" } : s));
+            setEditProgress({ progress: 0, message: "queued" });
+          } else if (evt.kind === "scene.edit_running") {
+            setScene((s) => (s ? { ...s, edit_status: "running" } : s));
+          } else if (evt.kind === "scene.edit_progress") {
+            setEditProgress({
+              progress: (evt.data.progress as number) ?? 0,
+              message: (evt.data.message as string | null) ?? null,
+            });
+          } else if (evt.kind === "scene.edit_failed") {
+            setScene((s) =>
+              s
+                ? {
+                    ...s,
+                    edit_status: "failed",
+                    edit_error: (evt.data.error as string | null) ?? null,
+                  }
+                : s,
+            );
+            setEditProgress(null);
+          } else if (evt.kind === "scene.edited") {
+            // Rather than splicing in just the new urls here, re-fetch
+            // the full Scene so the edited_ply_url / edited_spz_url
+            // fields land authoritatively. Use a lightweight one-shot
+            // import to avoid a circular module dep with api.ts.
+            setEditProgress({ progress: 1, message: "done" });
+            setScene((s) => (s ? { ...s, edit_status: "completed" } : s));
+            void refreshScene(sceneId).then((next) => {
+              if (next) setScene(next);
+            });
+          } else if (evt.kind === "scene.edit_cleared") {
+            setScene((s) =>
+              s
+                ? {
+                    ...s,
+                    edit_status: "none" as EditStatus,
+                    edit_recipe: null,
+                    edit_error: null,
+                    edited_ply_url: null,
+                    edited_spz_url: null,
+                  }
+                : s,
+            );
+            setEditProgress(null);
           }
         }
       } catch {
@@ -55,7 +113,7 @@ export function useSceneEvents(sceneId: string | null): {
     return () => ws.close();
   }, [sceneId]);
 
-  return { scene, lastEvent };
+  return { scene, lastEvent, editProgress };
 }
 
 function kindToStatus(kind: string, fallback: Scene["jobs"][number]["status"]) {
@@ -64,4 +122,16 @@ function kindToStatus(kind: string, fallback: Scene["jobs"][number]["status"]) {
   if (kind === "job.failed") return "failed" as const;
   if (kind === "job.progress") return "running" as const;
   return fallback;
+}
+
+async function refreshScene(sceneId: string): Promise<Scene | null> {
+  // Inline fetch instead of importing the api object to dodge a
+  // circular hook → api → hook chain in some tooling configs. The
+  // request shape is intentionally identical to api.getScene().
+  const { api } = await import("@/lib/api");
+  try {
+    return await api.getScene(sceneId);
+  } catch {
+    return null;
+  }
 }

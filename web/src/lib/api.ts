@@ -13,7 +13,7 @@
 //      https/Caddy where /api/* is reverse-proxied same-origin.
 //   4. Server-side rendering: localhost:8000 fallback so the build
 //      doesn't crash.
-import type { Capture, CaptureSource, Scene } from "./types";
+import type { Capture, CaptureSource, EditRecipe, Scene } from "./types";
 
 function apiBase(): string {
   const baked = process.env.NEXT_PUBLIC_API_BASE;
@@ -110,6 +110,16 @@ export const api = {
       `/api/jobs/${id}/cancel`,
       { method: "POST" },
     ),
+  // Replace this scene's edit recipe and (re)enqueue the filter job.
+  // Idempotent — calling again with a different recipe cancels any
+  // in-flight filter job and starts fresh.
+  upsertSceneEdit: (sceneId: string, recipe: EditRecipe) =>
+    jsonReq<Scene>(`/api/scenes/${sceneId}/edit`, {
+      method: "PUT",
+      body: JSON.stringify({ recipe }),
+    }),
+  clearSceneEdit: (sceneId: string) =>
+    jsonReq<Scene>(`/api/scenes/${sceneId}/edit`, { method: "DELETE" }),
 };
 
 export function wsUrl(path: string): string {

@@ -1,0 +1,546 @@
+"use client";
+// Filter / cleanup editor for an exported splat.
+//
+// Renders below the SplatViewer once a scene has produced a .ply.
+// User toggles ops on/off, tweaks parameters, and clicks Apply &
+// save to PUT the recipe to /api/scenes/{id}/edit. The worker runs
+// the filter pipeline; progress streams back via the scene
+// websocket (mirrored on `scene.edit_progress`). On completion the
+// page swaps the viewer source over to the edited artifact.
+//
+// Live in-browser preview (per-gaussian opacity toggle via Spark's
+// SplatMesh.setSplat) is a Phase-1.5 follow-up; the recipe DSL +
+// apply/download flow is the load-bearing piece and works without
+// it.
+import { useState } from "react";
+import { api } from "@/lib/api";
+import type { EditOp, EditRecipe, Scene } from "@/lib/types";
+
+interface OpsState {
+  opacity: { enabled: boolean; min: number };
+  scale: { enabled: boolean; max_scale: number };
+  bbox: {
+    enabled: boolean;
+    min: [number, number, number];
+    max: [number, number, number];
+  };
+  sphere: {
+    enabled: boolean;
+    center: [number, number, number];
+    radius: number;
+  };
+  sor: { enabled: boolean; k: number; std_multiplier: number };
+  dbscan: { enabled: boolean; eps: number; min_samples: number };
+}
+
+const DEFAULT_OPS: OpsState = {
+  opacity: { enabled: false, min: 0.05 },
+  scale: { enabled: false, max_scale: 0.5 },
+  bbox: { enabled: false, min: [-2, -1, -2], max: [2, 2, 2] },
+  sphere: { enabled: false, center: [0, 0, 0], radius: 0.3 },
+  sor: { enabled: false, k: 24, std_multiplier: 2.0 },
+  dbscan: { enabled: false, eps: 0.05, min_samples: 30 },
+};
+
+interface Props {
+  scene: Scene;
+  /** Live-streamed progress while the filter job is running. */
+  editProgress: { progress: number; message: string | null } | null;
+  /** Which artifact the parent viewer is currently showing. */
+  viewing: "original" | "edited";
+  onChangeView: (next: "original" | "edited") => void;
+}
+
+export function SplatEditor({
+  scene,
+  editProgress,
+  viewing,
+  onChangeView,
+}: Props) {
+  const [ops, setOps] = useState<OpsState>(() => recipeToOps(scene.edit_recipe));
+  const [submitting, setSubmitting] = useState(false);
+  const [discarding, setDiscarding] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Re-seed the local form when the server-side recipe changes
+  // (apply round-trip succeeded, or someone DELETEd the edit). Use
+  // the "adjust state on prop change during render" pattern so we
+  // don't trip react-hooks/set-state-in-effect — same approach
+  // JobLogPanel uses for its follow-mode flag.
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  const recipeKey = JSON.stringify(scene.edit_recipe ?? null);
+  const [prevRecipeKey, setPrevRecipeKey] = useState(recipeKey);
+  if (prevRecipeKey !== recipeKey) {
+    setPrevRecipeKey(recipeKey);
+    setOps(recipeToOps(scene.edit_recipe));
+  }
+
+  const isRunning =
+    scene.edit_status === "queued" || scene.edit_status === "running";
+
+  const onApply = async () => {
+    setSubmitting(true);
+    setError(null);
+    try {
+      await api.upsertSceneEdit(scene.id, opsToRecipe(ops));
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const onReset = () => {
+    setOps(recipeToOps(scene.edit_recipe));
+    setError(null);
+  };
+
+  const onDiscard = async () => {
+    if (
+      !window.confirm(
+        "Discard this edit? The edited artifacts will be deleted; the original splat is untouched.",
+      )
+    ) {
+      return;
+    }
+    setDiscarding(true);
+    setError(null);
+    try {
+      await api.clearSceneEdit(scene.id);
+      setOps(DEFAULT_OPS);
+      onChangeView("original");
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setDiscarding(false);
+    }
+  };
+
+  const hasEdit =
+    scene.edit_status === "completed" && scene.edited_ply_url !== null;
+  const progressPct = Math.round(((editProgress?.progress ?? 0) * 100));
+
+  return (
+    <section className="border border-rule p-4 space-y-4">
+      <header className="flex items-baseline justify-between gap-4">
+        <h2 className="text-sm text-muted">edit / clean up the splat</h2>
+        {(hasEdit || isRunning) && (
+          <div className="flex items-center gap-2 text-xs">
+            <span className="text-muted">view:</span>
+            <button
+              type="button"
+              onClick={() => onChangeView("original")}
+              className={
+                viewing === "original"
+                  ? "underline text-fg"
+                  : "text-muted hover:text-fg"
+              }
+            >
+              original
+            </button>
+            <button
+              type="button"
+              onClick={() => onChangeView("edited")}
+              disabled={!hasEdit}
+              className={
+                viewing === "edited"
+                  ? "underline text-fg"
+                  : "text-muted hover:text-fg disabled:opacity-40 disabled:cursor-not-allowed"
+              }
+            >
+              edited
+            </button>
+          </div>
+        )}
+      </header>
+
+      {isRunning && (
+        <div className="space-y-1 text-xs">
+          <p className="text-warn">
+            filtering… {progressPct}%
+            {editProgress?.message ? ` · ${editProgress.message}` : ""}
+          </p>
+          <div className="h-1 bg-rule">
+            <div
+              className="h-full bg-accent transition-all"
+              style={{ width: `${progressPct}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      {scene.edit_status === "failed" && scene.edit_error && (
+        <p className="text-xs text-danger">
+          last apply failed: {scene.edit_error}
+        </p>
+      )}
+
+      <fieldset className="space-y-3" disabled={isRunning || submitting}>
+        <legend className="text-xs text-muted">filters</legend>
+
+        <Toggle
+          label="opacity threshold"
+          checked={ops.opacity.enabled}
+          onChange={(v) =>
+            setOps((s) => ({ ...s, opacity: { ...s.opacity, enabled: v } }))
+          }
+        >
+          <NumberField
+            label="min"
+            value={ops.opacity.min}
+            min={0}
+            max={1}
+            step={0.01}
+            onChange={(v) =>
+              setOps((s) => ({ ...s, opacity: { ...s.opacity, min: v } }))
+            }
+          />
+        </Toggle>
+
+        <Toggle
+          label="scale clamp"
+          checked={ops.scale.enabled}
+          onChange={(v) =>
+            setOps((s) => ({ ...s, scale: { ...s.scale, enabled: v } }))
+          }
+        >
+          <NumberField
+            label="max scale (m)"
+            value={ops.scale.max_scale}
+            min={0.001}
+            step={0.05}
+            onChange={(v) =>
+              setOps((s) => ({
+                ...s,
+                scale: { ...s.scale, max_scale: v },
+              }))
+            }
+          />
+        </Toggle>
+
+        <Toggle
+          label="bbox crop (m)"
+          checked={ops.bbox.enabled}
+          onChange={(v) =>
+            setOps((s) => ({ ...s, bbox: { ...s.bbox, enabled: v } }))
+          }
+        >
+          <Vec3Field
+            label="min"
+            value={ops.bbox.min}
+            onChange={(v) =>
+              setOps((s) => ({ ...s, bbox: { ...s.bbox, min: v } }))
+            }
+          />
+          <Vec3Field
+            label="max"
+            value={ops.bbox.max}
+            onChange={(v) =>
+              setOps((s) => ({ ...s, bbox: { ...s.bbox, max: v } }))
+            }
+          />
+        </Toggle>
+
+        <Toggle
+          label="sphere remove"
+          checked={ops.sphere.enabled}
+          onChange={(v) =>
+            setOps((s) => ({ ...s, sphere: { ...s.sphere, enabled: v } }))
+          }
+        >
+          <Vec3Field
+            label="center"
+            value={ops.sphere.center}
+            onChange={(v) =>
+              setOps((s) => ({ ...s, sphere: { ...s.sphere, center: v } }))
+            }
+          />
+          <NumberField
+            label="radius"
+            value={ops.sphere.radius}
+            min={0}
+            step={0.05}
+            onChange={(v) =>
+              setOps((s) => ({
+                ...s,
+                sphere: { ...s.sphere, radius: v },
+              }))
+            }
+          />
+          <button
+            type="button"
+            className="text-xs text-muted underline hover:text-fg"
+            onClick={() =>
+              setOps((s) => ({
+                ...s,
+                sphere: {
+                  enabled: true,
+                  center: [0, 0, 0],
+                  radius: 0.3,
+                },
+              }))
+            }
+          >
+            nuke origin cloud
+          </button>
+        </Toggle>
+
+        <Toggle
+          label="outlier removal (SOR)"
+          checked={ops.sor.enabled}
+          onChange={(v) =>
+            setOps((s) => ({ ...s, sor: { ...s.sor, enabled: v } }))
+          }
+        >
+          <NumberField
+            label="k"
+            value={ops.sor.k}
+            min={1}
+            step={1}
+            onChange={(v) =>
+              setOps((s) => ({ ...s, sor: { ...s.sor, k: Math.round(v) } }))
+            }
+          />
+          <NumberField
+            label="σ multiplier"
+            value={ops.sor.std_multiplier}
+            min={0}
+            step={0.1}
+            onChange={(v) =>
+              setOps((s) => ({
+                ...s,
+                sor: { ...s.sor, std_multiplier: v },
+              }))
+            }
+          />
+        </Toggle>
+
+        <Toggle
+          label="DBSCAN keep-largest"
+          checked={ops.dbscan.enabled}
+          onChange={(v) =>
+            setOps((s) => ({ ...s, dbscan: { ...s.dbscan, enabled: v } }))
+          }
+        >
+          <NumberField
+            label="eps"
+            value={ops.dbscan.eps}
+            min={0}
+            step={0.01}
+            onChange={(v) =>
+              setOps((s) => ({ ...s, dbscan: { ...s.dbscan, eps: v } }))
+            }
+          />
+          <NumberField
+            label="min samples"
+            value={ops.dbscan.min_samples}
+            min={1}
+            step={1}
+            onChange={(v) =>
+              setOps((s) => ({
+                ...s,
+                dbscan: { ...s.dbscan, min_samples: Math.round(v) },
+              }))
+            }
+          />
+        </Toggle>
+      </fieldset>
+
+      <div className="flex flex-wrap items-center gap-3 text-xs">
+        <button
+          type="button"
+          onClick={onApply}
+          disabled={isRunning || submitting}
+          className="border border-rule px-3 py-1 hover:bg-rule disabled:opacity-50"
+        >
+          {submitting ? "queueing…" : "apply & save"}
+        </button>
+        <button
+          type="button"
+          onClick={onReset}
+          disabled={isRunning || submitting}
+          className="text-muted underline hover:text-fg disabled:opacity-40"
+        >
+          reset
+        </button>
+        {hasEdit && (
+          <button
+            type="button"
+            onClick={onDiscard}
+            disabled={isRunning || discarding}
+            className="text-danger underline hover:text-fg disabled:opacity-40"
+          >
+            {discarding ? "discarding…" : "discard edit"}
+          </button>
+        )}
+        {error && <span className="text-danger">{error}</span>}
+      </div>
+    </section>
+  );
+}
+
+function Toggle({
+  label,
+  checked,
+  onChange,
+  children,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  children?: React.ReactNode;
+}) {
+  return (
+    <div className="space-y-1">
+      <label className="flex items-center gap-2 text-sm cursor-pointer">
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={(e) => onChange(e.target.checked)}
+          className="accent-accent"
+        />
+        {label}
+      </label>
+      {checked && (
+        <div className="ml-6 flex flex-wrap items-end gap-3">{children}</div>
+      )}
+    </div>
+  );
+}
+
+function NumberField({
+  label,
+  value,
+  onChange,
+  min,
+  max,
+  step,
+}: {
+  label: string;
+  value: number;
+  onChange: (v: number) => void;
+  min?: number;
+  max?: number;
+  step?: number;
+}) {
+  return (
+    <label className="flex flex-col gap-0.5 text-xs">
+      <span className="text-muted">{label}</span>
+      <input
+        type="number"
+        value={value}
+        onChange={(e) => {
+          const n = parseFloat(e.target.value);
+          if (Number.isFinite(n)) onChange(n);
+        }}
+        min={min}
+        max={max}
+        step={step ?? 0.01}
+        className="w-24 bg-transparent border-b border-rule px-1 focus:outline-none focus:border-accent"
+      />
+    </label>
+  );
+}
+
+function Vec3Field({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: [number, number, number];
+  onChange: (v: [number, number, number]) => void;
+}) {
+  const set = (i: number) => (n: number) => {
+    const next = [...value] as [number, number, number];
+    next[i] = n;
+    onChange(next);
+  };
+  return (
+    <div className="flex flex-col gap-0.5 text-xs">
+      <span className="text-muted">{label}</span>
+      <div className="flex gap-1">
+        <NumberField label="x" value={value[0]} onChange={set(0)} />
+        <NumberField label="y" value={value[1]} onChange={set(1)} />
+        <NumberField label="z" value={value[2]} onChange={set(2)} />
+      </div>
+    </div>
+  );
+}
+
+function recipeToOps(recipe: EditRecipe | null): OpsState {
+  const out: OpsState = JSON.parse(JSON.stringify(DEFAULT_OPS));
+  if (!recipe?.ops) return out;
+  for (const op of recipe.ops) {
+    switch (op.type) {
+      case "opacity_threshold":
+        out.opacity = { enabled: true, min: op.min };
+        break;
+      case "scale_clamp":
+        out.scale = { enabled: true, max_scale: op.max_scale };
+        break;
+      case "bbox_crop":
+        out.bbox = { enabled: true, min: op.min, max: op.max };
+        break;
+      case "sphere_remove":
+        out.sphere = {
+          enabled: true,
+          center: op.center,
+          radius: op.radius,
+        };
+        break;
+      case "sor":
+        out.sor = {
+          enabled: true,
+          k: op.k,
+          std_multiplier: op.std_multiplier,
+        };
+        break;
+      case "dbscan_keep_largest":
+        out.dbscan = {
+          enabled: true,
+          eps: op.eps,
+          min_samples: op.min_samples,
+        };
+        break;
+    }
+  }
+  return out;
+}
+
+function opsToRecipe(ops: OpsState): EditRecipe {
+  // Order matters: cheap point-wise filters first, expensive
+  // neighbourhood filters last so they only see the trimmed set.
+  const out: EditOp[] = [];
+  if (ops.opacity.enabled) {
+    out.push({ type: "opacity_threshold", min: ops.opacity.min });
+  }
+  if (ops.scale.enabled) {
+    out.push({ type: "scale_clamp", max_scale: ops.scale.max_scale });
+  }
+  if (ops.bbox.enabled) {
+    out.push({ type: "bbox_crop", min: ops.bbox.min, max: ops.bbox.max });
+  }
+  if (ops.sphere.enabled) {
+    out.push({
+      type: "sphere_remove",
+      center: ops.sphere.center,
+      radius: ops.sphere.radius,
+    });
+  }
+  if (ops.sor.enabled) {
+    out.push({
+      type: "sor",
+      k: ops.sor.k,
+      std_multiplier: ops.sor.std_multiplier,
+    });
+  }
+  if (ops.dbscan.enabled) {
+    out.push({
+      type: "dbscan_keep_largest",
+      eps: ops.dbscan.eps,
+      min_samples: ops.dbscan.min_samples,
+    });
+  }
+  return { ops: out };
+}
