@@ -286,9 +286,18 @@ class MeshRequest(BaseModel):
 
 
 _ALLOWED_MESH_KEYS = set(MESH_DEFAULT_PARAMS.keys())
+_ALLOWED_NORMAL_METHODS = {"open3d", "open3d_with_normals"}
 
 
 def _validate_mesh_params(raw: dict | None) -> dict:
+    """Strict per-key type / range check.
+
+    Trusting the worker to coerce these would silently misinterpret
+    common JSON mistakes (``"false"`` is truthy in Python's ``bool``,
+    ``"1e6"`` parses but loses precision through ``int``). Fail fast
+    at the api boundary so the user gets a clear 422 instead of a
+    confusing job failure twenty seconds later.
+    """
     if raw is None:
         return {}
     if not isinstance(raw, dict):
@@ -299,7 +308,34 @@ def _validate_mesh_params(raw: dict | None) -> dict:
             422,
             f"unknown mesh param(s) {sorted(bad)}; allowed: {sorted(_ALLOWED_MESH_KEYS)}",
         )
-    return dict(raw)
+    out: dict = {}
+    if "num_points" in raw:
+        v = raw["num_points"]
+        # Reject bools explicitly — bool is a subclass of int in
+        # Python, so ``isinstance(True, int)`` is True and the
+        # subsequent range check would happily accept it.
+        if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
+            raise HTTPException(422, "num_points must be a positive integer")
+        out["num_points"] = v
+    if "remove_outliers" in raw:
+        v = raw["remove_outliers"]
+        if not isinstance(v, bool):
+            raise HTTPException(422, "remove_outliers must be a boolean")
+        out["remove_outliers"] = v
+    if "normal_method" in raw:
+        v = raw["normal_method"]
+        if not isinstance(v, str) or v not in _ALLOWED_NORMAL_METHODS:
+            raise HTTPException(
+                422,
+                f"normal_method must be one of {sorted(_ALLOWED_NORMAL_METHODS)}",
+            )
+        out["normal_method"] = v
+    if "use_bounding_box" in raw:
+        v = raw["use_bounding_box"]
+        if not isinstance(v, bool):
+            raise HTTPException(422, "use_bounding_box must be a boolean")
+        out["use_bounding_box"] = v
+    return out
 
 
 @router.post("/{scene_id}/mesh")

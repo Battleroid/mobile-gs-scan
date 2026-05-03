@@ -424,7 +424,14 @@ async def _run_mesh(*, job: Job, scene: Scene, settings: Settings) -> None:
             hb_task.cancel()
     except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001
         if await _ack_user_cancel(job):
-            await store.update_scene(scene.id, mesh_status=MeshStatus.none)
+            # Only clear mesh_status if it's still "running". If a
+            # replacement POST /mesh has raced ahead and flipped it
+            # to "queued", clobbering back to "none" would hide that
+            # a fresh extraction is pending — re-fetch to catch the
+            # race rather than blindly writing.
+            refreshed = await store.get_scene(scene.id)
+            if refreshed and refreshed.mesh_status == MeshStatus.running:
+                await store.update_scene(scene.id, mesh_status=MeshStatus.none)
             return
         msg = f"{exc}"
         await store.update_scene(
