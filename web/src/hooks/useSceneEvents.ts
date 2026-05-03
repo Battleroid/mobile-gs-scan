@@ -117,6 +117,15 @@ export function useSceneEvents(sceneId: string | null): {
                 : s,
             );
             setEditProgress(null);
+            // Same WS-subscription-gap reason as scene.mesh_failed:
+            // job.failed never reaches the client because the
+            // filter job's topic was created after the WS opened.
+            // Refresh so the pipeline list / JobLogPanel reflect
+            // the failure without a manual reload.
+            const gen = ++refreshGen.current;
+            void refreshScene(sceneId).then((next) => {
+              if (next && gen === refreshGen.current) setScene(next);
+            });
           } else if (evt.kind === "scene.edited") {
             // Rather than splicing in just the new urls here, re-fetch
             // the full Scene so the edited_ply_url / edited_spz_url
@@ -175,6 +184,16 @@ export function useSceneEvents(sceneId: string | null): {
                 : s,
             );
             setMeshProgress(null);
+            // Mesh jobs queued after the scene WS opened don't have
+            // a per-job topic subscription, so a job.failed event
+            // never reaches us; the row in scene.jobs stays at
+            // "queued" until a manual reload. Re-fetch the snapshot
+            // so the pipeline list (and its JobLogPanel) reflect
+            // the failure. Same pattern as scene.meshed.
+            const gen = ++refreshGen.current;
+            void refreshScene(sceneId).then((next) => {
+              if (next && gen === refreshGen.current) setScene(next);
+            });
           } else if (evt.kind === "scene.meshed") {
             setMeshProgress({ progress: 1, message: "done" });
             setScene((s) => (s ? { ...s, mesh_status: "completed" } : s));
