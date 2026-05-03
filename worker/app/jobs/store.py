@@ -397,12 +397,19 @@ async def cancel_job(job_id: str) -> bool:
 
 
 async def delete_terminal_jobs_of_kind(scene_id: str, kind: JobKind) -> int:
-    """Drop completed/failed/canceled rows of a given kind for a scene.
+    """Drop completed / failed rows of a given kind for a scene.
 
     Used by the filter/edit upsert path so re-applying a recipe leaves
     a single canonical filter-job row in the scene's job list rather
-    than one per apply. We DELIBERATELY don't touch in-flight rows
-    (queued/claimed/running) — the caller cancels those first.
+    than one per apply. We DELIBERATELY don't touch:
+      * in-flight rows (queued / claimed / running) — the caller
+        cancels those first.
+      * canceled rows whose worker hasn't acked yet — the runner's
+        heartbeat loop and ``_run_filter``'s pre-commit re-fetch
+        both look up the row by id; if it's deleted first, the
+        canceled subprocess's late completion happily overwrites
+        the new recipe's artifacts. Leaving canceled rows around
+        is the load-bearing protection against that race.
     """
     async with session() as s:
         result = await s.execute(
@@ -412,7 +419,6 @@ async def delete_terminal_jobs_of_kind(scene_id: str, kind: JobKind) -> int:
                 Job.status.in_([
                     JobStatus.completed,
                     JobStatus.failed,
-                    JobStatus.canceled,
                 ]),
             )
         )
