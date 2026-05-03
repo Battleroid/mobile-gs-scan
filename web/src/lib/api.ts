@@ -2,31 +2,17 @@
 //
 // The base URL is resolved in this order:
 //   1. NEXT_PUBLIC_API_BASE if non-empty (set at build time).
-//   2. Browser, http://<host>:3000 — the Next dev port that the web
-//      container also publishes alongside Caddy. Hitting it directly
-//      bypasses the reverse proxy, so /api/* on the same origin lands
-//      on Next (which has no such routes) instead of FastAPI. Rewrite
-//      to the api container's published port directly so this access
-//      path works for desktop dev. The api ships CORSMiddleware so
-//      cross-origin from :3000 → :8000 is allowed.
-//   3. Otherwise window.location.origin — what we want under
-//      https/Caddy where /api/* is reverse-proxied same-origin.
-//   4. Server-side rendering: localhost:8000 fallback so the build
-//      doesn't crash.
-import type { Capture, CaptureSource, Scene } from "./types";
+//   2. Otherwise window.location.origin — which is what we want
+//      under https/Caddy where the api lives at /api/* on the same
+//      origin as the web ui.
+//   3. Server-side rendering on Next: localhost:8000 fallback so
+//      the build doesn't crash.
+import type { Capture, CaptureSource, FilterRecipe, Scene } from "./types";
 
 function apiBase(): string {
   const baked = process.env.NEXT_PUBLIC_API_BASE;
   if (baked && baked !== "") return baked.replace(/\/$/, "");
-  if (typeof window !== "undefined") {
-    if (
-      window.location.protocol === "http:" &&
-      window.location.port === "3000"
-    ) {
-      return `http://${window.location.hostname}:8000`;
-    }
-    return window.location.origin;
-  }
+  if (typeof window !== "undefined") return window.location.origin;
   return "http://localhost:8000";
 }
 
@@ -45,13 +31,6 @@ async function jsonReq<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
-export interface JobLogResponse {
-  log: string;
-  size: number;
-  path: string | null;
-  available: boolean;
-}
-
 export const api = {
   base: apiBase,
   listCaptures: () => jsonReq<Capture[]>("/api/captures"),
@@ -59,7 +38,7 @@ export const api = {
   resolvePairToken: (token: string) =>
     jsonReq<Capture>(`/api/captures/by-token/${token}`),
   createCapture: (body: {
-    name?: string;
+    name: string;
     source: CaptureSource;
     has_pose?: boolean;
     meta?: Record<string, unknown>;
@@ -67,13 +46,6 @@ export const api = {
     jsonReq<Capture>("/api/captures", {
       method: "POST",
       body: JSON.stringify(body),
-    }),
-  // Rename a capture. Server trims + validates non-empty; throws on
-  // 4xx with the server's error body so the caller can surface it.
-  renameCapture: (id: string, name: string) =>
-    jsonReq<Capture>(`/api/captures/${id}`, {
-      method: "PATCH",
-      body: JSON.stringify({ name }),
     }),
   finalize: (id: string) =>
     jsonReq<{ scene_id: string }>(`/api/captures/${id}/finalize`, {
@@ -93,23 +65,20 @@ export const api = {
   deleteCapture: (id: string) =>
     fetch(`${apiBase()}/api/captures/${id}`, { method: "DELETE" }),
   getScene: (id: string) => jsonReq<Scene>(`/api/scenes/${id}`),
-  artifactUrl: (sceneId: string, kind: "ply" | "spz") =>
-    `${apiBase()}/api/scenes/${sceneId}/artifacts/${kind}`,
-  // Tail of the subprocess log for a given job. Polled by the
-  // collapsible per-step log panel on the capture-detail page.
-  // tailBytes caps server-side at 1 MB (default 8 KB), so this is
-  // safe to refetchInterval at 2 s while the job is running.
-  getJobLog: (id: string, tailBytes = 8192) =>
-    jsonReq<JobLogResponse>(`/api/jobs/${id}/log?tail_bytes=${tailBytes}`),
-  // Cancel an in-flight job. Idempotent: returns canceled=false if
-  // the job was already in a terminal state. The worker that owns
-  // the job notices the cancel on its next heartbeat (~5 s) and
-  // SIGKILLs any registered subprocess.
-  cancelJob: (id: string) =>
-    jsonReq<{ ok: boolean; canceled: boolean; status: string }>(
-      `/api/jobs/${id}/cancel`,
-      { method: "POST" },
-    ),
+  artifactUrl: (
+    sceneId: string,
+    kind: "ply" | "spz",
+    opts?: { edit?: boolean },
+  ) =>
+    `${apiBase()}/api/scenes/${sceneId}/artifacts/${kind}` +
+    (opts?.edit ? "?edit=true" : ""),
+  upsertSceneEdit: (sceneId: string, recipe: FilterRecipe) =>
+    jsonReq<Scene>(`/api/scenes/${sceneId}/edit`, {
+      method: "PUT",
+      body: JSON.stringify({ recipe }),
+    }),
+  clearSceneEdit: (sceneId: string) =>
+    jsonReq<Scene>(`/api/scenes/${sceneId}/edit`, { method: "DELETE" }),
 };
 
 export function wsUrl(path: string): string {

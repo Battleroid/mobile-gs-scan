@@ -46,6 +46,47 @@ export function useSceneEvents(sceneId: string | null): {
             setScene((s) => (s ? { ...s, status: "completed" } : s));
           } else if (evt.kind === "scene.failed") {
             setScene((s) => (s ? { ...s, status: "failed" } : s));
+          } else if (evt.kind === "scene.edit_queued") {
+            setScene((s) => (s ? { ...s, edit_status: "queued" } : s));
+          } else if (evt.kind === "scene.edit_running") {
+            setScene((s) => (s ? { ...s, edit_status: "running" } : s));
+          } else if (evt.kind === "scene.edit_failed") {
+            setScene((s) =>
+              s
+                ? {
+                    ...s,
+                    edit_status: "failed",
+                    edit_error: (evt.data.error as string | undefined) ?? null,
+                  }
+                : s,
+            );
+          } else if (evt.kind === "scene.edited") {
+            setScene((s) =>
+              s
+                ? {
+                    ...s,
+                    edit_status: "completed",
+                    edit_error: null,
+                    edited_ply_url:
+                      (evt.data.edited_ply_url as string | undefined) ?? s.edited_ply_url,
+                    edited_spz_url:
+                      (evt.data.edited_spz_url as string | undefined) ?? s.edited_spz_url,
+                  }
+                : s,
+            );
+          } else if (evt.kind === "scene.edit_cleared") {
+            setScene((s) =>
+              s
+                ? {
+                    ...s,
+                    edit_status: "none",
+                    edit_error: null,
+                    edited_ply_url: null,
+                    edited_spz_url: null,
+                    edit_recipe: null,
+                  }
+                : s,
+            );
           }
         }
       } catch {
