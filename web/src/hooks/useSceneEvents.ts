@@ -3,6 +3,13 @@ import { useEffect, useState } from "react";
 import { wsUrl } from "@/lib/api";
 import type { EditStatus, Scene, ServerEvent } from "@/lib/types";
 
+export interface EditResult {
+  kept: number;
+  total: number;
+  /** Wall-clock when the edited event arrived. */
+  at: number;
+}
+
 export function useSceneEvents(sceneId: string | null): {
   scene: Scene | null;
   lastEvent: ServerEvent | null;
@@ -15,6 +22,8 @@ export function useSceneEvents(sceneId: string | null): {
    * on the scene topic keeps a single subscription sufficient.
    */
   editProgress: { progress: number; message: string | null } | null;
+  /** Result of the most recently completed filter (kept/total). */
+  lastEditResult: EditResult | null;
 } {
   const [scene, setScene] = useState<Scene | null>(null);
   const [lastEvent, setLastEvent] = useState<ServerEvent | null>(null);
@@ -22,6 +31,7 @@ export function useSceneEvents(sceneId: string | null): {
     progress: number;
     message: string | null;
   } | null>(null);
+  const [lastEditResult, setLastEditResult] = useState<EditResult | null>(null);
 
   useEffect(() => {
     if (!sceneId) return;
@@ -62,6 +72,16 @@ export function useSceneEvents(sceneId: string | null): {
           } else if (evt.kind === "scene.edit_queued") {
             setScene((s) => (s ? { ...s, edit_status: "queued" } : s));
             setEditProgress({ progress: 0, message: "queued" });
+            // The new filter job didn't exist when this WS opened,
+            // so it's missing from the snapshot's jobs list (and
+            // there's no per-job subscription — scene.edit_progress
+            // is mirrored on the scene topic so we still get
+            // progress, but the JobRow + JobLogPanel for the
+            // filter need the row to render). Re-fetching the scene
+            // pulls the row in so the UI catches up.
+            void refreshScene(sceneId).then((next) => {
+              if (next) setScene(next);
+            });
           } else if (evt.kind === "scene.edit_running") {
             setScene((s) => (s ? { ...s, edit_status: "running" } : s));
           } else if (evt.kind === "scene.edit_progress") {
@@ -87,6 +107,11 @@ export function useSceneEvents(sceneId: string | null): {
             // import to avoid a circular module dep with api.ts.
             setEditProgress({ progress: 1, message: "done" });
             setScene((s) => (s ? { ...s, edit_status: "completed" } : s));
+            const kept = evt.data.kept as number | undefined;
+            const total = evt.data.total as number | undefined;
+            if (typeof kept === "number" && typeof total === "number") {
+              setLastEditResult({ kept, total, at: Date.now() });
+            }
             void refreshScene(sceneId).then((next) => {
               if (next) setScene(next);
             });
@@ -104,6 +129,7 @@ export function useSceneEvents(sceneId: string | null): {
                 : s,
             );
             setEditProgress(null);
+            setLastEditResult(null);
           }
         }
       } catch {
@@ -113,7 +139,7 @@ export function useSceneEvents(sceneId: string | null): {
     return () => ws.close();
   }, [sceneId]);
 
-  return { scene, lastEvent, editProgress };
+  return { scene, lastEvent, editProgress, lastEditResult };
 }
 
 function kindToStatus(kind: string, fallback: Scene["jobs"][number]["status"]) {

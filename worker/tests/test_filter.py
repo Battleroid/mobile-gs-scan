@@ -285,6 +285,41 @@ def test_sor_handles_single_point(tmp_path):
     assert res["total"] == 1
 
 
+def test_keep_indices_keeps_only_named_rows(synthetic_ply):
+    src, info, tmp = synthetic_ply
+    out_dir = tmp / "out"
+    # Keep just the first 5 + the very last 5 vertices.
+    pick = list(range(5)) + list(range(info["n_total"] - 5, info["n_total"]))
+    res = asyncio.run(
+        filter_splat(
+            src_ply=src,
+            out_dir=out_dir,
+            recipe={"ops": [{"type": "keep_indices", "indices": pick}]},
+            progress=_noop_progress,
+        )
+    )
+    assert res["kept"] == len(pick)
+
+
+def test_keep_indices_ignores_out_of_range(synthetic_ply):
+    src, info, tmp = synthetic_ply
+    out_dir = tmp / "out"
+    # Out-of-range indices silently dropped; valid ones survive.
+    res = asyncio.run(
+        filter_splat(
+            src_ply=src,
+            out_dir=out_dir,
+            recipe={
+                "ops": [
+                    {"type": "keep_indices", "indices": [0, 1, info["n_total"] + 100]},
+                ],
+            },
+            progress=_noop_progress,
+        )
+    )
+    assert res["kept"] == 2
+
+
 def test_empty_result_raises(synthetic_ply):
     src, _info, tmp = synthetic_ply
     out_dir = tmp / "out"

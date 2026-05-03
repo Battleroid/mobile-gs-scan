@@ -12,9 +12,21 @@
 // SplatMesh.setSplat) is a Phase-1.5 follow-up; the recipe DSL +
 // apply/download flow is the load-bearing piece and works without
 // it.
-import { useState } from "react";
+import { forwardRef, useImperativeHandle, useState } from "react";
 import { api } from "@/lib/api";
 import type { EditOp, EditRecipe, Scene } from "@/lib/types";
+import type { SelectionWidget } from "@/components/SplatViewer";
+
+export interface SplatEditorHandle {
+  /** Apply a widget commit (bbox or sphere drag) to the form state.
+   *  Recipe is NOT auto-saved; user still hits Apply. */
+  commitWidget: (next: SelectionWidget) => void;
+  /** Snapshot the current bbox / sphere form values for seeding a
+   *  fresh widget. Lets the page activate the gizmo with whatever
+   *  the user has been typing into the number fields, not just the
+   *  last-saved recipe. */
+  snapshotWidget: (kind: "bbox" | "sphere") => SelectionWidget;
+}
 
 interface OpsState {
   opacity: { enabled: boolean; min: number };
@@ -46,18 +58,69 @@ interface Props {
   scene: Scene;
   /** Live-streamed progress while the filter job is running. */
   editProgress: { progress: number; message: string | null } | null;
+  /** Result summary from the most recently completed filter. */
+  lastEditResult: { kept: number; total: number; at: number } | null;
   /** Which artifact the parent viewer is currently showing. */
   viewing: "original" | "edited";
   onChangeView: (next: "original" | "edited") => void;
+  /**
+   * In-viewer selection widget controls. The editor decides which
+   * op (bbox / sphere) the gizmo is currently bound to and writes
+   * the round-tripped selection back into local form state on every
+   * commit. Page wires the widget into <SplatViewer>.
+   */
+  activeWidget: "bbox" | "sphere" | null;
+  onActivateWidget: (next: "bbox" | "sphere" | null) => void;
 }
 
-export function SplatEditor({
-  scene,
-  editProgress,
-  viewing,
-  onChangeView,
-}: Props) {
+export const SplatEditor = forwardRef<SplatEditorHandle, Props>(function SplatEditor(
+  {
+    scene,
+    editProgress,
+    lastEditResult,
+    viewing,
+    onChangeView,
+    activeWidget,
+    onActivateWidget,
+  }: Props,
+  ref,
+) {
   const [ops, setOps] = useState<OpsState>(() => recipeToOps(scene.edit_recipe));
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      commitWidget: (next: SelectionWidget) => {
+        setOps((s) => {
+          if (next.kind === "bbox") {
+            return {
+              ...s,
+              bbox: { enabled: true, min: next.min, max: next.max },
+            };
+          }
+          return {
+            ...s,
+            sphere: {
+              enabled: true,
+              center: next.center,
+              radius: Math.max(0, next.radius),
+            },
+          };
+        });
+      },
+      snapshotWidget: (kind) => {
+        if (kind === "bbox") {
+          return { kind: "bbox", min: ops.bbox.min, max: ops.bbox.max };
+        }
+        return {
+          kind: "sphere",
+          center: ops.sphere.center,
+          radius: ops.sphere.radius,
+        };
+      },
+    }),
+    [ops.bbox.min, ops.bbox.max, ops.sphere.center, ops.sphere.radius],
+  );
   const [submitting, setSubmitting] = useState(false);
   const [discarding, setDiscarding] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -175,11 +238,23 @@ export function SplatEditor({
         </p>
       )}
 
+      {lastEditResult && !isRunning && scene.edit_status === "completed" && (
+        <p className="text-xs text-muted">
+          last apply: {lastEditResult.total.toLocaleString()} →{" "}
+          {lastEditResult.kept.toLocaleString()} gaussians (
+          {Math.round(
+            (1 - lastEditResult.kept / Math.max(1, lastEditResult.total)) * 100,
+          )}
+          % dropped)
+        </p>
+      )}
+
       <fieldset className="space-y-3" disabled={isRunning || submitting}>
         <legend className="text-xs text-muted">filters</legend>
 
         <Toggle
           label="opacity threshold"
+          help="Drop gaussians below this rendered opacity (0–1). Cheap fix for faint, fog-like floaters."
           checked={ops.opacity.enabled}
           onChange={(v) =>
             setOps((s) => ({ ...s, opacity: { ...s.opacity, enabled: v } }))
@@ -199,6 +274,7 @@ export function SplatEditor({
 
         <Toggle
           label="scale clamp"
+          help="Drop gaussians whose largest axis is bigger than this (metres). Kills oversized 'fuzzy' splats stretched across the scene."
           checked={ops.scale.enabled}
           onChange={(v) =>
             setOps((s) => ({ ...s, scale: { ...s.scale, enabled: v } }))
@@ -220,10 +296,12 @@ export function SplatEditor({
 
         <Toggle
           label="bbox crop (m)"
+          help="Keep only gaussians inside this axis-aligned box. Drag the orange box widget in the viewer to set min/max visually."
           checked={ops.bbox.enabled}
-          onChange={(v) =>
-            setOps((s) => ({ ...s, bbox: { ...s.bbox, enabled: v } }))
-          }
+          onChange={(v) => {
+            setOps((s) => ({ ...s, bbox: { ...s.bbox, enabled: v } }));
+            if (!v && activeWidget === "bbox") onActivateWidget(null);
+          }}
         >
           <Vec3Field
             label="min"
@@ -239,14 +317,29 @@ export function SplatEditor({
               setOps((s) => ({ ...s, bbox: { ...s.bbox, max: v } }))
             }
           />
+          <button
+            type="button"
+            className={
+              activeWidget === "bbox"
+                ? "text-accent text-xs underline"
+                : "text-muted text-xs underline hover:text-fg"
+            }
+            onClick={() =>
+              onActivateWidget(activeWidget === "bbox" ? null : "bbox")
+            }
+          >
+            {activeWidget === "bbox" ? "stop editing in 3D" : "edit in 3D"}
+          </button>
         </Toggle>
 
         <Toggle
           label="sphere remove"
+          help="Drop everything inside a sphere. Use 'nuke origin cloud' for the classic spherical noise around (0,0,0); drag the magenta sphere widget for arbitrary cleanup."
           checked={ops.sphere.enabled}
-          onChange={(v) =>
-            setOps((s) => ({ ...s, sphere: { ...s.sphere, enabled: v } }))
-          }
+          onChange={(v) => {
+            setOps((s) => ({ ...s, sphere: { ...s.sphere, enabled: v } }));
+            if (!v && activeWidget === "sphere") onActivateWidget(null);
+          }}
         >
           <Vec3Field
             label="center"
@@ -283,10 +376,24 @@ export function SplatEditor({
           >
             nuke origin cloud
           </button>
+          <button
+            type="button"
+            className={
+              activeWidget === "sphere"
+                ? "text-accent text-xs underline"
+                : "text-muted text-xs underline hover:text-fg"
+            }
+            onClick={() =>
+              onActivateWidget(activeWidget === "sphere" ? null : "sphere")
+            }
+          >
+            {activeWidget === "sphere" ? "stop editing in 3D" : "edit in 3D"}
+          </button>
         </Toggle>
 
         <Toggle
           label="outlier removal (SOR)"
+          help="Statistical outlier removal: each point's mean distance to its k nearest neighbours; drop those further than (mean + σ·std). Higher k = smoother judgement, lower σ = more aggressive."
           checked={ops.sor.enabled}
           onChange={(v) =>
             setOps((s) => ({ ...s, sor: { ...s.sor, enabled: v } }))
@@ -317,6 +424,7 @@ export function SplatEditor({
 
         <Toggle
           label="DBSCAN keep-largest"
+          help="Cluster gaussians by spatial density (eps = radius, min_samples = density floor) and keep only the largest cluster. Great for isolating the subject from detached floaters."
           checked={ops.dbscan.enabled}
           onChange={(v) =>
             setOps((s) => ({ ...s, dbscan: { ...s.dbscan, enabled: v } }))
@@ -377,22 +485,28 @@ export function SplatEditor({
       </div>
     </section>
   );
-}
+});
 
 function Toggle({
   label,
+  help,
   checked,
   onChange,
   children,
 }: {
   label: string;
+  /** One-liner shown inline beneath the toggle when expanded. */
+  help?: string;
   checked: boolean;
   onChange: (v: boolean) => void;
   children?: React.ReactNode;
 }) {
   return (
     <div className="space-y-1">
-      <label className="flex items-center gap-2 text-sm cursor-pointer">
+      <label
+        className="flex items-center gap-2 text-sm cursor-pointer"
+        title={help}
+      >
         <input
           type="checkbox"
           checked={checked}
@@ -402,7 +516,10 @@ function Toggle({
         {label}
       </label>
       {checked && (
-        <div className="ml-6 flex flex-wrap items-end gap-3">{children}</div>
+        <div className="ml-6 space-y-1">
+          {help && <p className="text-[11px] text-muted leading-snug">{help}</p>}
+          <div className="flex flex-wrap items-end gap-3">{children}</div>
+        </div>
       )}
     </div>
   );
@@ -466,6 +583,45 @@ function Vec3Field({
       </div>
     </div>
   );
+}
+
+/** Derive the gizmo's current value from a recipe (defaults if the
+ *  recipe doesn't carry the relevant op yet). The page passes this
+ *  to SplatViewer when the user clicks "edit in 3D" on bbox / sphere. */
+export function widgetSelectionFromRecipe(
+  recipe: EditRecipe | null,
+  kind: "bbox" | "sphere",
+): SelectionWidget {
+  const ops = recipeToOps(recipe);
+  if (kind === "bbox") {
+    return { kind: "bbox", min: ops.bbox.min, max: ops.bbox.max };
+  }
+  return {
+    kind: "sphere",
+    center: ops.sphere.center,
+    radius: ops.sphere.radius,
+  };
+}
+
+/** Patch a recipe with the new bbox/sphere widget value, leaving
+ *  every other op untouched. Used by the page when the gizmo
+ *  commits — we round-trip through the live recipe so the
+ *  SplatEditor's own form re-seeds from authoritative state. */
+export function applyWidgetSelectionToRecipe(
+  recipe: EditRecipe | null,
+  next: SelectionWidget,
+): EditRecipe {
+  const ops = recipeToOps(recipe);
+  if (next.kind === "bbox") {
+    ops.bbox = { enabled: true, min: next.min, max: next.max };
+  } else {
+    ops.sphere = {
+      enabled: true,
+      center: next.center,
+      radius: Math.max(0, next.radius),
+    };
+  }
+  return opsToRecipe(ops);
 }
 
 function recipeToOps(recipe: EditRecipe | null): OpsState {

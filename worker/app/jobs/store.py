@@ -22,7 +22,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -394,6 +394,30 @@ async def cancel_job(job_id: str) -> bool:
         )
         await s.commit()
         return int(result.rowcount or 0) > 0
+
+
+async def delete_terminal_jobs_of_kind(scene_id: str, kind: JobKind) -> int:
+    """Drop completed/failed/canceled rows of a given kind for a scene.
+
+    Used by the filter/edit upsert path so re-applying a recipe leaves
+    a single canonical filter-job row in the scene's job list rather
+    than one per apply. We DELIBERATELY don't touch in-flight rows
+    (queued/claimed/running) — the caller cancels those first.
+    """
+    async with session() as s:
+        result = await s.execute(
+            delete(Job).where(
+                Job.scene_id == scene_id,
+                Job.kind == kind,
+                Job.status.in_([
+                    JobStatus.completed,
+                    JobStatus.failed,
+                    JobStatus.canceled,
+                ]),
+            )
+        )
+        await s.commit()
+        return int(result.rowcount or 0)
 
 
 async def reap_stale_jobs(*, stale_after_seconds: int = 60) -> int:
