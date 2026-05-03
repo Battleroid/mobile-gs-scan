@@ -574,10 +574,14 @@ function SelectionGizmo({
     }
   }, [selection.kind, onCommit, targetMesh]);
 
-  // dragging-changed → commit on mouse-up. Stable ref callback so
-  // we don't churn TransformControls' attached listeners every
-  // render (an inline `ref={(v) => { ... }}` would, and that was
-  // the second half of the "clicks don't register" symptom).
+  // dragging-changed → commit on mouse-up + manually pause/resume
+  // OrbitControls. The auto-pause that drei is supposed to wire up
+  // when both controls have makeDefault doesn't fire reliably here
+  // (presumably because TC and OC fight over which is the "default"
+  // when both ask for it), so OrbitControls was happily eating the
+  // drag — handles highlighted on click but the camera rotated
+  // instead of the gizmo moving. Reach into useThree's controls
+  // slot and flip enabled directly.
   const tcRef = useRef<{
     addEventListener: (k: string, fn: (e: { value: boolean }) => void) => void;
     removeEventListener: (k: string, fn: (e: { value: boolean }) => void) => void;
@@ -585,17 +589,31 @@ function SelectionGizmo({
   const setTcRef = useCallback((v: unknown) => {
     tcRef.current = v as typeof tcRef.current;
   }, []);
-  const { invalidate } = useThree();
+  const { invalidate, controls } = useThree();
   useEffect(() => {
     const tc = tcRef.current;
     if (!tc) return;
     const onDrag = (e: { value: boolean }) => {
+      // Toggle the OrbitControls (or whatever is registered as the
+      // default Drei controls) on/off based on whether we're
+      // mid-drag. Doing it manually because drei's auto-pause was
+      // unreliable in this combo of versions.
+      const oc = controls as { enabled?: boolean } | null;
+      if (oc && "enabled" in oc) {
+        oc.enabled = !e.value;
+      }
       if (!e.value) commit();
       invalidate();
     };
     tc.addEventListener("dragging-changed", onDrag);
-    return () => tc.removeEventListener("dragging-changed", onDrag);
-  }, [commit, invalidate, targetMesh]);
+    return () => {
+      tc.removeEventListener("dragging-changed", onDrag);
+      // If the gizmo unmounts mid-drag we'd otherwise leave
+      // OrbitControls disabled forever.
+      const oc = controls as { enabled?: boolean } | null;
+      if (oc && "enabled" in oc) oc.enabled = true;
+    };
+  }, [commit, invalidate, targetMesh, controls]);
 
   const color = selection.kind === "bbox" ? "#ffae42" : "#ff5fa2";
 
@@ -616,12 +634,6 @@ function SelectionGizmo({
           mode={mode}
           size={1.6}
           space="world"
-          // makeDefault on the gizmo + the existing makeDefault on
-          // OrbitControls is what wires drei's auto-disable: the
-          // gizmo registers itself with the default OrbitControls
-          // and pauses it during drag so pointer events on the
-          // handles aren't competed for.
-          makeDefault
         />
       )}
     </>
