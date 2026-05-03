@@ -432,6 +432,11 @@ async def _run_mesh(*, job: Job, scene: Scene, settings: Settings) -> None:
             refreshed = await store.get_scene(scene.id)
             if refreshed and refreshed.mesh_status == MeshStatus.running:
                 await store.update_scene(scene.id, mesh_status=MeshStatus.none)
+                # Emit a scene event so the web client's mesh UI
+                # picks up the reset without a manual reload — the
+                # status flip alone isn't enough since the WS only
+                # carries scene.* events for state transitions.
+                await events.publish_scene(scene.id, "scene.mesh_cleared")
             return
         msg = f"{exc}"
         await store.update_scene(

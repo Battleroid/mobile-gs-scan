@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from app.config import get_settings
 from app.jobs import events, store
-from app.jobs.schema import JobKind
+from app.jobs.schema import EditStatus, JobKind, JobStatus, MeshStatus
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
@@ -87,19 +87,62 @@ async def cancel_job_endpoint(job_id: str) -> dict:
     cancels the dispatch coroutine. Idempotent; calling again on
     an already-canceled / completed / failed job returns
     ``canceled: false``.
+
+    Cancelling a queued-but-unclaimed mesh / filter job needs to
+    cascade into the scene's status column too — the worker's
+    ``_run_filter`` / ``_run_mesh`` reset paths only fire on jobs
+    they actually claimed, so a job killed before claim would leave
+    ``edit_status``/``mesh_status`` stuck at ``queued`` forever.
+    Reset here when the worker won't.
     """
     job = await store.get_job(job_id)
     if job is None:
         raise HTTPException(404, "job not found")
+    pre_status = job.status
     canceled = await store.cancel_job(job_id)
     if canceled:
         await events.publish_job(job_id, "job.canceled")
+        # Only intervene on jobs the worker is unlikely to clean up:
+        # rows that hadn't been claimed yet (queued) get no
+        # _run_filter/_run_mesh pass at all. Claimed/running rows
+        # are the worker's to reset on its next heartbeat tick.
+        if pre_status == JobStatus.queued and job.kind in (
+            JobKind.filter,
+            JobKind.mesh,
+        ):
+            await _reset_scene_status_for_canceled_job(
+                scene_id=job.scene_id, kind=job.kind,
+            )
     refreshed = await store.get_job(job_id)
     return {
         "ok": True,
         "canceled": canceled,
         "status": refreshed.status.value if refreshed else "unknown",
     }
+
+
+async def _reset_scene_status_for_canceled_job(
+    *, scene_id: str, kind: JobKind,
+) -> None:
+    """Cascade a job-level cancel into the scene-level status column.
+
+    Race-safe: only flips when the column is still in an in-flight
+    value (queued/running). If a replacement POST has already moved
+    it forward, leave it alone so the new pending job stays visible.
+    Emits the matching ``scene.*_cleared`` event so the web client
+    picks up the reset without a refresh.
+    """
+    scene = await store.get_scene(scene_id)
+    if scene is None:
+        return
+    if kind == JobKind.filter:
+        if scene.edit_status in (EditStatus.queued, EditStatus.running):
+            await store.update_scene(scene.id, edit_status=EditStatus.none)
+            await events.publish_scene(scene.id, "scene.edit_cleared")
+    elif kind == JobKind.mesh:
+        if scene.mesh_status in (MeshStatus.queued, MeshStatus.running):
+            await store.update_scene(scene.id, mesh_status=MeshStatus.none)
+            await events.publish_scene(scene.id, "scene.mesh_cleared")
 
 
 def _log_path_for_kind(kind: JobKind, scene_dir: Path) -> Path | None:
