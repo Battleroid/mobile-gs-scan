@@ -99,6 +99,24 @@ async def _run_poisson(
         raise RuntimeError("no nerfstudio config.yml under train/")
     config = candidates[-1]
 
+    # Sweep stale artefacts from prior runs before invoking ns-export.
+    # The post-run lookup uses ``next(glob('*.obj'), None)`` to pick
+    # whichever file the binary produced, but if ns-export writes only
+    # .ply (versions vary), a leftover scene.obj from an earlier run
+    # would get returned and the job would report success while
+    # serving stale geometry. Clean every potential output file so
+    # the glob below can't see anything but freshly-written content.
+    for stale in (
+        *mesh_dir.glob("*.obj"),
+        *mesh_dir.glob("*.ply"),
+        *mesh_dir.glob("*.glb"),
+        *mesh_dir.glob("*.mtl"),
+    ):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
     await progress(0.05, "ns-export poisson")
     log_path = mesh_dir / "mesh.log"
 

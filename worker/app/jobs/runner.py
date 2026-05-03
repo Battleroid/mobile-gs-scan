@@ -448,6 +448,16 @@ async def _run_mesh(*, job: Job, scene: Scene, settings: Settings) -> None:
         )
         await store.update_job(job.id, completed=True)
         await events.publish_job(job.id, "job.canceled")
+        # If the cancel came from POST /api/jobs/{id}/cancel (which
+        # only flips the job row), mesh_status is still "running"
+        # and would never resolve. Reset to "none" — but only if a
+        # replacement POST /mesh hasn't already moved status forward
+        # to "queued" (same race-window as the cancel-on-error
+        # branch above).
+        scene_now = await store.get_scene(scene.id)
+        if scene_now and scene_now.mesh_status == MeshStatus.running:
+            await store.update_scene(scene.id, mesh_status=MeshStatus.none)
+            await events.publish_scene(scene.id, "scene.mesh_cleared")
         return
 
     await store.update_scene(
