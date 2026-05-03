@@ -524,7 +524,9 @@ function SplatScene({
       coloredBaseRef.current = null;
       highlightApiRef.current = null;
     };
-  }, [url, pointsUrl, gl, scene]);
+    // highlightApiRef is a stable mutable ref; the eslint rule
+    // wants it listed even though it doesn't gate effect re-runs.
+  }, [url, pointsUrl, gl, scene, highlightApiRef]);
 
   // Apply view-mode change without re-creating either object.
   // Swaps the points material AND the live color buffer's contents
@@ -624,6 +626,67 @@ function SelectionGizmo({
     setTargetMesh(node);
   }, []);
 
+  // Hoisted out of the OC-coordination block below because the
+  // highlight repainter needs `invalidate` and runs earlier in
+  // this function. `controls` + `gl` are still consumed by the
+  // OC-pause effects further down.
+  const { invalidate, controls, gl } = useThree();
+
+  // Repaint the highlight from the live mesh transform. Hoisted out
+  // of the listener-effect below so the seed effect can call it too:
+  // form-driven changes (number-field edits, Reset, recipe re-seed)
+  // update mesh.position/scale via the seed but never fire a TC
+  // 'change' event, so the previous version left the yellow mask
+  // stale until the user touched the gizmo again.
+  const repaintHighlight = useCallback(() => {
+    const m = targetMesh;
+    if (!m) return;
+    const api = highlightApiRef.current;
+    if (!api) return;
+    const { positions, baseColors, liveColors, attribute } = api;
+    const cx = m.position.x, cy = m.position.y, cz = m.position.z;
+    // mesh.scale is the unit cube's full extent / sphere's
+    // diameter; halve to compare against |p - center|. Math.abs
+    // guards against an in-progress negative scale (commit pins
+    // to abs on drag-end but the live mesh can be negative
+    // mid-drag in scale mode).
+    const sx = Math.abs(m.scale.x) / 2;
+    const sy = Math.abs(m.scale.y) / 2;
+    const sz = Math.abs(m.scale.z) / 2;
+    const r =
+      (Math.abs(m.scale.x) + Math.abs(m.scale.y) + Math.abs(m.scale.z)) / 6;
+    const r2 = r * r;
+    const isBbox = selection.kind === "bbox";
+    const n = positions.length / 3;
+    const [hr, hg, hb] = HIGHLIGHT_RGB;
+    for (let i = 0; i < n; i++) {
+      const px = positions[i * 3];
+      const py = positions[i * 3 + 1];
+      const pz = positions[i * 3 + 2];
+      let inside: boolean;
+      if (isBbox) {
+        inside =
+          Math.abs(px - cx) <= sx &&
+          Math.abs(py - cy) <= sy &&
+          Math.abs(pz - cz) <= sz;
+      } else {
+        const dx = px - cx, dy = py - cy, dz = pz - cz;
+        inside = dx * dx + dy * dy + dz * dz <= r2;
+      }
+      if (inside) {
+        liveColors[i * 3] = hr;
+        liveColors[i * 3 + 1] = hg;
+        liveColors[i * 3 + 2] = hb;
+      } else {
+        liveColors[i * 3] = baseColors[i * 3];
+        liveColors[i * 3 + 1] = baseColors[i * 3 + 1];
+        liveColors[i * 3 + 2] = baseColors[i * 3 + 2];
+      }
+    }
+    attribute.needsUpdate = true;
+    invalidate();
+  }, [selection.kind, targetMesh, invalidate, highlightApiRef]);
+
   // Seed the mesh transform from the incoming selection. Runs after
   // mount + on selection identity change. TransformControls mutates
   // mesh.position/scale directly mid-drag, so we deliberately
@@ -647,8 +710,11 @@ function SelectionGizmo({
       const d = Math.max(0.001, selection.radius * 2);
       m.scale.set(d, d, d);
     }
+    // The seed just moved the mesh — repaint so the yellow mask
+    // matches the new bounds without waiting for a TC interaction.
+    repaintHighlight();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [seedKey, targetMesh]);
+  }, [seedKey, targetMesh, repaintHighlight]);
 
   const commit = useCallback(() => {
     const m = targetMesh;
@@ -721,7 +787,6 @@ function SelectionGizmo({
   const setTcRef = useCallback((v: unknown) => {
     tcRef.current = v as TcInstance | null;
   }, []);
-  const { invalidate, controls, gl } = useThree();
   // Read the default controls (OrbitControls, the only one with
   // makeDefault) through a ref so the helper below doesn't capture
   // `controls` as a dep — that rerouting keeps the
@@ -799,86 +864,37 @@ function SelectionGizmo({
   }, [commit, invalidate, targetMesh, setOcEnabled]);
 
   // Highlight points inside the active widget yellow on every TC
-  // change (hover, drag, axis swap). Reads positions + base palette
-  // from the highlightApiRef populated by SplatScene; writes the
-  // result back into the same color attribute SplatScene allocated.
-  // Restores the base palette on unmount so deactivating the widget
-  // un-paints the yellow.
+  // change (hover, drag, axis swap). Calls the hoisted
+  // repaintHighlight helper that the seed effect also uses for
+  // form-driven updates.
   useEffect(() => {
     const tc = tcRef.current;
     if (!tc) return;
-    const m = targetMesh;
-    if (!m) return;
-
-    const repaint = () => {
-      const api = highlightApiRef.current;
-      if (!api) return;
-      const { positions, baseColors, liveColors, attribute } = api;
-      const cx = m.position.x, cy = m.position.y, cz = m.position.z;
-      // mesh.scale is the unit cube's full extent / sphere's
-      // diameter; halve to compare against |p - center|. Math.abs
-      // guards against an in-progress negative scale (commit
-      // pins to abs on drag-end but the live mesh can be negative
-      // mid-drag in scale mode).
-      const sx = Math.abs(m.scale.x) / 2;
-      const sy = Math.abs(m.scale.y) / 2;
-      const sz = Math.abs(m.scale.z) / 2;
-      const r = (Math.abs(m.scale.x) + Math.abs(m.scale.y) + Math.abs(m.scale.z)) / 6;
-      const r2 = r * r;
-      const isBbox = selection.kind === "bbox";
-      const n = positions.length / 3;
-      const [hr, hg, hb] = HIGHLIGHT_RGB;
-      for (let i = 0; i < n; i++) {
-        const px = positions[i * 3];
-        const py = positions[i * 3 + 1];
-        const pz = positions[i * 3 + 2];
-        let inside: boolean;
-        if (isBbox) {
-          inside =
-            Math.abs(px - cx) <= sx &&
-            Math.abs(py - cy) <= sy &&
-            Math.abs(pz - cz) <= sz;
-        } else {
-          const dx = px - cx, dy = py - cy, dz = pz - cz;
-          inside = dx * dx + dy * dy + dz * dz <= r2;
-        }
-        if (inside) {
-          liveColors[i * 3] = hr;
-          liveColors[i * 3 + 1] = hg;
-          liveColors[i * 3 + 2] = hb;
-        } else {
-          liveColors[i * 3] = baseColors[i * 3];
-          liveColors[i * 3 + 1] = baseColors[i * 3 + 1];
-          liveColors[i * 3 + 2] = baseColors[i * 3 + 2];
-        }
-      }
-      attribute.needsUpdate = true;
-      invalidate();
-    };
-
+    if (!targetMesh) return;
+    const onChange = () => repaintHighlight();
     // First pass on mount + every TC change (hover, drag, axis
     // swap). 'change' fires often during a drag — that's what we
     // want for live tracking, and at ~1M points a single pass is
     // ~10 ms on a modern machine.
-    repaint();
-    tc.addEventListener("change", repaint);
+    onChange();
+    tc.addEventListener("change", onChange);
+    // Capture the ref into the closure so the cleanup uses the
+    // same handle the effect saw at fire-time. SplatScene only
+    // replaces highlightApiRef.current on a full URL/Spark
+    // remount, but capturing here silences the stale-ref lint
+    // rule and reads cleaner.
+    const apiAtMount = highlightApiRef.current;
     return () => {
-      tc.removeEventListener("change", repaint);
+      tc.removeEventListener("change", onChange);
       // Restore base palette so deactivating the widget removes
       // the yellow highlight.
-      const api = highlightApiRef.current;
-      if (api) {
-        api.liveColors.set(api.baseColors);
-        api.attribute.needsUpdate = true;
+      if (apiAtMount) {
+        apiAtMount.liveColors.set(apiAtMount.baseColors);
+        apiAtMount.attribute.needsUpdate = true;
         invalidate();
       }
     };
-  }, [
-    selection.kind,
-    targetMesh,
-    invalidate,
-    highlightApiRef,
-  ]);
+  }, [targetMesh, invalidate, highlightApiRef, repaintHighlight]);
 
   const color = selection.kind === "bbox" ? "#ffae42" : "#ff5fa2";
 
