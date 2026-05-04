@@ -169,6 +169,13 @@ async def _run_poisson(
         params.get("density_quantile", DEFAULT_PARAMS["density_quantile"])
     )
 
+    # try / finally rather than try / except: cancellation arrives
+    # as asyncio.CancelledError (a BaseException, NOT Exception),
+    # so an `except Exception:` cleanup leaks the staging dir on
+    # every cancel/replace round-trip. The atomic swap MUST happen
+    # inside the try (it consumes the staged files), but the
+    # rmtree afterwards is the same on success or any failure
+    # path — finally is the right place for it.
     try:
         await progress(0.05, "load splat ply")
         pc = await asyncio.to_thread(_load_pointcloud, src_ply, params, _log)
@@ -227,28 +234,29 @@ async def _run_poisson(
         else:
             _log("glb conversion failed; obj only")
 
-    except Exception:
-        # Drop staging on failure so the prior mesh in mesh_dir is
-        # untouched and the next attempt starts clean.
+        # Atomic swap: replace canonical mesh files in mesh_dir
+        # from staging. Path.replace is atomic on POSIX within the
+        # same filesystem; we're staging inside
+        # mesh_dir/.staging-<job_id> so we're always on the same
+        # device. Now is when the prior mesh becomes the new mesh
+        # — until this moment, /artifacts/{obj,glb} still serves
+        # the old files.
+        obj_dst = mesh_dir / "scene.obj"
+        glb_dst = mesh_dir / "scene.glb"
+        (staging_dir / "scene.obj").replace(obj_dst)
+        if has_glb:
+            (staging_dir / "scene.glb").replace(glb_dst)
+        elif glb_dst.exists():
+            # New run produced no glb (trimesh hiccup) but a prior
+            # glb still sits next to obj_dst. That's stale — drop
+            # it so we don't serve a glb derived from an older obj.
+            try:
+                glb_dst.unlink()
+            except OSError:
+                pass
+    finally:
         shutil.rmtree(staging_dir, ignore_errors=True)
-        raise
 
-    # Atomic swap: replace canonical mesh files in mesh_dir from
-    # staging. Path.replace is atomic on POSIX within the same
-    # filesystem; we're staging inside mesh_dir/.staging-<job_id>
-    # so we're always on the same device.
-    obj_dst = mesh_dir / "scene.obj"
-    glb_dst = mesh_dir / "scene.glb"
-    (staging_dir / "scene.obj").replace(obj_dst)
-    if has_glb:
-        (staging_dir / "scene.glb").replace(glb_dst)
-    elif glb_dst.exists():
-        try:
-            glb_dst.unlink()
-        except OSError:
-            pass
-
-    shutil.rmtree(staging_dir, ignore_errors=True)
     _log("done")
 
     result: dict[str, str | int] = {"obj": str(obj_dst)}

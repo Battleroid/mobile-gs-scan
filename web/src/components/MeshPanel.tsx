@@ -71,10 +71,20 @@ export function MeshPanel({ scene, meshProgress }: Props) {
     setSubmitting(true);
     setError(null);
     try {
-      // normal_method is fixed to "open3d" server-side; the param
+      // Merge the existing scene.mesh_params first so any keys the
+      // UI doesn't expose (depth / density_quantile, set via the
+      // API directly or via a future advanced-tunables panel)
+      // survive a UI re-extract. Without this, clicking Extract
+      // would silently clobber whatever advanced tuning a power
+      // user had on the scene back to the worker defaults — the
+      // trigger endpoint stores the submitted params verbatim as
+      // the scene's active mesh_params.
+      // normal_method is forced to "open3d" because the worker
+      // allowlist no longer accepts anything else; the param
       // shape stays here so future expansions stay backward-
       // compatible without a UI rev.
       await api.triggerSceneMesh(scene.id, {
+        ...(scene.mesh_params ?? {}),
         ...params,
         normal_method: "open3d",
       });
