@@ -74,19 +74,34 @@ async def _run_real(
         if job_id is not None:
             _running.register(job_id, proc)
         try:
-            log_path = export_dir / "export.log"
-            tail = bytearray()
-            with log_path.open("wb") as log_f:
-                if proc.stdout:
-                    while True:
-                        chunk = await proc.stdout.read(8192)
-                        if not chunk:
-                            break
-                        log_f.write(chunk)
-                        tail.extend(chunk)
-                        if len(tail) > tail_limit_bytes:
-                            del tail[:-tail_limit_bytes]
-            rc = await proc.wait()
+            try:
+                log_path = export_dir / "export.log"
+                tail = bytearray()
+                with log_path.open("wb") as log_f:
+                    if proc.stdout:
+                        while True:
+                            chunk = await proc.stdout.read(8192)
+                            if not chunk:
+                                break
+                            log_f.write(chunk)
+                            tail.extend(chunk)
+                            if len(tail) > tail_limit_bytes:
+                                del tail[:-tail_limit_bytes]
+                rc = await proc.wait()
+            except BaseException:
+                # Streaming failed (ENOSPC, decode error, cancel, ...).
+                # Kill ns-export so it doesn't outlive us untracked, then
+                # reap to clear the zombie before re-raising.
+                if proc.returncode is None:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        await proc.wait()
+                    except BaseException:
+                        pass
+                raise
         finally:
             if job_id is not None:
                 _running.unregister(job_id)
