@@ -50,7 +50,7 @@ export type MeshStatus =
 export interface MeshParams {
   num_points?: number;
   remove_outliers?: boolean;
-  normal_method?: "open3d" | "model_output";
+  normal_method?: "open3d";
   use_bounding_box?: boolean;
 }
 

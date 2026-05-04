@@ -175,6 +175,16 @@ export default function CaptureDetailPage({ params }: PageProps) {
                     key={splatUrl}
                     url={api.base() + splatUrl}
                     pointsUrl={pointsRel ? api.base() + pointsRel : undefined}
+                    meshGlbUrl={
+                      scene.mesh_glb_url
+                        ? api.base() + scene.mesh_glb_url
+                        : undefined
+                    }
+                    meshObjUrl={
+                      scene.mesh_obj_url
+                        ? api.base() + scene.mesh_obj_url
+                        : undefined
+                    }
                     selection={widgetSelection}
                     onSelectionCommit={handleWidgetCommit}
                   />

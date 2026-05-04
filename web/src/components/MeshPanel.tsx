@@ -1,39 +1,29 @@
 "use client";
 // On-demand Poisson mesh extraction panel. Renders below the
 // SplatViewer + SplatEditor on a completed scene. Lets the user
-// kick off ns-export poisson with a few tunables, watches progress
-// over the scene WS (mirrored on scene.mesh_progress to match the
-// filter pattern), and renders the resulting OBJ / GLB inline once
-// it lands.
+// kick off the worker's Open3D-Poisson pipeline with a few
+// tunables, watches progress over the scene WS (mirrored on
+// scene.mesh_progress to match the filter pattern). The mesh is
+// VIEWED in the main SplatViewer via the "mesh" view-mode — this
+// panel only owns the controls.
 //
 // The mesh is reconstructed from the trained Gaussian-splatting
-// checkpoint, NOT from the (filtered) PLY — same source as the
-// viewer's splats. That keeps it independent of the edit pipeline:
-// you can mesh + filter in either order, and discarding the edit
-// doesn't touch the mesh.
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { Canvas, useThree } from "@react-three/fiber";
-import { OrbitControls } from "@react-three/drei";
-import * as THREE from "three";
+// scene's exported .ply (gaussian centres → Open3D Poisson),
+// independent of the edit pipeline: you can mesh + filter in
+// either order, and discarding the edit doesn't touch the mesh.
+import { useState } from "react";
 import { api } from "@/lib/api";
-import type { MeshParams, MeshStatus, Scene } from "@/lib/types";
-
-const NORMAL_METHODS: MeshParams["normal_method"][] = [
-  "open3d",
-  "model_output",
-];
+import type { MeshStatus, Scene } from "@/lib/types";
 
 interface ParamsState {
   num_points: number;
   remove_outliers: boolean;
-  normal_method: NonNullable<MeshParams["normal_method"]>;
   use_bounding_box: boolean;
 }
 
 const DEFAULT_PARAMS: ParamsState = {
   num_points: 1_000_000,
   remove_outliers: true,
-  normal_method: "open3d",
   use_bounding_box: false,
 };
 
@@ -42,9 +32,6 @@ function paramsFromScene(scene: Scene): ParamsState {
   return {
     num_points: p.num_points ?? DEFAULT_PARAMS.num_points,
     remove_outliers: p.remove_outliers ?? DEFAULT_PARAMS.remove_outliers,
-    normal_method:
-      (p.normal_method as ParamsState["normal_method"]) ??
-      DEFAULT_PARAMS.normal_method,
     use_bounding_box: p.use_bounding_box ?? DEFAULT_PARAMS.use_bounding_box,
   };
 }
@@ -72,11 +59,11 @@ export function MeshPanel({ scene, meshProgress }: Props) {
 
   const status: MeshStatus = scene.mesh_status;
   const isRunning = status === "queued" || status === "running";
-  // Gate the viewer + discard button on artefact URL presence, not
-  // on `status === "completed"`. The server keeps mesh_obj_path /
-  // mesh_glb_path populated through a failed or canceled re-extract
-  // (only DELETE /mesh nulls them), so a strict status check would
-  // hide a still-valid prior mesh from the UI on every retry.
+  // Gate the discard button + download links on artefact URL
+  // presence, not on `status === "completed"`. The server keeps
+  // mesh_obj_path / mesh_glb_path populated through a failed or
+  // canceled re-extract (only DELETE /mesh nulls them), so a
+  // strict status check would hide a still-valid prior mesh.
   const hasMesh = !!scene.mesh_obj_url;
   const progressPct = Math.round((meshProgress?.progress ?? 0) * 100);
 
@@ -84,7 +71,13 @@ export function MeshPanel({ scene, meshProgress }: Props) {
     setSubmitting(true);
     setError(null);
     try {
-      await api.triggerSceneMesh(scene.id, params);
+      // normal_method is fixed to "open3d" server-side; the param
+      // shape stays here so future expansions stay backward-
+      // compatible without a UI rev.
+      await api.triggerSceneMesh(scene.id, {
+        ...params,
+        normal_method: "open3d",
+      });
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -111,25 +104,17 @@ export function MeshPanel({ scene, meshProgress }: Props) {
     }
   };
 
-  const meshUrl = useMemo(() => {
-    if (!hasMesh) return null;
-    // Prefer GLB when available — three.js's GLTFLoader is faster +
-    // handles materials uniformly, and the worker emits both when
-    // trimesh is installed. Fall back to OBJ otherwise.
-    const rel = scene.mesh_glb_url ?? scene.mesh_obj_url;
-    return rel ? api.base() + rel : null;
-  }, [hasMesh, scene.mesh_glb_url, scene.mesh_obj_url]);
-  const meshKind: "glb" | "obj" = scene.mesh_glb_url ? "glb" : "obj";
-
   return (
     <section className="border border-rule p-4 space-y-4">
       <header>
         <h2 className="text-sm text-muted">extract mesh (poisson)</h2>
+        {hasMesh && (
+          <p className="text-xs text-muted mt-1">
+            view in the splat viewer above — switch the “view” cycle to
+            “mesh”.
+          </p>
+        )}
       </header>
-
-      {hasMesh && meshUrl && (
-        <MeshViewer url={meshUrl} kind={meshKind} />
-      )}
 
       {isRunning && (
         <div className="space-y-1 text-xs">
@@ -184,28 +169,6 @@ export function MeshPanel({ scene, meshProgress }: Props) {
             className="accent-accent"
           />
           remove outliers
-        </label>
-        <label
-          className="flex flex-col gap-0.5 text-xs"
-          title="How point normals are estimated. open3d uses a local PCA fit on the sampled point cloud; model_output reuses normals predicted by the trained gaussian model (better when the scan covered most viewing angles)."
-        >
-          <span className="text-muted">normal method</span>
-          <select
-            value={params.normal_method}
-            onChange={(e) =>
-              setParams((s) => ({
-                ...s,
-                normal_method: e.target.value as ParamsState["normal_method"],
-              }))
-            }
-            className="w-48 bg-transparent border-b border-rule px-1 focus:outline-none focus:border-accent"
-          >
-            {NORMAL_METHODS.map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))}
-          </select>
         </label>
         <label
           className="flex items-center gap-2 text-sm cursor-pointer"
@@ -268,114 +231,4 @@ export function MeshPanel({ scene, meshProgress }: Props) {
       </div>
     </section>
   );
-}
-
-function MeshViewer({ url, kind }: { url: string; kind: "glb" | "obj" }) {
-  return (
-    <div className="h-[60vh] w-full bg-black relative">
-      <Canvas
-        camera={{ position: [3, 2, 3], fov: 50, near: 0.05, far: 500 }}
-        gl={{ antialias: true, powerPreference: "high-performance" }}
-      >
-        <color attach="background" args={["#0b0b0d"]} />
-        <ambientLight intensity={0.4} />
-        <directionalLight position={[5, 5, 5]} intensity={0.9} />
-        <directionalLight position={[-5, -3, -5]} intensity={0.4} />
-        <Suspense fallback={null}>
-          <MeshContent url={url} kind={kind} />
-        </Suspense>
-        <OrbitControls makeDefault enableDamping target={[0, 0, 0]} />
-      </Canvas>
-    </div>
-  );
-}
-
-function MeshContent({ url, kind }: { url: string; kind: "glb" | "obj" }) {
-  const { scene } = useThree();
-  const groupRef = useRef<THREE.Group>(null);
-  const [error, setError] = useState<string | null>(null);
-  // Reset error when the asset identity changes so a transient
-  // parse / network failure doesn't pin the fallback wireframe
-  // forever — the next load attempt deserves a clean slate.
-  // Render-time adjust pattern (same as JobLogPanel) keeps us out
-  // of the react-hooks/set-state-in-effect penalty box.
-  const assetKey = `${kind}|${url}`;
-  const [prevAssetKey, setPrevAssetKey] = useState(assetKey);
-  if (prevAssetKey !== assetKey) {
-    setPrevAssetKey(assetKey);
-    if (error !== null) setError(null);
-  }
-
-  useEffect(() => {
-    let cancelled = false;
-    const groupAtMount = groupRef.current;
-    let added: THREE.Object3D | null = null;
-
-    (async () => {
-      try {
-        if (kind === "glb") {
-          const { GLTFLoader } = await import(
-            "three/examples/jsm/loaders/GLTFLoader.js"
-          );
-          const loader = new GLTFLoader();
-          const gltf = await loader.loadAsync(url);
-          if (cancelled) return;
-          added = gltf.scene;
-        } else {
-          const { OBJLoader } = await import(
-            "three/examples/jsm/loaders/OBJLoader.js"
-          );
-          const loader = new OBJLoader();
-          const obj = await loader.loadAsync(url);
-          if (cancelled) return;
-          // OBJLoader doesn't apply a default material when the .mtl
-          // is missing — surfaces render black under our lighting.
-          // Drop a flat grey lambert across every mesh so the user
-          // gets a usable preview either way.
-          obj.traverse((child) => {
-            if ((child as THREE.Mesh).isMesh) {
-              const m = child as THREE.Mesh;
-              m.material = new THREE.MeshStandardMaterial({
-                color: 0xb8bcc2,
-                roughness: 0.85,
-                metalness: 0.05,
-              });
-            }
-          });
-          added = obj;
-        }
-        if (added && groupAtMount) {
-          groupAtMount.add(added);
-        }
-      } catch (e) {
-        setError((e as Error).message);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      if (added && groupAtMount) {
-        groupAtMount.remove(added);
-        added.traverse((child) => {
-          const m = child as THREE.Mesh;
-          if (m.geometry) m.geometry.dispose();
-          if (m.material) {
-            const mat = m.material as THREE.Material | THREE.Material[];
-            if (Array.isArray(mat)) mat.forEach((x) => x.dispose());
-            else mat.dispose();
-          }
-        });
-      }
-    };
-  }, [url, kind, scene]);
-
-  if (error) {
-    return (
-      <mesh>
-        <boxGeometry args={[1, 1, 1]} />
-        <meshBasicMaterial color="hotpink" wireframe />
-      </mesh>
-    );
-  }
-  return <group ref={groupRef} />;
 }
