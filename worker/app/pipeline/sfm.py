@@ -196,7 +196,6 @@ async def write_arcore_transforms_json(
         )
     shutil.copy(poses_path, sfm_dir / "poses.jsonl")
 
-    poses: list[dict] = []
     intrinsics: dict | None = None
     with poses_path.open() as f:
         for line in f:
@@ -211,9 +210,8 @@ async def write_arcore_transforms_json(
                 continue
             if intrinsics is None and entry.get("intrinsics"):
                 intrinsics = entry["intrinsics"]
-            poses.append(entry)
 
-    if not poses or intrinsics is None:
+    if intrinsics is None:
         return await _arcore_synthetic_fallback(
             sfm_dir=sfm_dir, progress=progress, reason="no usable poses"
         )
@@ -226,32 +224,48 @@ async def write_arcore_transforms_json(
     h = int(intrinsics["h"])
 
     frames: list[dict] = []
-    cam_positions: list[np.ndarray] = []
+    cam_positions = np.empty((128, 3), dtype=np.float64)
+    cam_positions_count = 0
     written = 0
-    for entry in poses:
-        idx = int(entry["idx"])
-        pose16 = entry["pose"]
-        if not isinstance(pose16, list) or len(pose16) != 16:
-            log.warning("arcore: skipping pose at idx=%s (bad shape)", idx)
-            continue
-        # ARCore writes 4x4 column-major into the 16-float buffer.
-        # numpy's reshape is row-major, so .T gives the canonical
-        # 4x4 mathematical matrix. nerfstudio wants this verbatim:
-        # cam-to-world, OpenGL camera convention, row-major nested
-        # list with the bottom row [0, 0, 0, 1].
-        M = np.array(pose16, dtype=np.float64).reshape(4, 4).T
-        # Sanity: bottom row should be (~0, 0, 0, 1) for a rigid
-        # transform. If it isn't, the pose is junk; skip.
-        bottom = M[3, :]
-        if abs(bottom[3] - 1.0) > 1e-3 or np.linalg.norm(bottom[:3]) > 1e-3:
-            log.warning("arcore: skipping pose at idx=%s (non-affine)", idx)
-            continue
-        frames.append({
-            "file_path": f"images/{idx:06d}.jpg",
-            "transform_matrix": M.tolist(),
-        })
-        cam_positions.append(M[:3, 3])
-        written += 1
+    with poses_path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            pose16 = entry.get("pose")
+            if pose16 is None:
+                continue
+            idx = int(entry["idx"])
+            if not isinstance(pose16, list) or len(pose16) != 16:
+                log.warning("arcore: skipping pose at idx=%s (bad shape)", idx)
+                continue
+            # ARCore writes 4x4 column-major into the 16-float buffer.
+            # numpy's reshape is row-major, so .T gives the canonical
+            # 4x4 mathematical matrix. nerfstudio wants this verbatim:
+            # cam-to-world, OpenGL camera convention, row-major nested
+            # list with the bottom row [0, 0, 0, 1].
+            M = np.array(pose16, dtype=np.float64).reshape(4, 4).T
+            # Sanity: bottom row should be (~0, 0, 0, 1) for a rigid
+            # transform. If it isn't, the pose is junk; skip.
+            bottom = M[3, :]
+            if abs(bottom[3] - 1.0) > 1e-3 or np.linalg.norm(bottom[:3]) > 1e-3:
+                log.warning("arcore: skipping pose at idx=%s (non-affine)", idx)
+                continue
+            frames.append({
+                "file_path": f"images/{idx:06d}.jpg",
+                "transform_matrix": M.tolist(),
+            })
+            if cam_positions_count == cam_positions.shape[0]:
+                grown = np.empty((cam_positions.shape[0] * 2, 3), dtype=np.float64)
+                grown[:cam_positions_count] = cam_positions
+                cam_positions = grown
+            cam_positions[cam_positions_count] = M[:3, 3]
+            cam_positions_count += 1
+            written += 1
 
     if written == 0:
         return await _arcore_synthetic_fallback(
@@ -282,7 +296,7 @@ async def write_arcore_transforms_json(
     # gaussian centers + colors. Splatfacto densifies + prunes
     # during training, so the seed only needs to be roughly in
     # the right region.
-    cam_positions_arr = np.array(cam_positions)
+    cam_positions_arr = cam_positions[:cam_positions_count]
     center = cam_positions_arr.mean(axis=0)
     spread = float(np.linalg.norm(cam_positions_arr - center, axis=1).max())
     radius = max(0.5, spread)
