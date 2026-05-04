@@ -135,7 +135,7 @@ async def filter_splat(
         before = int(keep.sum())
         op_start = time.monotonic()
         try:
-            mask = _apply_op(op, xyz=xyz, vertex=vertex)
+            mask = _apply_op(op, xyz=xyz, vertex=vertex, op_log=_log)
         except Exception as exc:
             _log(f"op[{i}] {kind} FAILED: {exc}")
             raise RuntimeError(f"op {kind!r} failed: {exc}") from exc
@@ -184,7 +184,7 @@ async def filter_splat(
     return result
 
 
-def _apply_op(op: dict, *, xyz, vertex) -> Any:
+def _apply_op(op: dict, *, xyz, vertex, op_log: Callable[[str], None] | None = None) -> Any:
     """Dispatch a single op to its mask-builder. Returns a np.ndarray
     of dtype=bool, length n_vertices."""
     import numpy as np
@@ -279,22 +279,57 @@ def _apply_op(op: dict, *, xyz, vertex) -> Any:
         from sklearn.cluster import DBSCAN
         eps = float(op.get("eps", 0.05))
         min_samples = int(op.get("min_samples", 30))
+        approximate = bool(op.get("approximate", False))
         n = xyz.shape[0]
         if n <= DBSCAN_INPUT_CAP:
+            if op_log is not None:
+                op_log(
+                    f"dbscan_keep_largest mode=deterministic sample_size={n} "
+                    f"input_cap={DBSCAN_INPUT_CAP}"
+                )
             labels = DBSCAN(eps=eps, min_samples=min_samples, n_jobs=-1).fit(xyz).labels_
             return _largest_cluster_mask(labels)
+
         # Downsample for the cluster decision then propagate via NN.
         from scipy.spatial import cKDTree
         rng = np.random.default_rng(0)
-        idx = rng.choice(n, size=DBSCAN_INPUT_CAP, replace=False)
+        if not approximate:
+            sample_size = DBSCAN_INPUT_CAP
+            mode = "deterministic"
+        else:
+            # Opt-in fast mode: reduce the DBSCAN working set as the
+            # input grows, then project cluster-membership back to the
+            # full cloud via chunked nearest-neighbour queries.
+            min_sample = max(20_000, DBSCAN_INPUT_CAP // 8)
+            ratio = max(DBSCAN_INPUT_CAP / float(n), 0.0)
+            sample_size = int(DBSCAN_INPUT_CAP * (ratio ** 0.5))
+            sample_size = max(min_sample, min(DBSCAN_INPUT_CAP, sample_size))
+            sample_size = min(sample_size, n)
+            mode = "approximate"
+        if op_log is not None:
+            op_log(
+                f"dbscan_keep_largest mode={mode} sample_size={sample_size} "
+                f"input_size={n} input_cap={DBSCAN_INPUT_CAP}"
+            )
+        idx = rng.choice(n, size=sample_size, replace=False)
         sub = xyz[idx]
         sub_labels = DBSCAN(eps=eps, min_samples=min_samples, n_jobs=-1).fit(sub).labels_
         sub_keep = _largest_cluster_mask(sub_labels)
-        # Propagate the keep decision to every point by nearest
-        # neighbour against the downsampled set.
         tree = cKDTree(sub)
-        _, nn_idx = tree.query(xyz, k=1)
-        return sub_keep[nn_idx]
+        if not approximate:
+            # Existing behaviour: one-shot NN projection.
+            _, nn_idx = tree.query(xyz, k=1)
+            return sub_keep[nn_idx]
+
+        # Fast mode: chunked projection to keep memory and peak query
+        # time bounded on huge clouds.
+        keep = np.empty(n, dtype=bool)
+        chunk = max(50_000, min(200_000, sample_size * 2))
+        for start in range(0, n, chunk):
+            end = min(n, start + chunk)
+            _, nn_idx = tree.query(xyz[start:end], k=1)
+            keep[start:end] = sub_keep[nn_idx]
+        return keep
 
     raise ValueError(f"unknown op type {kind!r}")
 
