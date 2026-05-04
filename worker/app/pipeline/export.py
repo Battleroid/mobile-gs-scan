@@ -141,7 +141,11 @@ def _load_latest_config(scene_dir: Path, train_dir: Path) -> Path | None:
     try:
         resolved = config.resolve()
         train_root = train_dir.resolve()
-    except OSError:
+    except (OSError, RuntimeError):
+        # Path.resolve() raises OSError for missing/permission errors
+        # AND RuntimeError on a symlink loop (Python 3.11+). Either
+        # shape means the marker is untrustworthy — treat as cache
+        # miss so _run_real falls back to rglob.
         return None
     if not resolved.is_file():
         return None
