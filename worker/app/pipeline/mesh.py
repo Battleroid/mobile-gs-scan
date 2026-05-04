@@ -197,7 +197,24 @@ async def _run_poisson(
             pc = await asyncio.to_thread(_subsample, pc, target)
             _log(f"subsampled to {len(pc.points)} points")
 
-        normal_method = params.get("normal_method")
+        # ``normal_method`` once supported a "model_output" value
+        # (skip estimation, trust whatever normals are on the PLY).
+        # That option was removed because splatfacto exports don't
+        # ship usable normals — its f_dc / opacity properties take
+        # those slots and Poisson then degrades or outright fails.
+        # Scenes whose mesh_params were persisted before that
+        # migration can still feed a stale "model_output" straight
+        # in here (the runner uses scene.mesh_params verbatim when
+        # no overrides are provided, bypassing the API allowlist).
+        # Normalize anything we don't recognize back to "open3d" so
+        # the legacy value can't silently downgrade the run.
+        normal_method = params.get("normal_method") or "open3d"
+        if normal_method != "open3d":
+            _log(
+                f"unsupported normal_method={normal_method!r}, "
+                "falling back to open3d"
+            )
+            normal_method = "open3d"
         if not pc.has_normals() or normal_method == "open3d":
             await progress(0.5, "estimate normals")
             await asyncio.to_thread(_estimate_normals, pc, _log)
