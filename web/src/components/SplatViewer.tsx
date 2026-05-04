@@ -29,7 +29,7 @@ import { Canvas, useThree } from "@react-three/fiber";
 import { OrbitControls, TransformControls } from "@react-three/drei";
 import * as THREE from "three";
 
-type ViewMode = "splats" | "points" | "colored";
+type ViewMode = "splats" | "points" | "colored" | "mesh";
 
 /**
  * In-viewer selection widget driven by the editor panel. The viewer
@@ -93,6 +93,7 @@ const VIEW_MODE_LABELS: Record<ViewMode, string> = {
   splats: "splats",
   points: "points",
   colored: "colored points",
+  mesh: "mesh",
 };
 
 // 3DGS / splatfacto store color as the DC term of an SH expansion.
@@ -110,6 +111,16 @@ interface Props {
    * the .spz — the PLYLoader fallback can't read .spz.
    */
   pointsUrl?: string;
+  /**
+   * Optional .glb / .obj URL for the mesh view-mode. When either
+   * is set, the viewer's mode-cycle gains a 4th "mesh" option
+   * that hides the splats / points and renders the reconstructed
+   * surface instead. GLB is preferred when both are available
+   * (faster GLTFLoader, materials handled uniformly); OBJ is
+   * the fallback.
+   */
+  meshGlbUrl?: string;
+  meshObjUrl?: string;
   className?: string;
   /**
    * When true the viewer fills its container and shows a minimal
@@ -131,6 +142,8 @@ interface Props {
 export function SplatViewer({
   url,
   pointsUrl,
+  meshGlbUrl,
+  meshObjUrl,
   className,
   fillScreen,
   selection,
@@ -183,14 +196,34 @@ export function SplatViewer({
   const onPopOut = useCallback(() => {
     const params = new URLSearchParams({ url });
     if (pointsUrl) params.set("pointsUrl", pointsUrl);
+    // Forward mesh artefact URLs so the popped-out /viewer can
+    // also enter mesh mode. Without these the embed loses the 4th
+    // view-mode option entirely after pop-out, even when the
+    // scene has a finished mesh.
+    if (meshGlbUrl) params.set("meshGlbUrl", meshGlbUrl);
+    if (meshObjUrl) params.set("meshObjUrl", meshObjUrl);
     window.open(`/viewer?${params.toString()}`, "_blank", "noopener");
-  }, [url, pointsUrl]);
+  }, [url, pointsUrl, meshGlbUrl, meshObjUrl]);
 
+  // Mesh URL is required for the mesh mode to be meaningful — skip
+  // the mode in the cycle when no mesh has been extracted yet so
+  // the user doesn't land on an empty canvas.
+  const meshAvailable = !!(meshGlbUrl || meshObjUrl);
   const cycleViewMode = useCallback(() => {
-    setViewMode((m) =>
-      m === "splats" ? "points" : m === "points" ? "colored" : "splats",
-    );
-  }, []);
+    setViewMode((m) => {
+      if (m === "splats") return "points";
+      if (m === "points") return "colored";
+      if (m === "colored") return meshAvailable ? "mesh" : "splats";
+      return "splats";
+    });
+  }, [meshAvailable]);
+  // If the mesh disappears (discarded mid-session) while we're in
+  // mesh mode, bounce back to splats. Render-time adjust pattern.
+  const [prevMeshAvail, setPrevMeshAvail] = useState(meshAvailable);
+  if (prevMeshAvail !== meshAvailable) {
+    setPrevMeshAvail(meshAvailable);
+    if (!meshAvailable && viewMode === "mesh") setViewMode("splats");
+  }
 
   return (
     <div
@@ -207,10 +240,18 @@ export function SplatViewer({
         gl={{ antialias: false, powerPreference: "high-performance" }}
       >
         <color attach="background" args={["#0b0b0d"]} />
+        {/* Lights only matter for the mesh view-mode (Spark + the
+            points materials render unlit); cheap to leave in
+            permanently. */}
+        <ambientLight intensity={0.4} />
+        <directionalLight position={[5, 5, 5]} intensity={0.9} />
+        <directionalLight position={[-5, -3, -5]} intensity={0.4} />
         <Suspense fallback={null}>
           <SplatScene
             url={url}
             pointsUrl={pointsUrl}
+            meshGlbUrl={meshGlbUrl}
+            meshObjUrl={meshObjUrl}
             viewMode={viewMode}
             maxStdDev={maxStdDev}
             highlightApiRef={highlightApiRef}
@@ -277,7 +318,7 @@ export function SplatViewer({
           type="button"
           onClick={cycleViewMode}
           className="text-left hover:text-accent"
-          title="cycle view: splats → points → colored points"
+          title="cycle view: splats → points → colored points → mesh (when extracted)"
         >
           view: {VIEW_MODE_LABELS[viewMode]}
         </button>
@@ -301,12 +342,16 @@ export function SplatViewer({
 function SplatScene({
   url,
   pointsUrl,
+  meshGlbUrl,
+  meshObjUrl,
   viewMode,
   maxStdDev,
   highlightApiRef,
 }: {
   url: string;
   pointsUrl?: string;
+  meshGlbUrl?: string;
+  meshObjUrl?: string;
   viewMode: ViewMode;
   maxStdDev: number;
   highlightApiRef: React.MutableRefObject<PointsHighlightApi | null>;
@@ -317,6 +362,20 @@ function SplatScene({
   const splatRef = useRef<THREE.Object3D | null>(null);
   const sparkRef = useRef<THREE.Object3D | null>(null);
   const pointsRef = useRef<THREE.Points | null>(null);
+  // Mesh object loaded for the "mesh" view-mode. Lazy-attached when
+  // the user first switches to the mode (or remounts on URL change).
+  const meshRef = useRef<THREE.Object3D | null>(null);
+  // Mirror of viewMode in a ref so the mesh-load closure (which
+  // takes the long async path of fetching + parsing a GLB) can
+  // read the LATEST mode at attach-time. Without this, a user
+  // who switches into mesh mode while the load is in flight would
+  // see the closure capture the prior mode and attach the mesh
+  // hidden — until the next mode toggle re-triggers visibility
+  // via the view-mode effect.
+  const viewModeRef = useRef<ViewMode>(viewMode);
+  useEffect(() => {
+    viewModeRef.current = viewMode;
+  }, [viewMode]);
   const monoMaterialRef = useRef<THREE.PointsMaterial | null>(null);
   const coloredMaterialRef = useRef<THREE.PointsMaterial | null>(null);
   const hasVertexColorsRef = useRef(false);
@@ -536,13 +595,17 @@ function SplatScene({
 
   // Apply view-mode change without re-creating either object.
   // Swaps the points material AND the live color buffer's contents
-  // so the gizmo highlight + the new base palette agree.
+  // so the gizmo highlight + the new base palette agree. Also
+  // toggles the mesh's visibility — its lazy load is handled by a
+  // separate effect below.
   useEffect(() => {
     const splat = splatRef.current;
     const points = pointsRef.current;
+    const mesh = meshRef.current;
     if (splat) splat.visible = viewMode === "splats";
+    if (mesh) mesh.visible = viewMode === "mesh";
     if (!points) return;
-    points.visible = viewMode !== "splats";
+    points.visible = viewMode === "points" || viewMode === "colored";
 
     const useColored =
       viewMode === "colored" &&
@@ -574,6 +637,116 @@ function SplatScene({
       api.repaint?.();
     }
   }, [viewMode, highlightApiRef]);
+
+  // Lazy-load the reconstructed mesh when needed and when its url
+  // changes. We DON'T load on mount because the user may never
+  // switch into mesh mode; loading 1M-triangle GLBs eagerly would
+  // be a waste. The fetch is gated on `meshHasBeenViewed`, a sticky
+  // flag flipped true the first time viewMode lands on "mesh", so
+  // (a) startup never pays the network/CPU/GPU cost when the user
+  // stays in splats/points, and (b) once loaded we don't tear down
+  // on a return trip to splats — the mesh stays in-scene with
+  // visible=false so subsequent toggles back are instant.
+  const meshUrl = meshGlbUrl ?? meshObjUrl ?? null;
+  const meshKind: "glb" | "obj" | null = meshGlbUrl
+    ? "glb"
+    : meshObjUrl
+      ? "obj"
+      : null;
+  // Render-time set rather than an effect to dodge
+  // react-hooks/set-state-in-effect — same pattern as the
+  // prevMeshAvail bounce-back at the top of this file.
+  const [meshHasBeenViewed, setMeshHasBeenViewed] = useState(false);
+  if (!meshHasBeenViewed && viewMode === "mesh") {
+    setMeshHasBeenViewed(true);
+  }
+  const shouldLoadMesh = viewMode === "mesh" || meshHasBeenViewed;
+  useEffect(() => {
+    if (!shouldLoadMesh) {
+      // User hasn't requested mesh mode yet — defer the fetch.
+      // No teardown of meshRef here because if we haven't loaded
+      // it yet there's nothing to tear down, and once loaded
+      // shouldLoadMesh stays true (sticky flag) so this branch
+      // never runs after the first load.
+      return;
+    }
+    if (!meshUrl || !meshKind) {
+      // No mesh available: tear down anything from a prior URL.
+      const stale = meshRef.current;
+      if (stale) {
+        groupRef.current?.remove(stale);
+        _disposeMeshTree(stale);
+        meshRef.current = null;
+      }
+      return;
+    }
+
+    let cancelled = false;
+    const groupAtMount = groupRef.current;
+    let added: THREE.Object3D | null = null;
+
+    (async () => {
+      try {
+        if (meshKind === "glb") {
+          const { GLTFLoader } = await import(
+            "three/examples/jsm/loaders/GLTFLoader.js"
+          );
+          const gltf = await new GLTFLoader().loadAsync(meshUrl);
+          if (cancelled) return;
+          added = gltf.scene;
+        } else {
+          const { OBJLoader } = await import(
+            "three/examples/jsm/loaders/OBJLoader.js"
+          );
+          const obj = await new OBJLoader().loadAsync(meshUrl);
+          if (cancelled) return;
+          // OBJLoader doesn't apply a default material when the .mtl
+          // is missing — surfaces render black under our lighting.
+          // Drop a flat grey lambert so the mesh always shows up.
+          obj.traverse((child) => {
+            if ((child as THREE.Mesh).isMesh) {
+              const m = child as THREE.Mesh;
+              m.material = new THREE.MeshStandardMaterial({
+                color: 0xb8bcc2,
+                roughness: 0.85,
+                metalness: 0.05,
+              });
+            }
+          });
+          added = obj;
+        }
+        if (added && groupAtMount) {
+          // Read the LATEST viewMode from the ref instead of the
+          // closure-captured value; the user may have switched
+          // modes during the async load. Without this, attaching
+          // a mesh while the user has already moved on stays
+          // hidden until the next mode toggle.
+          added.visible = viewModeRef.current === "mesh";
+          groupAtMount.add(added);
+          meshRef.current = added;
+        }
+      } catch (e) {
+        console.error("mesh load failed", e);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (added && groupAtMount) {
+        groupAtMount.remove(added);
+        _disposeMeshTree(added);
+      }
+      if (meshRef.current === added) meshRef.current = null;
+    };
+    // viewMode intentionally excluded — toggling modes shouldn't
+    // re-fetch the mesh; visibility-only is handled by the other
+    // effect, and the closure above reads viewModeRef for the
+    // initial-attach visibility (so a mode swap during the
+    // async load is honored). shouldLoadMesh IS in the deps so
+    // the first transition into mesh mode re-runs this effect
+    // and kicks off the actual fetch; after that it's sticky and
+    // won't churn.
+  }, [meshUrl, meshKind, shouldLoadMesh]);
 
   // Apply maxStdDev change. SparkRenderer exposes maxStdDev as a
   // settable property; if a future Spark version drops it the
@@ -966,3 +1139,19 @@ function SelectionGizmo({
 
 // Hoisted so it's reference-stable across renders.
 const NOOP_RAYCAST = () => {};
+
+// Recursively dispose geometry + material(s) attached to every
+// THREE.Mesh under the given root. Both loaders (GLTF / OBJ) pull
+// in non-trivial geometry buffers, so failing to dispose on
+// teardown leaks GPU memory across re-extracts.
+function _disposeMeshTree(root: THREE.Object3D): void {
+  root.traverse((child) => {
+    const m = child as THREE.Mesh;
+    if (m.geometry) m.geometry.dispose();
+    if (m.material) {
+      const mat = m.material as THREE.Material | THREE.Material[];
+      if (Array.isArray(mat)) mat.forEach((x) => x.dispose());
+      else mat.dispose();
+    }
+  });
+}

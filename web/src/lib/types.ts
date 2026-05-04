@@ -50,8 +50,17 @@ export type MeshStatus =
 export interface MeshParams {
   num_points?: number;
   remove_outliers?: boolean;
-  normal_method?: "open3d" | "model_output";
+  normal_method?: "open3d";
   use_bounding_box?: boolean;
+  // Octree depth for the screened-Poisson solver. 5–12; the worker
+  // rejects anything outside that range. UI doesn't surface a
+  // control yet — the server defaults to 9 — but persisted values
+  // need to round-trip through the trigger payload spread in
+  // MeshPanel without an `as any` cast.
+  depth?: number;
+  // Quantile threshold for density-based vertex pruning post-
+  // Poisson. 0 disables. Same UI/persistence note as `depth`.
+  density_quantile?: number;
 }
 
 export type EditOp =

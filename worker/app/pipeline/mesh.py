@@ -1,31 +1,65 @@
 """Poisson mesh extraction from a trained Gaussian-splatting scene.
 
-Wraps Nerfstudio's `ns-export poisson` against the latest config.yml
-under the scene's train/ directory. Falls back to a synthetic stub
-when nerfstudio isn't installed (mirrors the train + export step
-fallbacks so the end-to-end pipeline stays runnable on a host
-without the CUDA stack).
+We DON'T use nerfstudio's ``ns-export poisson`` here. As of
+nerfstudio 1.1.5 that exporter asserts on a
+``pipeline.datamanager.train_pixel_sampler`` that exists on the
+ray-based managers (vanilla nerf etc) but NOT on
+``FullImageDatamanager`` — which is what splatfacto uses. Result:
+``ns-export poisson`` against any splatfacto-trained scene crashes
+with ``AttributeError: 'FullImageDatamanager' object has no
+attribute 'train_pixel_sampler'``. There's no flag to opt out.
 
-`ns-export poisson` defaults are reasonable for the studio scenes
-we get out of phone captures (~1M splats, 5–10 m extent), but we
-expose a couple of tunables on the recipe payload so the user can
-re-run with a different sample count or remove-outliers threshold
-without editing the worker config.
+Instead, run Open3D's Poisson reconstruction against the gaussian-
+splat ``.ply`` the export step already produced. The splat PLY is
+a point cloud of gaussian centres + per-vertex attributes — exactly
+the input the surface reconstruction needs.
+
+The actual Open3D work runs in a CHILD PROCESS
+(``app.pipeline._mesh_subprocess``) so the heartbeat task can
+SIGKILL it via ``_running.kill_for_job``. Earlier versions ran the
+stages directly in the worker via ``asyncio.to_thread``: that fixed
+event-loop blocking but left the native C++ Poisson call running
+in a background thread on cancel, so cancel/replace flows could
+overlap multiple long reconstructions and starve the replacement
+job. The subprocess fork restores hard-kill semantics that the
+original (nerfstudio-based) implementation had.
+
+Pipeline (executed inside the subprocess):
+  1. Load the splat PLY into an Open3D PointCloud (xyz + optional
+     normals + optional colours from the SH DC band).
+  2. Subsample / outlier-prune.
+  3. Estimate normals via PCA on the local k-NN. (An older
+     ``normal_method='model_output'`` option that trusted the PLY's
+     own nx/ny/nz was removed — splatfacto exports those as zero,
+     so trusting them silently degraded Poisson. The runner now
+     coerces any legacy persisted value back to ``open3d``.)
+  4. ``create_from_point_cloud_poisson(depth=…)`` for the surface.
+  5. Density-prune low-confidence triangles (default: drop the
+     bottom 1%) so the mesh isn't smeared out into the empty
+     space around the subject.
+  6. Export ``scene.obj`` + ``scene.glb`` via Open3D / trimesh.
+
+The parent (this module) handles:
+  - Per-job staging dir + atomic swap into the canonical mesh_dir
+    so a concurrent re-extract doesn't clobber the live artefacts.
+  - PROGRESS-line parsing from the subprocess's stdout.
+  - Subprocess registration with ``_running`` for cancel-via-kill.
 
 Output:
   scene_dir/mesh/scene.obj    — canonical Wavefront mesh
-  scene_dir/mesh/scene.glb    — gltf binary (when trimesh is
-                                installed); rendered directly by the
-                                three.js GLTFLoader on the web side.
-  scene_dir/mesh/mesh.log     — subprocess output, surfaced via
+  scene_dir/mesh/scene.glb    — gltf binary (when trimesh's writer
+                                succeeds); rendered directly by
+                                three.js's GLTFLoader on the web.
+  scene_dir/mesh/mesh.log     — per-step trace surfaced via
                                 JobLogPanel.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-import re
 import shutil
+import sys
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -36,36 +70,62 @@ log = logging.getLogger(__name__)
 
 ProgressCb = Callable[[float, str], Awaitable[None]]
 
-PROGRESS_RE = re.compile(rb"(\d+(?:\.\d+)?)%")
-
-# Defaults match nerfstudio's ns-export poisson out of the box. The
-# user can override any of these via POST /api/scenes/{id}/mesh's
-# `params` body to re-run with denser sampling, looser outlier
-# pruning, etc.
+# Defaults tuned for the studio scenes we get out of phone captures
+# (~1M splats, 5–10 m extent). The user can override any of these
+# via POST /api/scenes/{id}/mesh's ``params`` body.
 DEFAULT_PARAMS: dict = {
+    # Target sample count after subsampling. Open3D's Poisson scales
+    # roughly linearly with input size up to ~1M points; beyond
+    # that the marginal density gain is dwarfed by runtime.
     "num_points": 1_000_000,
+    # Statistical-outlier removal pass before normal estimation.
+    # Splatfacto's gaussians sometimes drift outside the subject;
+    # outlier removal stops them from polluting the surface.
     "remove_outliers": True,
+    # Normal estimation method. Only ``open3d`` (PCA on each
+    # point's k-nearest neighbours) is supported end-to-end; the
+    # old ``model_output`` value was removed because splatfacto's
+    # PLY normals are zero. _run_poisson coerces any legacy
+    # persisted value back to "open3d" before dispatching to the
+    # subprocess.
     "normal_method": "open3d",
+    # Whether to crop input to a tight bounding box derived from
+    # the point cloud's robust 1st/99th percentile range. Helps
+    # when stray gaussians sit far from the subject; turn off to
+    # keep the full extent.
     "use_bounding_box": False,
+    # Octree depth for the Poisson solver. Higher = finer detail
+    # but quadratic memory. 9 is a good balance for 1M points.
+    "depth": 9,
+    # Quantile threshold for density-based vertex pruning after
+    # reconstruction. Drops the lowest-density triangles (typically
+    # spurious surfaces in empty space). 0 disables pruning.
+    "density_quantile": 0.01,
 }
 
 
 async def run_mesh(
     *,
     scene_dir: Path,
+    src_ply: Path | None = None,
     params: dict | None = None,
     progress: ProgressCb,
     job_id: str | None = None,
 ) -> dict:
-    train_dir = scene_dir / "train"
     mesh_dir = scene_dir / "mesh"
     mesh_dir.mkdir(parents=True, exist_ok=True)
 
     merged = {**DEFAULT_PARAMS, **(params or {})}
 
-    # Stub-friendly: falls through to a placeholder OBJ when the
-    # synthetic-train marker exists or nerfstudio isn't installed.
-    if (train_dir / "synthetic.json").exists() or not shutil.which("ns-export"):
+    # Stub-friendly: if the runner couldn't pass a real .ply (e.g.
+    # synthetic / stub-trained scenes from the test suite) we drop
+    # a placeholder cube so the web side has something to render.
+    train_dir = scene_dir / "train"
+    if (
+        src_ply is None
+        or not src_ply.exists()
+        or (train_dir / "synthetic.json").exists()
+    ):
         return await _run_stub(
             mesh_dir=mesh_dir,
             params=merged,
@@ -73,12 +133,12 @@ async def run_mesh(
             reason=(
                 "synthetic train output"
                 if (train_dir / "synthetic.json").exists()
-                else "ns-export not on PATH"
+                else f"source .ply missing at {src_ply}"
             ),
         )
 
     return await _run_poisson(
-        train_dir=train_dir,
+        src_ply=src_ply,
         mesh_dir=mesh_dir,
         params=merged,
         progress=progress,
@@ -88,58 +148,47 @@ async def run_mesh(
 
 async def _run_poisson(
     *,
-    train_dir: Path,
+    src_ply: Path,
     mesh_dir: Path,
     params: dict,
     progress: ProgressCb,
     job_id: str | None,
 ) -> dict:
-    candidates = sorted(train_dir.rglob("config.yml"))
-    if not candidates:
-        raise RuntimeError("no nerfstudio config.yml under train/")
-    config = candidates[-1]
-
-    # Stage the run in a per-job sibling temp dir + atomically swap
-    # the canonical scene.obj / scene.glb at the end. Three reasons:
-    #
-    # 1. ns-export poisson has flipped between writing .obj and
-    #    .ply across nerfstudio versions; a post-run glob('*.obj')
-    #    in mesh_dir would happily return a leftover scene.obj
-    #    from a prior run if the new run only wrote .ply, so the
-    #    job would report success while serving stale geometry.
-    #    The earlier b4040a1 fix swept stale artefacts BEFORE the
-    #    run — but that broke the trigger_mesh contract that old
-    #    artefacts stay downloadable while a re-extract is in
-    #    flight. Staging gives us both: nothing in mesh_dir
-    #    moves until the new outputs are ready.
-    # 2. If ns-export crashes mid-write, the staging dir gets
-    #    nuked on failure rather than half-overwriting the prior
-    #    mesh.
-    # 3. Per-JOB staging prevents the cancel-and-replace overlap
-    #    case from clobbering an older run that's still active. A
-    #    shared mesh/.staging would have a newer run rmtree the
-    #    older run's output mid-write; suffixing with job_id
-    #    isolates them. Job ids fall back to "anon" only when the
-    #    runner isn't passing one (stub paths in tests etc).
+    # Per-job staging dir + atomic swap on success. Same pattern as
+    # the filter step — old mesh stays addressable until the new
+    # one is fully written, and a crash mid-run can't half-overwrite
+    # the prior artefacts.
     staging_dir = mesh_dir / f".staging-{job_id or 'anon'}"
     if staging_dir.exists():
-        # Same job_id ran before and crashed; clear its scratch
-        # before we start. Other jobs' staging dirs are untouched.
         shutil.rmtree(staging_dir, ignore_errors=True)
     staging_dir.mkdir(parents=True)
 
-    await progress(0.05, "ns-export poisson")
     log_path = mesh_dir / "mesh.log"
+    log_path.write_text("")
 
-    cmd: list[str] = [
-        "ns-export", "poisson",
-        "--load-config", str(config),
-        "--output-dir", str(staging_dir),
-        "--num-points", str(int(params["num_points"])),
-        "--remove-outliers", str(bool(params["remove_outliers"])),
-        "--normal-method", str(params["normal_method"]),
-        "--use-bounding-box", str(bool(params["use_bounding_box"])),
+    # Normalize legacy normal_method here so the subprocess only
+    # ever sees a supported value. _ALLOWED_NORMAL_METHODS in the
+    # API rejects anything else on new requests, but the runner
+    # uses scene.mesh_params verbatim when no overrides are
+    # provided — bypassing that allowlist for legacy persisted
+    # rows. See the equivalent guard in PR #67's review history.
+    normalized = dict(params)
+    nm = normalized.get("normal_method") or "open3d"
+    if nm != "open3d":
+        normalized["normal_method"] = "open3d"
+
+    # Spawn the Open3D pipeline as a child process and register it
+    # with _running so the heartbeat can SIGKILL it on cancel. Use
+    # sys.executable (parent's interpreter) so we inherit the same
+    # virtualenv / conda env / system Python.
+    cmd = [
+        sys.executable, "-m", "app.pipeline._mesh_subprocess",
+        "--src-ply", str(src_ply),
+        "--staging-dir", str(staging_dir),
+        "--params", json.dumps(normalized),
     ]
+
+    await progress(0.0, "spawn open3d worker")
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -148,117 +197,92 @@ async def _run_poisson(
     )
     if job_id is not None:
         _running.register(job_id, proc)
+
     try:
-        last_pct = 0.0
-        with log_path.open("wb") as logf:
-            assert proc.stdout is not None
-            async for raw in proc.stdout:
-                logf.write(raw)
-                pm = PROGRESS_RE.search(raw)
-                if pm:
-                    try:
-                        percent = float(pm.group(1))
-                    except ValueError:
-                        continue
-                    # Map ns-export's stdout percentages into the
-                    # 0.05 → 0.90 portion of our progress bar so the
-                    # tail (obj/glb conversion) has room left.
-                    pct = max(0.0, min(0.90, 0.05 + (percent / 100.0) * 0.85))
-                    if pct - last_pct >= 0.01:
-                        await progress(pct, f"poisson: {percent:.1f}%")
-                        last_pct = pct
-        rc = await proc.wait()
+        rc = await _stream_progress(proc, log_path, progress)
     finally:
         if job_id is not None:
             _running.unregister(job_id)
 
     if rc != 0:
-        tail = tail_file(log_path)
-        # Failed run: drop the staging dir so the next attempt
-        # starts clean. Prior mesh in mesh_dir is untouched.
+        # Non-zero exit covers both organic failures and SIGKILL
+        # from the heartbeat. The runner's cancel path checks the
+        # DB row to decide whether to treat this as cancel vs.
+        # crash, so the same RuntimeError shape is fine for both.
         shutil.rmtree(staging_dir, ignore_errors=True)
+        tail = tail_file(log_path)
         raise RuntimeError(
-            format_subprocess_error("ns-export poisson", rc, log_path, tail)
+            format_subprocess_error("open3d poisson", rc, log_path, tail)
         )
 
-    # All output now lives under staging_dir/. Build the .obj first
-    # (converting from .ply if that's what ns-export produced),
-    # then mint the .glb sibling — both inside the staging dir.
-    staged_obj = next(staging_dir.glob("*.obj"), None)
-    if staged_obj is None:
-        ply_candidates = sorted(staging_dir.glob("*.ply"))
-        if not ply_candidates:
-            shutil.rmtree(staging_dir, ignore_errors=True)
-            raise RuntimeError("ns-export poisson produced no mesh artifact")
-        await progress(0.92, "convert ply → obj")
-        staged_obj = staging_dir / "scene.obj"
-        _ply_to_obj(ply_candidates[-1], staged_obj)
-
-    staged_obj_canon = staging_dir / "scene.obj"
-    if staged_obj.resolve() != staged_obj_canon.resolve():
-        staged_obj.replace(staged_obj_canon)
-
-    await progress(0.96, "convert obj → glb")
-    staged_glb = staging_dir / "scene.glb"
-    has_glb = _obj_to_glb(staged_obj_canon, staged_glb)
-
-    # Atomic swap: replace canonical mesh files in mesh_dir from
-    # staging. Path.replace is atomic on POSIX within the same
-    # filesystem; we're staging inside mesh_dir/.staging so we're
-    # always on the same device. Now is when the prior mesh becomes
-    # the new mesh — until this moment, /artifacts/{obj,glb} still
-    # serves the old files.
+    # Atomic swap from staging into mesh_dir. Path.replace is
+    # atomic on POSIX within the same filesystem; we're staging
+    # inside mesh_dir/.staging-<job_id> so we're guaranteed same
+    # device. Until this point /artifacts/{obj,glb} still serves
+    # the prior mesh.
     obj_dst = mesh_dir / "scene.obj"
     glb_dst = mesh_dir / "scene.glb"
-    staged_obj_canon.replace(obj_dst)
-    if has_glb:
-        staged_glb.replace(glb_dst)
-    elif glb_dst.exists():
-        # New run produced no glb (trimesh hiccup) but a prior glb
-        # still sits next to obj_dst. That's stale — drop it so we
-        # don't serve a glb derived from an older obj.
-        try:
-            glb_dst.unlink()
-        except OSError:
-            pass
-
-    # Sweep any leftover ply / mtl / etc that ns-export wrote
-    # alongside the obj — we don't ship them and they'd accumulate
-    # forever in mesh_dir otherwise.
-    shutil.rmtree(staging_dir, ignore_errors=True)
+    has_glb = False
+    try:
+        staged_obj = staging_dir / "scene.obj"
+        staged_glb = staging_dir / "scene.glb"
+        if not staged_obj.exists():
+            raise RuntimeError(
+                "open3d poisson exited 0 but produced no scene.obj"
+            )
+        staged_obj.replace(obj_dst)
+        if staged_glb.exists():
+            staged_glb.replace(glb_dst)
+            has_glb = True
+        elif glb_dst.exists():
+            # New run produced no glb (trimesh hiccup) but a prior
+            # glb still sits next to obj_dst. That's stale — drop
+            # it so we don't serve a glb derived from an older obj.
+            try:
+                glb_dst.unlink()
+            except OSError:
+                pass
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
 
     result: dict[str, str | int] = {"obj": str(obj_dst)}
     if has_glb:
         result["glb"] = str(glb_dst)
-
     await progress(1.0, "mesh: done")
     return result
 
 
-def _ply_to_obj(src_ply: Path, dst_obj: Path) -> None:
-    import trimesh
+async def _stream_progress(
+    proc: asyncio.subprocess.Process,
+    log_path: Path,
+    progress: ProgressCb,
+) -> int:
+    """Pump the subprocess's stdout into the .log file, surfacing
+    ``PROGRESS <fraction> <msg>`` lines via the progress callback.
 
-    mesh = trimesh.load(src_ply, force="mesh")
-    mesh.export(dst_obj)
-
-
-def _obj_to_glb(src_obj: Path, dst_glb: Path) -> bool:
-    """Best-effort .obj → .glb conversion via trimesh.
-
-    Returns False (not raise) on failure: GLB is a nicer format for
-    the three.js side but the OBJ is the authoritative mesh, so we
-    don't want a quirk in trimesh's gltf writer to fail the whole
-    job.
+    Throttles callback invocations to ~1% increments so a chatty
+    subprocess can't flood the WS layer.
     """
-    try:
-        import trimesh
-
-        mesh = trimesh.load(src_obj, force="mesh")
-        mesh.export(dst_glb)
-        return dst_glb.exists()
-    except Exception as exc:  # noqa: BLE001
-        log.warning("glb conversion failed: %s", exc)
-        return False
+    last_pct = -1.0
+    with log_path.open("wb") as logf:
+        assert proc.stdout is not None
+        async for raw in proc.stdout:
+            logf.write(raw)
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line.startswith("PROGRESS "):
+                continue
+            parts = line.split(" ", 2)
+            if len(parts) < 2:
+                continue
+            try:
+                pct = float(parts[1])
+            except ValueError:
+                continue
+            msg = parts[2] if len(parts) > 2 else ""
+            if pct - last_pct >= 0.01 or pct >= 1.0:
+                await progress(pct, msg)
+                last_pct = pct
+    return await proc.wait()
 
 
 async def _run_stub(
@@ -269,9 +293,9 @@ async def _run_stub(
     reason: str,
 ) -> dict:
     """Emit a placeholder OBJ + status note so the web side has
-    something to render. The OBJ describes a unit cube — picked over
-    e.g. a single triangle so the viewer's bounding sphere isn't
-    degenerate."""
+    something to render. The OBJ describes a unit cube — picked
+    over e.g. a single triangle so the viewer's bounding sphere
+    isn't degenerate."""
     await progress(0.4, f"mesh: synthetic ({reason})")
     obj = mesh_dir / "scene.obj"
     obj.write_text(_STUB_OBJ)
@@ -279,15 +303,15 @@ async def _run_stub(
     note.write_text(
         f"stub run — {reason}\n"
         f"params: {params}\n"
-        "no nerfstudio checkpoint to mesh; emitted unit cube as placeholder.\n"
+        "no source .ply to mesh; emitted unit cube as placeholder.\n"
     )
     await progress(1.0, "mesh: done (stub)")
     return {"obj": str(obj), "stub": True, "reason": reason}
 
 
 _STUB_OBJ = """\
-# Synthetic placeholder cube — generated when no nerfstudio
-# checkpoint is available to mesh.
+# Synthetic placeholder cube — generated when no source .ply
+# is available to mesh.
 v -1.0 -1.0 -1.0
 v  1.0 -1.0 -1.0
 v  1.0  1.0 -1.0
