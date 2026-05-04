@@ -635,14 +635,35 @@ function SplatScene({
   // Lazy-load the reconstructed mesh when needed and when its url
   // changes. We DON'T load on mount because the user may never
   // switch into mesh mode; loading 1M-triangle GLBs eagerly would
-  // be a waste.
+  // be a waste. The fetch is gated on `meshHasBeenViewed`, a sticky
+  // flag flipped true the first time viewMode lands on "mesh", so
+  // (a) startup never pays the network/CPU/GPU cost when the user
+  // stays in splats/points, and (b) once loaded we don't tear down
+  // on a return trip to splats — the mesh stays in-scene with
+  // visible=false so subsequent toggles back are instant.
   const meshUrl = meshGlbUrl ?? meshObjUrl ?? null;
   const meshKind: "glb" | "obj" | null = meshGlbUrl
     ? "glb"
     : meshObjUrl
       ? "obj"
       : null;
+  // Render-time set rather than an effect to dodge
+  // react-hooks/set-state-in-effect — same pattern as the
+  // prevMeshAvail bounce-back at the top of this file.
+  const [meshHasBeenViewed, setMeshHasBeenViewed] = useState(false);
+  if (!meshHasBeenViewed && viewMode === "mesh") {
+    setMeshHasBeenViewed(true);
+  }
+  const shouldLoadMesh = viewMode === "mesh" || meshHasBeenViewed;
   useEffect(() => {
+    if (!shouldLoadMesh) {
+      // User hasn't requested mesh mode yet — defer the fetch.
+      // No teardown of meshRef here because if we haven't loaded
+      // it yet there's nothing to tear down, and once loaded
+      // shouldLoadMesh stays true (sticky flag) so this branch
+      // never runs after the first load.
+      return;
+    }
     if (!meshUrl || !meshKind) {
       // No mesh available: tear down anything from a prior URL.
       const stale = meshRef.current;
@@ -715,8 +736,11 @@ function SplatScene({
     // re-fetch the mesh; visibility-only is handled by the other
     // effect, and the closure above reads viewModeRef for the
     // initial-attach visibility (so a mode swap during the
-    // async load is honored).
-  }, [meshUrl, meshKind]);
+    // async load is honored). shouldLoadMesh IS in the deps so
+    // the first transition into mesh mode re-runs this effect
+    // and kicks off the actual fetch; after that it's sticky and
+    // won't churn.
+  }, [meshUrl, meshKind, shouldLoadMesh]);
 
   // Apply maxStdDev change. SparkRenderer exposes maxStdDev as a
   // settable property; if a future Spark version drops it the
