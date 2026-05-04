@@ -279,7 +279,11 @@ def _apply_op(op: dict, *, xyz, vertex, op_log: Callable[[str], None] | None = N
         from sklearn.cluster import DBSCAN
         eps = float(op.get("eps", 0.05))
         min_samples = int(op.get("min_samples", 30))
-        approximate = bool(op.get("approximate", False))
+        raw_approximate = op.get("approximate", False)
+        if isinstance(raw_approximate, str):
+            approximate = raw_approximate.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            approximate = bool(raw_approximate)
         n = xyz.shape[0]
         if n <= DBSCAN_INPUT_CAP:
             if op_log is not None:
