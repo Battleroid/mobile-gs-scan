@@ -16,6 +16,7 @@ from app.pipeline._spz import run_spz_pack
 log = logging.getLogger(__name__)
 
 ProgressCb = Callable[[float, str], Awaitable[None]]
+LATEST_CONFIG_MARKER = "latest_config.txt"
 
 
 async def run_export(
@@ -49,10 +50,13 @@ async def _run_real(
     progress: ProgressCb,
     job_id: str | None,
 ) -> dict:
-    candidates = sorted(train_dir.rglob("config.yml"))
-    if not candidates:
+    config = _load_latest_config(train_dir)
+    if config is None:
+        candidates = sorted(train_dir.rglob("config.yml"))
+        config = candidates[-1] if candidates else None
+        _write_latest_config_marker(train_dir, config)
+    if config is None:
         raise RuntimeError("no nerfstudio config.yml under train/")
-    config = candidates[-1]
 
     artifacts: dict[str, str] = {}
 
@@ -105,6 +109,26 @@ async def _run_real(
 
     await progress(1.0, "export: done")
     return artifacts
+
+
+def _load_latest_config(train_dir: Path) -> Path | None:
+    marker_path = train_dir / LATEST_CONFIG_MARKER
+    if not marker_path.exists():
+        return None
+    raw = marker_path.read_text().strip()
+    if not raw:
+        return None
+    marker_value = Path(raw)
+    config = marker_value if marker_value.is_absolute() else train_dir / marker_value
+    return config if config.exists() else None
+
+
+def _write_latest_config_marker(train_dir: Path, config: Path | None) -> None:
+    marker_path = train_dir / LATEST_CONFIG_MARKER
+    if config is None:
+        marker_path.unlink(missing_ok=True)
+        return
+    marker_path.write_text(f"{config}\n")
 
 
 async def _run_stub(

@@ -25,6 +25,7 @@ ProgressCb = Callable[[float, str], Awaitable[None]]
 
 PROGRESS_RE = re.compile(rb"(\d+)\s+\((\d+(?:\.\d+)?)%\)")
 ITER_RE = re.compile(rb"\biter\s+(\d+)", re.IGNORECASE)
+LATEST_CONFIG_MARKER = "latest_config.txt"
 
 
 async def run_train(
@@ -152,6 +153,7 @@ async def _run_splatfacto(
         )
 
     config = _find_latest_config(train_dir)
+    _write_latest_config_marker(train_dir, config)
     await progress(1.0, "train: done")
     return {"config": str(config) if config else None, "iters": iters}
 
@@ -159,6 +161,14 @@ async def _run_splatfacto(
 def _find_latest_config(train_dir: Path) -> Path | None:
     candidates = sorted(train_dir.rglob("config.yml"))
     return candidates[-1] if candidates else None
+
+
+def _write_latest_config_marker(train_dir: Path, config: Path | None) -> None:
+    marker_path = train_dir / LATEST_CONFIG_MARKER
+    if config is None:
+        marker_path.unlink(missing_ok=True)
+        return
+    marker_path.write_text(f"{config}\n")
 
 
 async def _run_stub(
