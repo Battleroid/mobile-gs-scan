@@ -38,6 +38,10 @@ android/.idea/
 .idea/
 .DS_Store
 
+# claude code agent worktrees — transient scratch dirs created by
+# parallel-agent isolation; never commit
+.claude/
+
 # local secrets + tls
 .env
 .env.local
