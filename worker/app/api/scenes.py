@@ -342,6 +342,27 @@ def _validate_mesh_params(raw: dict | None) -> dict:
         if not isinstance(v, bool):
             raise HTTPException(422, "use_bounding_box must be a boolean")
         out["use_bounding_box"] = v
+    if "depth" in raw:
+        v = raw["depth"]
+        # Open3D's screened-Poisson recommends depth in [5, 12]; the
+        # cost goes up roughly 8x per step. Allow the documented
+        # range and refuse anything weirder so the worker doesn't
+        # OOM on a "depth": 20 typo.
+        if isinstance(v, bool) or not isinstance(v, int) or v < 5 or v > 12:
+            raise HTTPException(
+                422, "depth must be an integer in [5, 12]",
+            )
+        out["depth"] = v
+    if "density_quantile" in raw:
+        v = raw["density_quantile"]
+        # Bool→float coercion would let "false" → 0.0 through
+        # silently; reject bools explicitly. Quantile is a
+        # probability in [0, 1).
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise HTTPException(422, "density_quantile must be a number")
+        if v < 0 or v >= 1:
+            raise HTTPException(422, "density_quantile must be in [0, 1)")
+        out["density_quantile"] = float(v)
     return out
 
 

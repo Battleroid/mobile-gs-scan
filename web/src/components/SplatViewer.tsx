@@ -359,6 +359,17 @@ function SplatScene({
   // Mesh object loaded for the "mesh" view-mode. Lazy-attached when
   // the user first switches to the mode (or remounts on URL change).
   const meshRef = useRef<THREE.Object3D | null>(null);
+  // Mirror of viewMode in a ref so the mesh-load closure (which
+  // takes the long async path of fetching + parsing a GLB) can
+  // read the LATEST mode at attach-time. Without this, a user
+  // who switches into mesh mode while the load is in flight would
+  // see the closure capture the prior mode and attach the mesh
+  // hidden — until the next mode toggle re-triggers visibility
+  // via the view-mode effect.
+  const viewModeRef = useRef<ViewMode>(viewMode);
+  useEffect(() => {
+    viewModeRef.current = viewMode;
+  }, [viewMode]);
   const monoMaterialRef = useRef<THREE.PointsMaterial | null>(null);
   const coloredMaterialRef = useRef<THREE.PointsMaterial | null>(null);
   const hasVertexColorsRef = useRef(false);
@@ -678,10 +689,12 @@ function SplatScene({
           added = obj;
         }
         if (added && groupAtMount) {
-          // Mesh starts hidden; the view-mode effect above flips
-          // visibility based on the current mode (so loading a
-          // mesh while in splats mode doesn't pop it onscreen).
-          added.visible = viewMode === "mesh";
+          // Read the LATEST viewMode from the ref instead of the
+          // closure-captured value; the user may have switched
+          // modes during the async load. Without this, attaching
+          // a mesh while the user has already moved on stays
+          // hidden until the next mode toggle.
+          added.visible = viewModeRef.current === "mesh";
           groupAtMount.add(added);
           meshRef.current = added;
         }
@@ -700,8 +713,9 @@ function SplatScene({
     };
     // viewMode intentionally excluded — toggling modes shouldn't
     // re-fetch the mesh; visibility-only is handled by the other
-    // effect.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // effect, and the closure above reads viewModeRef for the
+    // initial-attach visibility (so a mode swap during the
+    // async load is honored).
   }, [meshUrl, meshKind]);
 
   // Apply maxStdDev change. SparkRenderer exposes maxStdDev as a
