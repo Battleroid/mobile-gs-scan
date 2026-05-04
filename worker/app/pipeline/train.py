@@ -153,7 +153,7 @@ async def _run_splatfacto(
         )
 
     config = _find_latest_config(train_dir)
-    _write_latest_config_marker(train_dir, config)
+    _write_latest_config_marker(scene_dir, train_dir, config)
     await progress(1.0, "train: done")
     return {"config": str(config) if config else None, "iters": iters}
 
@@ -163,12 +163,18 @@ def _find_latest_config(train_dir: Path) -> Path | None:
     return candidates[-1] if candidates else None
 
 
-def _write_latest_config_marker(train_dir: Path, config: Path | None) -> None:
+def _write_latest_config_marker(
+    scene_dir: Path, train_dir: Path, config: Path | None
+) -> None:
     marker_path = train_dir / LATEST_CONFIG_MARKER
     if config is None:
         marker_path.unlink(missing_ok=True)
         return
-    marker_path.write_text(f"{config}\n")
+    try:
+        config_path = config.relative_to(scene_dir)
+    except ValueError:
+        config_path = config
+    marker_path.write_text(f"{config_path}\n")
 
 
 async def _run_stub(

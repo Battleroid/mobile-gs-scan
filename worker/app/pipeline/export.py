@@ -50,11 +50,12 @@ async def _run_real(
     progress: ProgressCb,
     job_id: str | None,
 ) -> dict:
-    config = _load_latest_config(train_dir)
+    scene_dir = train_dir.parent
+    config = _load_latest_config(scene_dir, train_dir)
     if config is None:
         candidates = sorted(train_dir.rglob("config.yml"))
         config = candidates[-1] if candidates else None
-        _write_latest_config_marker(train_dir, config)
+        _write_latest_config_marker(scene_dir, train_dir, config)
     if config is None:
         raise RuntimeError("no nerfstudio config.yml under train/")
 
@@ -111,7 +112,7 @@ async def _run_real(
     return artifacts
 
 
-def _load_latest_config(train_dir: Path) -> Path | None:
+def _load_latest_config(scene_dir: Path, train_dir: Path) -> Path | None:
     marker_path = train_dir / LATEST_CONFIG_MARKER
     if not marker_path.exists():
         return None
@@ -119,16 +120,22 @@ def _load_latest_config(train_dir: Path) -> Path | None:
     if not raw:
         return None
     marker_value = Path(raw)
-    config = marker_value if marker_value.is_absolute() else train_dir / marker_value
+    config = marker_value if marker_value.is_absolute() else scene_dir / marker_value
     return config if config.exists() else None
 
 
-def _write_latest_config_marker(train_dir: Path, config: Path | None) -> None:
+def _write_latest_config_marker(
+    scene_dir: Path, train_dir: Path, config: Path | None
+) -> None:
     marker_path = train_dir / LATEST_CONFIG_MARKER
     if config is None:
         marker_path.unlink(missing_ok=True)
         return
-    marker_path.write_text(f"{config}\n")
+    try:
+        config_path = config.relative_to(scene_dir)
+    except ValueError:
+        config_path = config
+    marker_path.write_text(f"{config_path}\n")
 
 
 async def _run_stub(
