@@ -387,16 +387,18 @@ async def _run_mesh(*, job: Job, scene: Scene, settings: Settings) -> None:
     pre-dates the job still sees live updates.
     """
     scene_dir = settings.scenes_dir() / scene.id
-    train_dir = scene_dir / "train"
-    if not train_dir.exists():
-        # Bare raise here would skip the scene-status update path
-        # (it lives inside the dispatch_task try/except below) and
-        # leave mesh_status pinned at "queued" — the outer
-        # run_forever handler intentionally skips scene-state for
-        # mesh jobs. Mark failed + emit before we re-raise so the
-        # UI doesn't strand a failed mesh as "queued" for
-        # completed-but-cleaned scenes / legacy rows.
-        msg = "scene has no train/ output to mesh"
+    # Source for the mesh is the splat PLY produced by the export
+    # step — NOT the trained nerfstudio checkpoint. nerfstudio's
+    # `ns-export poisson` doesn't work on splatfacto-trained scenes
+    # (it asserts on a `train_pixel_sampler` that
+    # FullImageDatamanager doesn't have), so we run Open3D Poisson
+    # directly on the gaussian centres in the .ply. Same source the
+    # SplatViewer renders from; the mesh is necessarily a
+    # surface-from-points reconstruction, not a re-rendered
+    # Gaussian model.
+    src_ply = scene.ply_path
+    if not src_ply or not Path(src_ply).exists():
+        msg = "scene has no .ply to mesh; export step hasn't completed yet"
         await store.update_scene(
             scene.id, mesh_status=MeshStatus.failed, mesh_error=msg,
         )
@@ -423,6 +425,7 @@ async def _run_mesh(*, job: Job, scene: Scene, settings: Settings) -> None:
     dispatch_task = asyncio.create_task(
         mesh_step.run_mesh(
             scene_dir=scene_dir,
+            src_ply=Path(src_ply),
             params=params,
             progress=progress,
             job_id=job.id,
