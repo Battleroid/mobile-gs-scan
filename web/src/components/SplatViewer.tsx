@@ -883,7 +883,26 @@ function SelectionGizmo({
     const tc = tcRef.current;
     if (!tc) return;
     if (!targetMesh) return;
-    const onChange = () => repaintHighlight();
+    const m = targetMesh;
+    const onChange = () => {
+      // Sphere is uniformly scaled: per-axis scaling is meaningless
+      // (the recipe collapses to avg / 2 anyway) AND lets a user
+      // drag scale.x past origin, which flips the gizmo arrows
+      // mirror-style mid-drag. Snap the live mesh to a uniform
+      // abs scale on every TC tick so the sphere widget can't
+      // present an inverted arrow visually. Bbox is intentionally
+      // NOT clamped here — non-uniform extents are the whole
+      // point of bbox.
+      if (selection.kind === "sphere") {
+        const avgAbs =
+          (Math.abs(m.scale.x) + Math.abs(m.scale.y) + Math.abs(m.scale.z)) / 3;
+        const d = Math.max(0.001, avgAbs);
+        if (m.scale.x !== d || m.scale.y !== d || m.scale.z !== d) {
+          m.scale.set(d, d, d);
+        }
+      }
+      repaintHighlight();
+    };
     // First pass on mount + every TC change (hover, drag, axis
     // swap). 'change' fires often during a drag — that's what we
     // want for live tracking, and at ~1M points a single pass is
@@ -912,7 +931,13 @@ function SelectionGizmo({
         invalidate();
       }
     };
-  }, [targetMesh, invalidate, highlightApiRef, repaintHighlight]);
+  }, [
+    selection.kind,
+    targetMesh,
+    invalidate,
+    highlightApiRef,
+    repaintHighlight,
+  ]);
 
   const color = selection.kind === "bbox" ? "#ffae42" : "#ff5fa2";
 
