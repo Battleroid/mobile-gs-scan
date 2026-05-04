@@ -22,7 +22,7 @@ plyfile = pytest.importorskip("plyfile")
 pytest.importorskip("scipy")
 pytest.importorskip("sklearn")
 
-from app.pipeline.filter import filter_splat, validate_recipe  # noqa: E402
+from app.pipeline.filter import _apply_op, filter_splat, validate_recipe  # noqa: E402
 
 
 def _build_synthetic_ply(path: Path) -> dict:
@@ -356,3 +356,37 @@ def test_empty_result_raises(synthetic_ply):
                 progress=_noop_progress,
             )
         )
+
+
+def test_apply_op_cache_reuses_and_preserves_masks_for_repeated_ops(synthetic_ply):
+    src, _info, _tmp = synthetic_ply
+    ply = plyfile.PlyData.read(str(src))
+    vertex = ply["vertex"]
+    xyz = np.column_stack([
+        np.asarray(vertex["x"], dtype=np.float32),
+        np.asarray(vertex["y"], dtype=np.float32),
+        np.asarray(vertex["z"], dtype=np.float32),
+    ])
+
+    # Representative recipe with repeated use of cached derived arrays.
+    ops = [
+        {"type": "opacity_threshold", "min": 0.5},
+        {"type": "scale_clamp", "max_scale": 0.5},
+        {"type": "sphere_crop", "center": [0, 0, 0], "radius": 1.5},
+        {"type": "opacity_threshold", "min": 0.7},
+        {"type": "sphere_remove", "center": [0, 0, 0], "radius": 0.1},
+    ]
+
+    keep_no_cache = np.ones(xyz.shape[0], dtype=bool)
+    for op in ops:
+        keep_no_cache &= _apply_op(op, xyz=xyz, vertex=vertex)
+
+    cache: dict[str, np.ndarray] = {}
+    keep_with_cache = np.ones(xyz.shape[0], dtype=bool)
+    for op in ops:
+        keep_with_cache &= _apply_op(op, xyz=xyz, vertex=vertex, cache=cache)
+
+    np.testing.assert_array_equal(keep_with_cache, keep_no_cache)
+    assert "opacity_sigmoid" in cache
+    assert "scale_exp_max" in cache
+    assert "xyz_norm2" in cache
