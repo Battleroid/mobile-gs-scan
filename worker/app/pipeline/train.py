@@ -166,15 +166,27 @@ def _find_latest_config(train_dir: Path) -> Path | None:
 def _write_latest_config_marker(
     scene_dir: Path, train_dir: Path, config: Path | None
 ) -> None:
+    # Best-effort cache. Caller (a successful ns-train run, or an
+    # export's fallback path) has already done the real work; a write
+    # failure here (read-only train_dir, full disk, transient I/O)
+    # would otherwise turn cache bookkeeping into a hard job failure.
+    # Swallow OSError + log; the cache miss path is the same as a
+    # missing marker, so functionally we just skip the speed-up.
     marker_path = train_dir / LATEST_CONFIG_MARKER
-    if config is None:
-        marker_path.unlink(missing_ok=True)
-        return
     try:
-        config_path = config.relative_to(scene_dir)
-    except ValueError:
-        config_path = config
-    marker_path.write_text(f"{config_path}\n")
+        if config is None:
+            marker_path.unlink(missing_ok=True)
+            return
+        try:
+            config_path = config.relative_to(scene_dir)
+        except ValueError:
+            config_path = config
+        marker_path.write_text(f"{config_path}\n")
+    except OSError as exc:
+        log.warning(
+            "could not update %s under %s: %s; skipping marker cache",
+            LATEST_CONFIG_MARKER, train_dir, exc,
+        )
 
 
 async def _run_stub(
