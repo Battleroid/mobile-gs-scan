@@ -170,8 +170,10 @@ def _write_latest_config_marker(
     # export's fallback path) has already done the real work; a write
     # failure here (read-only train_dir, full disk, transient I/O)
     # would otherwise turn cache bookkeeping into a hard job failure.
-    # Swallow OSError + log; the cache miss path is the same as a
-    # missing marker, so functionally we just skip the speed-up.
+    # On write failure we ALSO try to delete any pre-existing marker
+    # so the next export doesn't trust a stale pointer to the prior
+    # run's config — export's _load_latest_config has its own mtime
+    # safety net, but this is the cheaper first line of defense.
     marker_path = train_dir / LATEST_CONFIG_MARKER
     try:
         if config is None:
@@ -187,6 +189,14 @@ def _write_latest_config_marker(
             "could not update %s under %s: %s; skipping marker cache",
             LATEST_CONFIG_MARKER, train_dir, exc,
         )
+        try:
+            marker_path.unlink(missing_ok=True)
+        except OSError:
+            log.warning(
+                "could not remove stale %s either; export will rely on its "
+                "own mtime check",
+                marker_path,
+            )
 
 
 async def _run_stub(

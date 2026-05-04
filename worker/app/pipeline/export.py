@@ -116,12 +116,18 @@ def _load_latest_config(scene_dir: Path, train_dir: Path) -> Path | None:
     """Return the cached `config.yml` path from the marker, if trustworthy.
 
     Treat the marker as a best-effort cache: any failure (missing/empty,
-    unreadable, non-UTF8, malformed, or pointing somewhere we don't fully
-    trust) returns ``None`` so the caller falls back to ``rglob``. The
-    accepted target must be an existing file named ``config.yml`` that
-    lives under ``train_dir`` — this prevents a stale absolute path (e.g.
-    after a scene was copied/moved) from silently loading another scene's
-    config and bypassing local discovery.
+    unreadable, non-UTF8, malformed, pointing somewhere we don't fully
+    trust, OR demonstrably stale) returns ``None`` so the caller falls
+    back to ``rglob``. The accepted target must be:
+      - an existing file named ``config.yml``,
+      - resolved under ``train_dir`` (no cross-scene paths after a
+        copy/move),
+      - at least as recent as every other ``config.yml`` under
+        ``train_dir`` (stale-marker safety net — train.py's marker
+        write is best-effort, so a successful re-train followed by a
+        swallowed marker-write OSError leaves the previous marker
+        pointing at outdated weights; without this check, export
+        would silently use the older checkpoint).
     """
     marker_path = train_dir / LATEST_CONFIG_MARKER
     try:
@@ -142,6 +148,24 @@ def _load_latest_config(scene_dir: Path, train_dir: Path) -> Path | None:
     if resolved.name != "config.yml":
         return None
     if not resolved.is_relative_to(train_root):
+        return None
+    # Stale-marker check: verify the marker target's mtime isn't older
+    # than any sibling config.yml under train_dir. Costs one rglob walk
+    # plus a stat per result — sub-ms even on a deep train tree, far
+    # cheaper than silently exporting from outdated weights. If the
+    # marker IS stale, returning None forces _run_real to fall back to
+    # rglob (which sorts by name and picks the lexically-last entry,
+    # matching the previous behavior for the common case where
+    # nerfstudio appends a timestamped subdir per run).
+    try:
+        marker_mtime = resolved.stat().st_mtime
+        for other in train_dir.rglob("config.yml"):
+            try:
+                if other.stat().st_mtime > marker_mtime:
+                    return None
+            except OSError:
+                continue
+    except OSError:
         return None
     return config
 
