@@ -18,8 +18,11 @@ Pipeline:
   1. Load the splat PLY into an Open3D PointCloud (xyz + optional
      normals + optional colours from the SH DC band).
   2. Subsample / outlier-prune.
-  3. Estimate normals if the PLY didn't carry them, or use the
-     existing normals when ``normal_method == 'model_output'``.
+  3. Estimate normals via PCA on the local k-NN. (An older
+     ``normal_method='model_output'`` option that trusted the PLY's
+     own nx/ny/nz was removed — splatfacto exports those as zero,
+     so trusting them silently degraded Poisson. The runner now
+     coerces any legacy persisted value back to ``open3d``.)
   4. ``create_from_point_cloud_poisson(depth=…)`` for the surface.
   5. Density-prune low-confidence triangles (default: drop the
      bottom 1%) so the mesh isn't smeared out into the empty
@@ -61,11 +64,11 @@ DEFAULT_PARAMS: dict = {
     # Splatfacto's gaussians sometimes drift outside the subject;
     # outlier removal stops them from polluting the surface.
     "remove_outliers": True,
-    # Normal estimation. ``open3d`` runs PCA on each point's
-    # k-nearest neighbours; ``model_output`` reuses normals already
-    # written into the PLY by splatfacto (if present). Fallback to
-    # PCA when model_output is asked but no nx/ny/nz attribute
-    # exists.
+    # Normal estimation method. Only ``open3d`` (PCA on each
+    # point's k-nearest neighbours) is supported end-to-end; the
+    # old ``model_output`` value was removed because splatfacto's
+    # PLY normals are zero. _run_poisson coerces any legacy
+    # persisted value back to "open3d" before this branch is read.
     "normal_method": "open3d",
     # Whether to crop input to a tight bounding box derived from
     # the point cloud's robust 1st/99th percentile range. Helps

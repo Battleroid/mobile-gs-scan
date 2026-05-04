@@ -3,9 +3,12 @@
 // "new tab" pop-out button so the user can blow up a splat to a
 // dedicated browser tab without the rest of the studio chrome.
 //
-// Reads ``url`` (required) and ``pointsUrl`` (optional) from query
-// params; both are absolute, fully-qualified API URLs that the
-// embedding caller already resolved via ``api.base() + ...``.
+// Reads ``url`` (required) plus ``pointsUrl`` / ``meshGlbUrl`` /
+// ``meshObjUrl`` (all optional) from query params; every value is
+// an absolute, fully-qualified API URL the embedding caller
+// already resolved via ``api.base() + ...``. The mesh URLs let
+// pop-out preserve the 4th view-mode (mesh) option from the
+// originating embed.
 import { Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import dynamic from "next/dynamic";
@@ -27,6 +30,8 @@ function ViewerInner() {
   const params = useSearchParams();
   const url = params.get("url");
   const pointsUrl = params.get("pointsUrl") ?? undefined;
+  const meshGlbUrl = params.get("meshGlbUrl") ?? undefined;
+  const meshObjUrl = params.get("meshObjUrl") ?? undefined;
 
   if (!url) {
     return (
@@ -40,6 +45,8 @@ function ViewerInner() {
     <SplatViewer
       url={url}
       pointsUrl={pointsUrl}
+      meshGlbUrl={meshGlbUrl}
+      meshObjUrl={meshObjUrl}
       fillScreen
     />
   );

@@ -94,7 +94,7 @@ class EditStatus(str, enum.Enum):
 class MeshStatus(str, enum.Enum):
     none = "none"           # no mesh has been extracted
     queued = "queued"       # mesh job enqueued, worker hasn't picked up yet
-    running = "running"     # worker is running ns-export poisson
+    running = "running"     # worker is running open3d poisson
     completed = "completed" # mesh artifacts are on disk and downloadable
     failed = "failed"       # last extraction attempt failed; see mesh_error
 

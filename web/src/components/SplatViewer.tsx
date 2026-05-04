@@ -196,8 +196,14 @@ export function SplatViewer({
   const onPopOut = useCallback(() => {
     const params = new URLSearchParams({ url });
     if (pointsUrl) params.set("pointsUrl", pointsUrl);
+    // Forward mesh artefact URLs so the popped-out /viewer can
+    // also enter mesh mode. Without these the embed loses the 4th
+    // view-mode option entirely after pop-out, even when the
+    // scene has a finished mesh.
+    if (meshGlbUrl) params.set("meshGlbUrl", meshGlbUrl);
+    if (meshObjUrl) params.set("meshObjUrl", meshObjUrl);
     window.open(`/viewer?${params.toString()}`, "_blank", "noopener");
-  }, [url, pointsUrl]);
+  }, [url, pointsUrl, meshGlbUrl, meshObjUrl]);
 
   // Mesh URL is required for the mesh mode to be meaningful — skip
   // the mode in the cycle when no mesh has been extracted yet so
@@ -312,7 +318,7 @@ export function SplatViewer({
           type="button"
           onClick={cycleViewMode}
           className="text-left hover:text-accent"
-          title="cycle view: splats → points → colored points"
+          title="cycle view: splats → points → colored points → mesh (when extracted)"
         >
           view: {VIEW_MODE_LABELS[viewMode]}
         </button>
