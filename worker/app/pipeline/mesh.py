@@ -38,6 +38,7 @@ Output:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 import time
@@ -131,12 +132,6 @@ async def _run_poisson(
     progress: ProgressCb,
     job_id: str | None,
 ) -> dict:
-    # Heavy imports lazy-loaded so this module imports cleanly on
-    # CI's lightweight worker (no torch / open3d), same pattern as
-    # the filter pipeline.
-    import numpy as np
-    import open3d as o3d
-
     # Per-job staging dir + atomic swap on success. Same pattern as
     # the filter step — old mesh stays addressable until the new
     # one is fully written, and a crash mid-run can't half-overwrite
@@ -161,93 +156,72 @@ async def _run_poisson(
         f"params={params}"
     )
 
+    # Each stage runs in a worker thread so the heartbeat task on
+    # the event loop can observe a cancellation between stages and
+    # SIGKILL / cancel us. Open3D's Poisson is one big native call
+    # that we can't preempt mid-flight, but the awaits between
+    # stages give cancel-and-replace a chance to land at every
+    # boundary. Without to_thread, the entire reconstruction would
+    # block the loop and ignore cancel requests until the very end.
+    target = int(params.get("num_points", DEFAULT_PARAMS["num_points"]))
+    depth = int(params.get("depth", DEFAULT_PARAMS["depth"]))
+    density_quantile = float(
+        params.get("density_quantile", DEFAULT_PARAMS["density_quantile"])
+    )
+
     try:
         await progress(0.05, "load splat ply")
-        pc = _load_pointcloud(src_ply, params, _log)
+        pc = await asyncio.to_thread(_load_pointcloud, src_ply, params, _log)
         n0 = len(pc.points)
         _log(f"loaded {n0} points")
 
         if params.get("remove_outliers", True):
             await progress(0.20, "remove outliers")
-            pc, ind = pc.remove_statistical_outlier(
-                nb_neighbors=20, std_ratio=2.0,
-            )
-            _log(
-                f"removed {n0 - len(ind)} outliers "
-                f"({n0} → {len(pc.points)})"
-            )
+            pc, n_kept = await asyncio.to_thread(_remove_outliers, pc)
+            _log(f"removed {n0 - n_kept} outliers ({n0} → {n_kept})")
 
         if params.get("use_bounding_box", False):
             await progress(0.28, "crop bbox")
-            xyz = np.asarray(pc.points)
-            lo = np.percentile(xyz, 1, axis=0)
-            hi = np.percentile(xyz, 99, axis=0)
-            bbox = o3d.geometry.AxisAlignedBoundingBox(lo, hi)
-            pc = pc.crop(bbox)
+            pc = await asyncio.to_thread(_crop_robust_bbox, pc)
             _log(f"cropped to robust bbox: {len(pc.points)} points")
 
-        target = int(params.get("num_points", DEFAULT_PARAMS["num_points"]))
         if len(pc.points) > target:
             await progress(0.35, f"subsample {target} points")
-            ratio = target / len(pc.points)
-            pc = pc.random_down_sample(ratio)
+            pc = await asyncio.to_thread(_subsample, pc, target)
             _log(f"subsampled to {len(pc.points)} points")
 
-        if not pc.has_normals() or params.get("normal_method") == "open3d":
+        normal_method = params.get("normal_method")
+        if not pc.has_normals() or normal_method == "open3d":
             await progress(0.5, "estimate normals")
-            pc.estimate_normals(
-                search_param=o3d.geometry.KDTreeSearchParamHybrid(
-                    radius=0.1, max_nn=30,
-                ),
-            )
-            try:
-                pc.orient_normals_consistent_tangent_plane(k=20)
-            except Exception as exc:  # noqa: BLE001
-                _log(f"normal orientation skipped: {exc}")
+            await asyncio.to_thread(_estimate_normals, pc, _log)
         else:
-            _log("using model_output normals from PLY")
+            _log("using normals already on the PLY")
 
         await progress(0.65, "poisson reconstruction")
-        depth = int(params.get("depth", DEFAULT_PARAMS["depth"]))
-        mesh, densities = (
-            o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-                pc, depth=depth,
-            )
-        )
+        mesh, densities = await asyncio.to_thread(_poisson_reconstruct, pc, depth)
         _log(
             f"poisson @ depth={depth}: "
             f"{len(mesh.vertices)} verts, {len(mesh.triangles)} tris"
         )
 
-        density_quantile = float(
-            params.get("density_quantile", DEFAULT_PARAMS["density_quantile"])
-        )
         if density_quantile > 0:
             await progress(0.85, "prune low-density verts")
-            densities_np = np.asarray(densities)
-            threshold = np.quantile(densities_np, density_quantile)
-            keep_mask = densities_np >= threshold
-            mesh.remove_vertices_by_mask(np.logical_not(keep_mask))
+            kept = await asyncio.to_thread(
+                _density_prune, mesh, densities, density_quantile,
+            )
             _log(
                 f"density prune @ q={density_quantile}: "
-                f"kept {int(keep_mask.sum())}/{len(keep_mask)} verts"
+                f"kept {kept[0]}/{kept[1]} verts"
             )
 
         await progress(0.92, "write obj")
         staged_obj = staging_dir / "scene.obj"
-        # write_ascii=True keeps the OBJ readable; binary OBJ isn't
-        # standard. write_triangle_uvs has no UVs from poisson so
-        # leave it default.
-        o3d.io.write_triangle_mesh(
-            str(staged_obj),
-            mesh,
-            write_ascii=True,
-        )
+        await asyncio.to_thread(_write_obj, mesh, staged_obj)
         _log(f"wrote {staged_obj.name}")
 
         await progress(0.96, "write glb")
         staged_glb = staging_dir / "scene.glb"
-        has_glb = _obj_to_glb(staged_obj, staged_glb)
+        has_glb = await asyncio.to_thread(_obj_to_glb, staged_obj, staged_glb)
         if has_glb:
             _log(f"wrote {staged_glb.name}")
         else:
@@ -282,6 +256,99 @@ async def _run_poisson(
         result["glb"] = str(glb_dst)
     await progress(1.0, "mesh: done")
     return result
+
+
+# ─── sync stage helpers (each invoked via asyncio.to_thread) ────
+#
+# These do the actual CPU work. Keeping them as plain sync
+# functions makes it easy to dispatch them through the executor
+# without coroutine plumbing, AND they're callable from the test
+# suite directly without an event loop.
+
+def _remove_outliers(pc):
+    """Statistical outlier removal pass. Returns (cloud, n_kept)."""
+    pc, ind = pc.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+    return pc, len(ind)
+
+
+def _crop_robust_bbox(pc):
+    """Crop the cloud to its 1st/99th-percentile axis-aligned bbox.
+
+    Robust to a handful of outlier gaussians far from the subject;
+    a min/max bbox would be dominated by them.
+    """
+    import numpy as np
+    import open3d as o3d
+
+    xyz = np.asarray(pc.points)
+    lo = np.percentile(xyz, 1, axis=0)
+    hi = np.percentile(xyz, 99, axis=0)
+    bbox = o3d.geometry.AxisAlignedBoundingBox(lo, hi)
+    return pc.crop(bbox)
+
+
+def _subsample(pc, target_count: int):
+    ratio = target_count / len(pc.points)
+    return pc.random_down_sample(ratio)
+
+
+def _estimate_normals(pc, _log) -> None:
+    """PCA-based normal estimation + tangent-plane consistency pass.
+
+    The orientation pass occasionally fails on disjoint clouds; we
+    log + skip rather than crash since Poisson can still
+    reconstruct from un-oriented normals (they get sign-flipped on
+    the fly).
+    """
+    import open3d as o3d
+
+    pc.estimate_normals(
+        search_param=o3d.geometry.KDTreeSearchParamHybrid(
+            radius=0.1, max_nn=30,
+        ),
+    )
+    try:
+        pc.orient_normals_consistent_tangent_plane(k=20)
+    except Exception as exc:  # noqa: BLE001
+        _log(f"normal orientation skipped: {exc}")
+
+
+def _poisson_reconstruct(pc, depth: int):
+    """Run Open3D's screened-Poisson reconstruction.
+
+    This is the single longest-running call in the pipeline (10s
+    to a few minutes depending on point count + depth). It's a
+    native C++ entrypoint so it doesn't release the GIL meaningfully
+    — running it inside asyncio.to_thread is what keeps the worker
+    event loop responsive to heartbeats / cancellations. Cancel
+    landing mid-call still has to wait for this to finish though;
+    finer granularity would need to fork a subprocess.
+    """
+    import open3d as o3d
+
+    return o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+        pc, depth=depth,
+    )
+
+
+def _density_prune(mesh, densities, quantile: float) -> tuple[int, int]:
+    """Drop triangles whose vertex density is below the quantile
+    threshold. Returns (kept, total) for the log line."""
+    import numpy as np
+
+    densities_np = np.asarray(densities)
+    threshold = np.quantile(densities_np, quantile)
+    keep_mask = densities_np >= threshold
+    mesh.remove_vertices_by_mask(np.logical_not(keep_mask))
+    return int(keep_mask.sum()), int(len(keep_mask))
+
+
+def _write_obj(mesh, dst: Path) -> None:
+    """ASCII OBJ — readable, standards-compliant. Poisson output
+    has no UVs so the writer skips that stage."""
+    import open3d as o3d
+
+    o3d.io.write_triangle_mesh(str(dst), mesh, write_ascii=True)
 
 
 def _load_pointcloud(src_ply: Path, params: dict, _log):
