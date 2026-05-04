@@ -79,7 +79,7 @@ class JobKind(str, enum.Enum):
     sfm = "sfm"
     train = "train"
     export = "export"
-    mesh = "mesh"  # PR #2; always no-op in PR #1
+    mesh = "mesh"  # On-demand Poisson mesh extraction (Phase 3).
     filter = "filter"  # user-triggered post-processing of an existing splat
 
 
@@ -89,6 +89,14 @@ class EditStatus(str, enum.Enum):
     running = "running"     # worker is applying the recipe
     completed = "completed" # edit artifacts are on disk and downloadable
     failed = "failed"       # last apply attempt failed; see edit_error
+
+
+class MeshStatus(str, enum.Enum):
+    none = "none"           # no mesh has been extracted
+    queued = "queued"       # mesh job enqueued, worker hasn't picked up yet
+    running = "running"     # worker is running ns-export poisson
+    completed = "completed" # mesh artifacts are on disk and downloadable
+    failed = "failed"       # last extraction attempt failed; see mesh_error
 
 
 class Capture(Base):
@@ -157,6 +165,20 @@ class Scene(Base):
         Enum(EditStatus, native_enum=False), default=EditStatus.none, nullable=False,
     )
     edit_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Mesh artifacts written by the on-demand mesh job. The reconstruction
+    # source is the trained Gaussian-splatting checkpoint (ns-export
+    # poisson), so it doesn't depend on the edit pipeline; mesh and
+    # edit are independent siblings of the original splat.
+    mesh_obj_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    mesh_glb_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    mesh_status: Mapped[MeshStatus] = mapped_column(
+        Enum(MeshStatus, native_enum=False), default=MeshStatus.none, nullable=False,
+    )
+    mesh_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # User-tunable mesh extraction params, persisted so a re-run uses
+    # the same settings unless the user overrides them.
+    mesh_params: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

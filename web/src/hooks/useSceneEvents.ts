@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { wsUrl } from "@/lib/api";
-import type { EditStatus, Scene, ServerEvent } from "@/lib/types";
+import type { Scene, ServerEvent } from "@/lib/types";
 
 export interface EditResult {
   kept: number;
@@ -24,6 +24,8 @@ export function useSceneEvents(sceneId: string | null): {
   editProgress: { progress: number; message: string | null } | null;
   /** Result of the most recently completed filter (kept/total). */
   lastEditResult: EditResult | null;
+  /** Same shape as editProgress, for the mesh job. */
+  meshProgress: { progress: number; message: string | null } | null;
 } {
   const [scene, setScene] = useState<Scene | null>(null);
   const [lastEvent, setLastEvent] = useState<ServerEvent | null>(null);
@@ -32,6 +34,10 @@ export function useSceneEvents(sceneId: string | null): {
     message: string | null;
   } | null>(null);
   const [lastEditResult, setLastEditResult] = useState<EditResult | null>(null);
+  const [meshProgress, setMeshProgress] = useState<{
+    progress: number;
+    message: string | null;
+  } | null>(null);
 
   // Monotonic counter for refreshScene roundtrips. The hook fires an
   // out-of-band re-fetch on both scene.edit_queued and scene.edited
@@ -111,6 +117,15 @@ export function useSceneEvents(sceneId: string | null): {
                 : s,
             );
             setEditProgress(null);
+            // Same WS-subscription-gap reason as scene.mesh_failed:
+            // job.failed never reaches the client because the
+            // filter job's topic was created after the WS opened.
+            // Refresh so the pipeline list / JobLogPanel reflect
+            // the failure without a manual reload.
+            const gen = ++refreshGen.current;
+            void refreshScene(sceneId).then((next) => {
+              if (next && gen === refreshGen.current) setScene(next);
+            });
           } else if (evt.kind === "scene.edited") {
             // Rather than splicing in just the new urls here, re-fetch
             // the full Scene so the edited_ply_url / edited_spz_url
@@ -128,20 +143,79 @@ export function useSceneEvents(sceneId: string | null): {
               if (next && gen === refreshGen.current) setScene(next);
             });
           } else if (evt.kind === "scene.edit_cleared") {
+            // Same trade-off as scene.mesh_cleared: cancel paths
+            // emit this event without deleting the prior recipe /
+            // edited artefacts (only DELETE /edit does that).
+            // Re-fetch instead of clobbering URLs locally so a
+            // canceled re-apply doesn't drop a still-valid edit
+            // from the UI.
+            setEditProgress(null);
+            setLastEditResult(null);
+            const gen = ++refreshGen.current;
+            void refreshScene(sceneId).then((next) => {
+              if (next && gen === refreshGen.current) setScene(next);
+            });
+          } else if (evt.kind === "scene.mesh_queued") {
+            setScene((s) => (s ? { ...s, mesh_status: "queued" } : s));
+            setMeshProgress({ progress: 0, message: "queued" });
+            // Same rationale as scene.edit_queued: mesh job arrived
+            // after the WS opened so the snapshot's jobs list +
+            // per-job WS subscription don't include it. Re-fetch
+            // pulls the row in.
+            const gen = ++refreshGen.current;
+            void refreshScene(sceneId).then((next) => {
+              if (next && gen === refreshGen.current) setScene(next);
+            });
+          } else if (evt.kind === "scene.mesh_running") {
+            setScene((s) => (s ? { ...s, mesh_status: "running" } : s));
+          } else if (evt.kind === "scene.mesh_progress") {
+            setMeshProgress({
+              progress: (evt.data.progress as number) ?? 0,
+              message: (evt.data.message as string | null) ?? null,
+            });
+          } else if (evt.kind === "scene.mesh_failed") {
             setScene((s) =>
               s
                 ? {
                     ...s,
-                    edit_status: "none" as EditStatus,
-                    edit_recipe: null,
-                    edit_error: null,
-                    edited_ply_url: null,
-                    edited_spz_url: null,
+                    mesh_status: "failed",
+                    mesh_error: (evt.data.error as string | null) ?? null,
                   }
                 : s,
             );
-            setEditProgress(null);
-            setLastEditResult(null);
+            setMeshProgress(null);
+            // Mesh jobs queued after the scene WS opened don't have
+            // a per-job topic subscription, so a job.failed event
+            // never reaches us; the row in scene.jobs stays at
+            // "queued" until a manual reload. Re-fetch the snapshot
+            // so the pipeline list (and its JobLogPanel) reflect
+            // the failure. Same pattern as scene.meshed.
+            const gen = ++refreshGen.current;
+            void refreshScene(sceneId).then((next) => {
+              if (next && gen === refreshGen.current) setScene(next);
+            });
+          } else if (evt.kind === "scene.meshed") {
+            setMeshProgress({ progress: 1, message: "done" });
+            setScene((s) => (s ? { ...s, mesh_status: "completed" } : s));
+            const gen = ++refreshGen.current;
+            void refreshScene(sceneId).then((next) => {
+              if (next && gen === refreshGen.current) setScene(next);
+            });
+          } else if (evt.kind === "scene.mesh_cleared") {
+            // Don't naively null mesh_*_url in local state: cancel
+            // paths emit scene.mesh_cleared *without* deleting the
+            // prior mesh artefacts from disk (only DELETE /mesh
+            // does that). Re-fetch the canonical snapshot — if the
+            // server nulled the paths (discard) the fetch returns
+            // them as null; if the artefacts are still on disk
+            // (cancel of a re-extract over an existing mesh) the
+            // fetch returns them, and a still-valid mesh stays
+            // visible.
+            setMeshProgress(null);
+            const gen = ++refreshGen.current;
+            void refreshScene(sceneId).then((next) => {
+              if (next && gen === refreshGen.current) setScene(next);
+            });
           }
         }
       } catch {
@@ -151,7 +225,7 @@ export function useSceneEvents(sceneId: string | null): {
     return () => ws.close();
   }, [sceneId]);
 
-  return { scene, lastEvent, editProgress, lastEditResult };
+  return { scene, lastEvent, editProgress, lastEditResult, meshProgress };
 }
 
 function kindToStatus(kind: string, fallback: Scene["jobs"][number]["status"]) {

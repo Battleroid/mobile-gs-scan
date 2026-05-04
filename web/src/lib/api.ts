@@ -13,7 +13,13 @@
 //      https/Caddy where /api/* is reverse-proxied same-origin.
 //   4. Server-side rendering: localhost:8000 fallback so the build
 //      doesn't crash.
-import type { Capture, CaptureSource, EditRecipe, Scene } from "./types";
+import type {
+  Capture,
+  CaptureSource,
+  EditRecipe,
+  MeshParams,
+  Scene,
+} from "./types";
 
 function apiBase(): string {
   const baked = process.env.NEXT_PUBLIC_API_BASE;
@@ -120,6 +126,15 @@ export const api = {
     }),
   clearSceneEdit: (sceneId: string) =>
     jsonReq<Scene>(`/api/scenes/${sceneId}/edit`, { method: "DELETE" }),
+  // Kick off Poisson mesh extraction. Idempotent: re-posting cancels
+  // any in-flight mesh job and starts a new run with the new params.
+  triggerSceneMesh: (sceneId: string, params?: MeshParams) =>
+    jsonReq<Scene>(`/api/scenes/${sceneId}/mesh`, {
+      method: "POST",
+      body: JSON.stringify({ params: params ?? null }),
+    }),
+  clearSceneMesh: (sceneId: string) =>
+    jsonReq<Scene>(`/api/scenes/${sceneId}/mesh`, { method: "DELETE" }),
 };
 
 export function wsUrl(path: string): string {

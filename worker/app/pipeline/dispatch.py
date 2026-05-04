@@ -73,10 +73,12 @@ async def enqueue_pipeline(
     )
     job_ids.append(export.id)
 
-    # Always enqueue mesh — runner short-circuits in PR #1.
-    mesh = await store.enqueue_job(scene_id, JobKind.mesh, payload={"deferred": True})
-    job_ids.append(mesh.id)
-
+    # Mesh extraction is on-demand (Phase 3) — user triggers it from
+    # the scene page once the splat is viewable. The auto-enqueue
+    # used to land here as a no-op stub, but it churned the pipeline
+    # list with a perpetually-completed "mesh" row that wasn't
+    # meaningful to the user. The api endpoint enqueues a real job
+    # when asked.
     return job_ids
 
 

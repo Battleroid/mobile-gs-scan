@@ -31,6 +31,7 @@ from app.jobs.schema import (
     Job,
     JobKind,
     JobStatus,
+    MeshStatus,
     Scene,
 )
 from app.pipeline import _running
@@ -102,11 +103,12 @@ async def run_forever(settings: Settings | None = None) -> None:
                     error=f"{exc}\n{tb}",
                 )
                 await events.publish_job(job.id, "job.failed", error=str(exc))
-                # Filter is post-processing on an already-completed
-                # scene; a failed recipe should NOT demote the scene
-                # / capture back to ``failed``. _run_filter has
-                # already updated edit_status + edit_error.
-                if job.kind == JobKind.filter:
+                # Filter / mesh are post-processing on an already-
+                # completed scene; a failure in either should NOT
+                # demote the scene / capture back to ``failed``.
+                # The respective _run_filter / _run_mesh helpers
+                # have already updated edit_/mesh_status + error.
+                if job.kind in (JobKind.filter, JobKind.mesh):
                     continue
                 scene = await store.get_scene(job.scene_id)
                 if scene:
@@ -166,6 +168,14 @@ async def _run_one(job: Job, settings: Settings) -> None:
         # scene; we don't churn the scene/capture status. Edit
         # progress lives on the dedicated edit_status column.
         await _run_filter(job=job, scene=scene, settings=settings)
+        return
+
+    if job.kind == JobKind.mesh:
+        # Mesh extraction is on-demand and runs against the trained
+        # checkpoint, not the live pipeline. Same independent-status
+        # treatment as filter so a failed mesh doesn't demote the
+        # scene back to ``failed``.
+        await _run_mesh(job=job, scene=scene, settings=settings)
         return
 
     await store.update_scene(scene.id, status=CaptureStatus.processing)
@@ -365,13 +375,125 @@ async def _dispatch(
             progress=progress,
             job_id=job.id,
         )
-    if job.kind == JobKind.mesh:
-        return await mesh_step.run_mesh(
-            scene_dir=scene_dir,
-            deferred=bool(job.payload.get("deferred", True)),
-            progress=progress,
-        )
     raise RuntimeError(f"no handler for {job.kind}")
+
+
+async def _run_mesh(*, job: Job, scene: Scene, settings: Settings) -> None:
+    """Run on-demand Poisson mesh extraction.
+
+    Mirrors `_run_filter` in spirit: independent status column
+    (``mesh_status``), failures don't demote the scene, progress is
+    mirrored on the scene topic so a web client whose snapshot
+    pre-dates the job still sees live updates.
+    """
+    scene_dir = settings.scenes_dir() / scene.id
+    train_dir = scene_dir / "train"
+    if not train_dir.exists():
+        # Bare raise here would skip the scene-status update path
+        # (it lives inside the dispatch_task try/except below) and
+        # leave mesh_status pinned at "queued" — the outer
+        # run_forever handler intentionally skips scene-state for
+        # mesh jobs. Mark failed + emit before we re-raise so the
+        # UI doesn't strand a failed mesh as "queued" for
+        # completed-but-cleaned scenes / legacy rows.
+        msg = "scene has no train/ output to mesh"
+        await store.update_scene(
+            scene.id, mesh_status=MeshStatus.failed, mesh_error=msg,
+        )
+        await events.publish_scene(scene.id, "scene.mesh_failed", error=msg)
+        raise RuntimeError(msg)
+
+    params = scene.mesh_params or {}
+
+    await store.update_scene(scene.id, mesh_status=MeshStatus.running, mesh_error=None)
+    await events.publish_scene(scene.id, "scene.mesh_running")
+
+    async def progress(pct: float, msg: str) -> None:
+        await store.update_job(
+            job.id, progress=pct, progress_msg=msg, heartbeat=True
+        )
+        await events.publish_job(job.id, "job.progress", progress=pct, message=msg)
+        # Same scene-topic mirror as _run_filter — mesh is enqueued
+        # mid-session so the per-job WS subscription set up at
+        # snapshot time can't carry its events.
+        await events.publish_scene(
+            scene.id, "scene.mesh_progress", progress=pct, message=msg,
+        )
+
+    dispatch_task = asyncio.create_task(
+        mesh_step.run_mesh(
+            scene_dir=scene_dir,
+            params=params,
+            progress=progress,
+            job_id=job.id,
+        )
+    )
+    hb_task = asyncio.create_task(_heartbeat(job.id, dispatch_task))
+    try:
+        try:
+            result = await dispatch_task
+        finally:
+            hb_task.cancel()
+    except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001
+        if await _ack_user_cancel(job):
+            # Only clear mesh_status if it's still "running". If a
+            # replacement POST /mesh has raced ahead and flipped it
+            # to "queued", clobbering back to "none" would hide that
+            # a fresh extraction is pending — re-fetch to catch the
+            # race rather than blindly writing.
+            refreshed = await store.get_scene(scene.id)
+            if refreshed and refreshed.mesh_status == MeshStatus.running:
+                await store.update_scene(scene.id, mesh_status=MeshStatus.none)
+                # Emit a scene event so the web client's mesh UI
+                # picks up the reset without a manual reload — the
+                # status flip alone isn't enough since the WS only
+                # carries scene.* events for state transitions.
+                await events.publish_scene(scene.id, "scene.mesh_cleared")
+            return
+        msg = f"{exc}"
+        await store.update_scene(
+            scene.id, mesh_status=MeshStatus.failed, mesh_error=msg,
+        )
+        await events.publish_scene(scene.id, "scene.mesh_failed", error=msg)
+        raise
+
+    refreshed = await store.get_job(job.id)
+    if refreshed is not None and refreshed.status == JobStatus.canceled:
+        log.info(
+            "mesh %s finished but DB row is canceled; skipping commit",
+            job.id,
+        )
+        await store.update_job(job.id, completed=True)
+        await events.publish_job(job.id, "job.canceled")
+        # If the cancel came from POST /api/jobs/{id}/cancel (which
+        # only flips the job row), mesh_status is still "running"
+        # and would never resolve. Reset to "none" — but only if a
+        # replacement POST /mesh hasn't already moved status forward
+        # to "queued" (same race-window as the cancel-on-error
+        # branch above).
+        scene_now = await store.get_scene(scene.id)
+        if scene_now and scene_now.mesh_status == MeshStatus.running:
+            await store.update_scene(scene.id, mesh_status=MeshStatus.none)
+            await events.publish_scene(scene.id, "scene.mesh_cleared")
+        return
+
+    await store.update_scene(
+        scene.id,
+        mesh_obj_path=str(result.get("obj")) if result.get("obj") else None,
+        mesh_glb_path=str(result.get("glb")) if result.get("glb") else None,
+        mesh_status=MeshStatus.completed,
+        mesh_error=None,
+    )
+    await store.update_job(
+        job.id,
+        status=JobStatus.completed,
+        progress=1.0,
+        progress_msg="done",
+        completed=True,
+        result=result,
+    )
+    await events.publish_job(job.id, "job.completed", result=result)
+    await events.publish_scene(scene.id, "scene.meshed", obj=result.get("obj"))
 
 
 async def _heartbeat(job_id: str, dispatch_task: asyncio.Task) -> None:

@@ -26,6 +26,7 @@ RUN python -m pip install --extra-index-url https://download.pytorch.org/whl/cu1
         open3d==0.18.0 \
         plyfile==1.1 \
         rich==13.9.4 \
+        trimesh==4.5.3 \
         tyro==0.9.5 \
         viser==0.2.7 \
         nerfstudio==1.1.5 \
