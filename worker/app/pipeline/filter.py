@@ -309,11 +309,12 @@ def _apply_op(
         from sklearn.cluster import DBSCAN
         eps = float(op.get("eps", 0.05))
         min_samples = int(op.get("min_samples", 30))
-        raw_approximate = op.get("approximate", False)
-        if isinstance(raw_approximate, str):
-            approximate = raw_approximate.strip().lower() in {"1", "true", "yes", "on"}
-        else:
-            approximate = bool(raw_approximate)
+        # Strict bool check: any non-True value (including the string
+        # "false", which a loosely-typed client might send and which
+        # validate_recipe doesn't reject) leaves us in deterministic
+        # mode. Approximate down-samples and changes clustering output,
+        # so we only opt in when the recipe explicitly says ``true``.
+        approximate = op.get("approximate", False) is True
         n = xyz.shape[0]
         if n <= DBSCAN_INPUT_CAP:
             if op_log is not None:
