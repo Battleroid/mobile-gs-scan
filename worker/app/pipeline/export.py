@@ -75,10 +75,9 @@ async def _run_real(
             _running.register(job_id, proc)
         try:
             log_path = export_dir / "export.log"
-            log_path.unlink(missing_ok=True)
             tail = bytearray()
-            if proc.stdout:
-                with log_path.open("ab") as log_f:
+            with log_path.open("wb") as log_f:
+                if proc.stdout:
                     while True:
                         chunk = await proc.stdout.read(8192)
                         if not chunk:
