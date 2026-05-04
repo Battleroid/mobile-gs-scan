@@ -127,6 +127,7 @@ async def filter_splat(
 
     keep = np.ones(n_total, dtype=bool)
     ops = recipe.get("ops", [])
+    op_cache: dict[str, Any] = {}
 
     await progress(0.15, f"applying {len(ops)} op(s)")
     for i, op in enumerate(ops):
@@ -135,7 +136,7 @@ async def filter_splat(
         before = int(keep.sum())
         op_start = time.monotonic()
         try:
-            mask = _apply_op(op, xyz=xyz, vertex=vertex)
+            mask = _apply_op(op, xyz=xyz, vertex=vertex, cache=op_cache)
         except Exception as exc:
             _log(f"op[{i}] {kind} FAILED: {exc}")
             raise RuntimeError(f"op {kind!r} failed: {exc}") from exc
@@ -184,26 +185,34 @@ async def filter_splat(
     return result
 
 
-def _apply_op(op: dict, *, xyz, vertex) -> Any:
+def _apply_op(op: dict, *, xyz, vertex, cache: dict[str, Any] | None = None) -> Any:
     """Dispatch a single op to its mask-builder. Returns a np.ndarray
     of dtype=bool, length n_vertices."""
     import numpy as np
 
     kind = op["type"]
+    if cache is None:
+        cache = {}
     if kind == "opacity_threshold":
         # splatfacto stores opacity as raw logits; activation = sigmoid.
-        opacity = np.asarray(vertex["opacity"], dtype=np.float32)
-        sig = 1.0 / (1.0 + np.exp(-opacity))
+        sig = cache.get("opacity_sigmoid")
+        if sig is None:
+            opacity = np.asarray(vertex["opacity"], dtype=np.float32)
+            sig = 1.0 / (1.0 + np.exp(-opacity))
+            cache["opacity_sigmoid"] = sig
         return sig > float(op.get("min", 0.0))
 
     if kind == "scale_clamp":
         # Scales are stored as log-scales, exponent gives metres.
-        s = np.column_stack([
-            np.asarray(vertex["scale_0"], dtype=np.float32),
-            np.asarray(vertex["scale_1"], dtype=np.float32),
-            np.asarray(vertex["scale_2"], dtype=np.float32),
-        ])
-        max_axis = np.exp(s).max(axis=1)
+        max_axis = cache.get("scale_exp_max")
+        if max_axis is None:
+            s = np.column_stack([
+                np.asarray(vertex["scale_0"], dtype=np.float32),
+                np.asarray(vertex["scale_1"], dtype=np.float32),
+                np.asarray(vertex["scale_2"], dtype=np.float32),
+            ])
+            max_axis = np.exp(s).max(axis=1)
+            cache["scale_exp_max"] = max_axis
         return max_axis < float(op.get("max_scale", 1.0))
 
     if kind == "bbox_crop":
@@ -214,7 +223,13 @@ def _apply_op(op: dict, *, xyz, vertex) -> Any:
     if kind == "sphere_remove":
         center = np.asarray(op.get("center", [0.0, 0.0, 0.0]), dtype=np.float32)
         radius = float(op.get("radius", 0.0))
-        d2 = ((xyz - center) ** 2).sum(axis=1)
+        if np.all(center == 0.0):
+            d2 = cache.get("xyz_norm2")
+            if d2 is None:
+                d2 = (xyz ** 2).sum(axis=1)
+                cache["xyz_norm2"] = d2
+        else:
+            d2 = ((xyz - center) ** 2).sum(axis=1)
         # Keep points OUTSIDE the sphere (the sphere defines what to nuke).
         return d2 > (radius * radius)
 
@@ -225,7 +240,13 @@ def _apply_op(op: dict, *, xyz, vertex) -> Any:
         # select the region you want to retain.
         center = np.asarray(op.get("center", [0.0, 0.0, 0.0]), dtype=np.float32)
         radius = float(op.get("radius", 0.0))
-        d2 = ((xyz - center) ** 2).sum(axis=1)
+        if np.all(center == 0.0):
+            d2 = cache.get("xyz_norm2")
+            if d2 is None:
+                d2 = (xyz ** 2).sum(axis=1)
+                cache["xyz_norm2"] = d2
+        else:
+            d2 = ((xyz - center) ** 2).sum(axis=1)
         return d2 <= (radius * radius)
 
     if kind == "sor":
