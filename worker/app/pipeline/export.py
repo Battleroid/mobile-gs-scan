@@ -113,15 +113,37 @@ async def _run_real(
 
 
 def _load_latest_config(scene_dir: Path, train_dir: Path) -> Path | None:
+    """Return the cached `config.yml` path from the marker, if trustworthy.
+
+    Treat the marker as a best-effort cache: any failure (missing/empty,
+    unreadable, non-UTF8, malformed, or pointing somewhere we don't fully
+    trust) returns ``None`` so the caller falls back to ``rglob``. The
+    accepted target must be an existing file named ``config.yml`` that
+    lives under ``train_dir`` — this prevents a stale absolute path (e.g.
+    after a scene was copied/moved) from silently loading another scene's
+    config and bypassing local discovery.
+    """
     marker_path = train_dir / LATEST_CONFIG_MARKER
-    if not marker_path.exists():
+    try:
+        raw = marker_path.read_text().strip()
+    except (OSError, UnicodeDecodeError, ValueError):
         return None
-    raw = marker_path.read_text().strip()
     if not raw:
         return None
     marker_value = Path(raw)
     config = marker_value if marker_value.is_absolute() else scene_dir / marker_value
-    return config if config.exists() else None
+    try:
+        resolved = config.resolve()
+        train_root = train_dir.resolve()
+    except OSError:
+        return None
+    if not resolved.is_file():
+        return None
+    if resolved.name != "config.yml":
+        return None
+    if not resolved.is_relative_to(train_root):
+        return None
+    return config
 
 
 def _write_latest_config_marker(
