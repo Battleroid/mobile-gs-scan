@@ -606,11 +606,22 @@ async def _run_thumbnail(*, job: Job, scene: Scene, settings: Settings) -> None:
             hb_task.cancel()
     except asyncio.CancelledError:
         if await _ack_user_cancel(job):
+            # Cancel-ack still has to run finalize. Thumbnail is
+            # enqueued after export so the export-time finalize
+            # call already saw thumbnail as non-terminal and bailed;
+            # without this re-check the scene gets stuck at
+            # ``processing`` forever after a thumbnail cancel. The
+            # ack flips the row to canceled (or removes it for the
+            # capture-delete path), both of which count as
+            # terminal in ``_maybe_finalize_scene``.
+            await _maybe_finalize_scene(scene)
             return
         # Genuine outer-task shutdown — propagate.
         raise
     except Exception as exc:  # noqa: BLE001
         if await _ack_user_cancel(job):
+            # Same finalize guarantee as the CancelledError branch.
+            await _maybe_finalize_scene(scene)
             return
         # Render error / ns-render crash / cosmetic failure of any
         # kind. Log it for triage but mark the job completed with

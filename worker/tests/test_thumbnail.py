@@ -22,8 +22,8 @@ from pathlib import Path
 import pytest
 
 from app.config import Settings
-from app.jobs import store
-from app.jobs.schema import CaptureSource, JobKind
+from app.jobs import runner, store
+from app.jobs.schema import CaptureSource, CaptureStatus, JobKind, JobStatus
 from app.pipeline import thumbnail as thumbnail_step
 
 
@@ -228,6 +228,83 @@ def test_render_camera_path_json_round_trips():
     kf = parsed["camera_path"][0]
     assert kf["camera_to_world"] == cam
     assert kf["fov"] == thumbnail_step.DEFAULT_FOV_DEG
+
+
+def test_run_thumbnail_cancel_finalizes_scene(
+    isolated_store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Thumbnail is the last enqueued step, so the export-time
+    ``_maybe_finalize_scene`` call sees thumbnail still queued and
+    bails. If a thumbnail job then gets canceled, the cancel-ack
+    branch in ``_run_thumbnail`` MUST itself call
+    ``_maybe_finalize_scene`` — otherwise the scene stays stuck at
+    ``processing`` forever.
+
+    Regression for the codex P1 on PR #82 that flagged this.
+    """
+    async def go():
+        cap = await store.create_capture(name="cancel-finalize", source="upload")
+        scene = await store.create_scene(cap.id)
+        assert scene is not None
+
+        # Bring the scene + capture to a state where every other
+        # job is already terminal — extract / sfm / train / export
+        # all completed. Thumbnail is the only outstanding work.
+        for kind in (JobKind.extract, JobKind.sfm, JobKind.train, JobKind.export):
+            j = await store.enqueue_job(scene.id, kind, payload={})
+            assert j is not None
+            await store.update_job(
+                j.id, status=JobStatus.completed, completed=True,
+            )
+        thumb_job = await store.enqueue_job(scene.id, JobKind.thumbnail, payload={})
+        assert thumb_job is not None
+        await store.update_job(thumb_job.id, status=JobStatus.running)
+
+        # Pre-condition: scene is still ``queued`` (initial state)
+        # because the thumbnail job is non-terminal.
+        scene_before = await store.get_scene(scene.id)
+        assert scene_before is not None
+        assert scene_before.status != CaptureStatus.completed
+
+        # Now flip the thumbnail row to canceled (the user-cancel
+        # path) and stub thumbnail_step.run_thumbnail to raise
+        # CancelledError — same shape as the heartbeat-driven kill
+        # actually triggers in production.
+        await store.cancel_job(thumb_job.id)
+
+        async def fake_run(*args, **kwargs):
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(thumbnail_step, "run_thumbnail", fake_run)
+
+        # Re-fetch the live job + scene (the runner takes them as
+        # snapshots; we mirror that).
+        live_job = await store.get_job(thumb_job.id)
+        assert live_job is not None
+        live_scene = await store.get_scene(scene.id)
+        assert live_scene is not None
+
+        settings = Settings(
+            data_dir=tmp_path,
+            db_filename="test_thumbnail.sqlite",
+        )
+        await runner._run_thumbnail(
+            job=live_job, scene=live_scene, settings=settings,
+        )
+
+        # Post-condition: scene flipped to completed because the
+        # thumbnail's cancel ack triggers _maybe_finalize_scene.
+        scene_after = await store.get_scene(scene.id)
+        assert scene_after is not None
+        assert scene_after.status == CaptureStatus.completed, (
+            f"scene must finalize on thumbnail cancel; got "
+            f"{scene_after.status.value}"
+        )
+        cap_after = await store.get_capture(cap.id)
+        assert cap_after is not None
+        assert cap_after.status == CaptureStatus.completed
+
+    _run(go())
 
 
 # ─── helpers ───────────────────────────────────────────────
