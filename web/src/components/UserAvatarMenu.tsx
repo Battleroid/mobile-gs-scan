@@ -1,5 +1,6 @@
 "use client";
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
 /**
@@ -20,6 +21,25 @@ export function UserAvatarMenu({
 }) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement | null>(null);
+  const pathname = usePathname();
+  const [prevPath, setPrevPath] = useState(pathname);
+
+  // The header lives in the root layout and stays mounted across
+  // App Router navigations, so without this the dropdown would
+  // remain open on the destination page after the user clicks
+  // Account or Sign out. Reacting to pathname (rather than the link's
+  // onClick) also covers browser back/forward, cmd-click → soft-nav,
+  // and any future programmatic navigation.
+  //
+  // The setState-during-render shape (rather than useEffect) is the
+  // React docs' "Resetting state when a prop changes" recipe — React
+  // skips the open=true render and re-runs the component immediately
+  // with open=false, so the destination page never paints with the
+  // menu still showing.
+  if (prevPath !== pathname) {
+    setPrevPath(pathname);
+    setOpen(false);
+  }
 
   useEffect(() => {
     if (!open) return;
