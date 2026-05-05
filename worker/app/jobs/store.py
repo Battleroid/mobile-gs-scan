@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator
 
-from sqlalchemy import and_, delete, or_, select, update
+from sqlalchemy import and_, delete, or_, select, text, update
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -263,13 +263,46 @@ async def set_capture_name(capture_id: str, name: str) -> None:
 # ─── scenes ──────────────────────────────────────
 
 
-async def create_scene(capture_id: str) -> Scene:
-    scene = Scene(id=_make_id(), capture_id=capture_id, status=CaptureStatus.queued)
+async def create_scene(capture_id: str) -> Scene | None:
+    """Create a Scene row for ``capture_id``. Returns None if the
+    capture doesn't exist (the caller treats that as 404 / race-loss).
+
+    The parent-capture existence check and the INSERT happen in one
+    ``INSERT ... SELECT ... WHERE EXISTS`` statement so a concurrent
+    ``delete_capture`` can't slip the parent row away between the
+    check and the insert. Without this guard, a finalize() call that
+    passed its initial ``get_capture`` check could race past a
+    ``delete_capture`` commit and INSERT a Scene with a now-dangling
+    ``capture_id`` — which would then enqueue jobs that the worker
+    later picks up and fails on with ``capture vanished``.
+
+    SQLite's write-lock serialization handles the timing: either
+    this INSERT acquires the write lock first (rowcount=1, scene
+    created cleanly) or delete_capture's first DELETE wins
+    (rowcount=0, no orphan, return None).
+    """
+    scene_id = _make_id()
+    now = _utcnow()
     async with session() as s:
-        s.add(scene)
+        result = await s.execute(
+            text(
+                """
+                INSERT INTO scenes (
+                    id, capture_id, status,
+                    edit_status, mesh_status, created_at
+                )
+                SELECT
+                    :sid, :cid, 'queued',
+                    'none', 'none', :now
+                WHERE EXISTS (SELECT 1 FROM captures WHERE id = :cid)
+                """
+            ),
+            {"sid": scene_id, "cid": capture_id, "now": now},
+        )
         await s.commit()
-        await s.refresh(scene)
-    return scene
+        if result.rowcount == 0:
+            return None
+        return await s.get(Scene, scene_id)
 
 
 async def get_scene(scene_id: str) -> Scene | None:

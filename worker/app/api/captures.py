@@ -155,7 +155,15 @@ async def finalize_capture(capture_id: str, body: FinalizeBody) -> dict:
     if existing:
         return {"scene_id": existing.id}
 
+    # ``create_scene`` is atomic: it returns None if the capture row
+    # disappeared between our ``get_capture`` above and the INSERT.
+    # Concretely, that's the case where a concurrent
+    # ``DELETE /api/captures/{id}`` committed first; finalize is the
+    # loser of the race and must surface a 404 rather than press on
+    # to enqueue jobs against a deleted capture.
     scene = await store.create_scene(cap.id)
+    if scene is None:
+        raise HTTPException(404, "capture deleted before finalize completed")
     await store.set_capture_status(cap.id, CaptureStatus.queued)
     await enqueue_pipeline(scene.id, has_pose=cap.has_pose, source=cap.source)
     await events.publish_capture(cap.id, "capture.finalized", scene_id=scene.id)

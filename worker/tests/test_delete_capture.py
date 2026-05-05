@@ -295,3 +295,45 @@ def test_heartbeat_kills_subprocess_when_status_canceled(
             dispatch_task.cancel()
 
     _run(go())
+
+
+def test_create_scene_returns_none_when_capture_gone(isolated_store):
+    """If finalize() races past delete_capture's commit, create_scene
+    must return None instead of inserting an orphan scene with a
+    dangling capture_id. The atomic INSERT...SELECT...WHERE EXISTS
+    inside ``create_scene`` is what makes this safe — without it,
+    finalize would silently enqueue jobs against a deleted capture
+    and the worker would later fail with ``capture vanished``.
+
+    Regression for the codex P1 #4 on PR #81.
+    """
+    async def go():
+        cap = await store.create_capture(name="ghost", source="upload")
+        # Delete first — simulates delete_capture having committed.
+        assert await store.delete_capture(cap.id) is True
+
+        # finalize would now reach create_scene with a stale id.
+        scene = await store.create_scene(cap.id)
+        assert scene is None, (
+            "create_scene must refuse to insert when the parent "
+            "capture is gone — the INSERT...WHERE EXISTS guard is "
+            "what prevents orphan scene rows + their cascading "
+            "ghost jobs."
+        )
+
+    _run(go())
+
+
+def test_create_scene_returns_scene_for_existing_capture(isolated_store):
+    """The happy path stays unchanged after the WHERE EXISTS guard:
+    a normal finalize() against a live capture still gets a Scene
+    row back.
+    """
+    async def go():
+        cap = await store.create_capture(name="alive", source="upload")
+        scene = await store.create_scene(cap.id)
+        assert scene is not None
+        assert scene.capture_id == cap.id
+        assert scene.status == CaptureStatus.queued
+
+    _run(go())
