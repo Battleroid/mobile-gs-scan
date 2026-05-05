@@ -16,12 +16,13 @@ stores naive UTC; every comparison stays naive↔naive.
 """
 from __future__ import annotations
 
+import json
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator
 
-from sqlalchemy import and_, delete, or_, select, update
+from sqlalchemy import and_, delete, or_, select, text, update
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -201,6 +202,49 @@ async def set_capture_status(
         await s.commit()
 
 
+async def delete_capture(capture_id: str) -> bool:
+    """Hard-delete a capture row + its scenes + the scenes' jobs.
+
+    The schema's ``ondelete="CASCADE"`` declarations are no-ops on
+    SQLite without a per-connection ``PRAGMA foreign_keys=ON``; we
+    keep FK enforcement off (turning it on globally has historically
+    surfaced latent FK issues elsewhere in the pipeline) and cascade
+    manually. Returns True if the row existed and was removed;
+    False if no capture had this id (caller can decide whether
+    that's a 404 or an idempotent no-op).
+
+    Concurrency: cascades run as bulk DELETE statements (no SELECT-
+    then-iterate) so each WHERE clause sees the live state at the
+    moment that statement runs, not a snapshot. SQLite's first
+    write in a session also acquires the database-level write lock,
+    so a concurrent ``finalize_capture`` trying to ``create_scene``
+    for this capture id blocks behind us until commit. That closes
+    the race window where a finalize landing between a SELECT-
+    scenes and DELETE-capture would leave an orphan scene pointing
+    at a deleted capture.
+    """
+    async with session() as s:
+        # Delete jobs whose scene belongs to this capture. Subselect
+        # by capture_id (not by a precomputed scene id list) so any
+        # scene a concurrent finalize() raced in is also cleaned up —
+        # same shape as the next two deletes.
+        await s.execute(
+            delete(Job).where(
+                Job.scene_id.in_(
+                    select(Scene.id).where(Scene.capture_id == capture_id)
+                )
+            )
+        )
+        await s.execute(
+            delete(Scene).where(Scene.capture_id == capture_id)
+        )
+        result = await s.execute(
+            delete(Capture).where(Capture.id == capture_id)
+        )
+        await s.commit()
+        return result.rowcount > 0
+
+
 async def set_capture_name(capture_id: str, name: str) -> None:
     """Update the user-facing name on a capture row.
 
@@ -220,13 +264,46 @@ async def set_capture_name(capture_id: str, name: str) -> None:
 # ─── scenes ──────────────────────────────────────
 
 
-async def create_scene(capture_id: str) -> Scene:
-    scene = Scene(id=_make_id(), capture_id=capture_id, status=CaptureStatus.queued)
+async def create_scene(capture_id: str) -> Scene | None:
+    """Create a Scene row for ``capture_id``. Returns None if the
+    capture doesn't exist (the caller treats that as 404 / race-loss).
+
+    The parent-capture existence check and the INSERT happen in one
+    ``INSERT ... SELECT ... WHERE EXISTS`` statement so a concurrent
+    ``delete_capture`` can't slip the parent row away between the
+    check and the insert. Without this guard, a finalize() call that
+    passed its initial ``get_capture`` check could race past a
+    ``delete_capture`` commit and INSERT a Scene with a now-dangling
+    ``capture_id`` — which would then enqueue jobs that the worker
+    later picks up and fails on with ``capture vanished``.
+
+    SQLite's write-lock serialization handles the timing: either
+    this INSERT acquires the write lock first (rowcount=1, scene
+    created cleanly) or delete_capture's first DELETE wins
+    (rowcount=0, no orphan, return None).
+    """
+    scene_id = _make_id()
+    now = _utcnow()
     async with session() as s:
-        s.add(scene)
+        result = await s.execute(
+            text(
+                """
+                INSERT INTO scenes (
+                    id, capture_id, status,
+                    edit_status, mesh_status, created_at
+                )
+                SELECT
+                    :sid, :cid, 'queued',
+                    'none', 'none', :now
+                WHERE EXISTS (SELECT 1 FROM captures WHERE id = :cid)
+                """
+            ),
+            {"sid": scene_id, "cid": capture_id, "now": now},
+        )
         await s.commit()
-        await s.refresh(scene)
-    return scene
+        if result.rowcount == 0:
+            return None
+        return await s.get(Scene, scene_id)
 
 
 async def get_scene(scene_id: str) -> Scene | None:
@@ -253,18 +330,53 @@ async def update_scene(scene_id: str, **fields) -> None:
 # ─── jobs ────────────────────────────────────────
 
 
-async def enqueue_job(scene_id: str, kind: JobKind, payload: dict | None = None) -> Job:
-    job = Job(
-        id=_make_id(),
-        scene_id=scene_id,
-        kind=kind,
-        payload=payload or {},
-    )
+async def enqueue_job(
+    scene_id: str, kind: JobKind, payload: dict | None = None
+) -> Job | None:
+    """Enqueue a job for a scene. Returns None if the scene doesn't
+    exist (caller treats as race-loss and surfaces a 404 / bails the
+    pipeline).
+
+    Atomic via ``INSERT ... SELECT ... WHERE EXISTS`` so a concurrent
+    ``delete_capture`` cascading the scene away can't race past
+    ``finalize`` between ``create_scene`` and ``enqueue_pipeline``.
+    Without this guard we'd insert orphan jobs that workers later
+    fail with ``scene vanished``.
+
+    Same SQLite single-writer-lock semantics as ``create_scene``:
+    either we win the race against ``delete_capture``'s scene/job
+    cascade (rowcount=1, job returned) or delete wins (rowcount=0,
+    no orphan, return None).
+    """
+    job_id = _make_id()
+    now = _utcnow()
+    payload_json = json.dumps(payload or {})
     async with session() as s:
-        s.add(job)
+        result = await s.execute(
+            text(
+                """
+                INSERT INTO jobs (
+                    id, scene_id, kind, status, progress,
+                    payload, result, created_at, updated_at
+                )
+                SELECT
+                    :jid, :sid, :kind, 'queued', 0.0,
+                    :payload, '{}', :now, :now
+                WHERE EXISTS (SELECT 1 FROM scenes WHERE id = :sid)
+                """
+            ),
+            {
+                "jid": job_id,
+                "sid": scene_id,
+                "kind": kind.value,
+                "payload": payload_json,
+                "now": now,
+            },
+        )
         await s.commit()
-        await s.refresh(job)
-    return job
+        if result.rowcount == 0:
+            return None
+        return await s.get(Job, job_id)
 
 
 async def list_jobs_for_scene(scene_id: str) -> list[Job]:

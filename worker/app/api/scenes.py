@@ -227,6 +227,10 @@ async def upsert_edit(scene_id: str, body: EditRequest) -> SceneView:
         edit_error=None,
     )
     job = await store.enqueue_job(scene.id, JobKind.filter, payload={})
+    if job is None:
+        # Scene was deleted out from under us between get_scene
+        # and the enqueue. Surface 404 rather than silently no-op.
+        raise HTTPException(404, "scene was deleted")
     # Just the bare event — the client only uses scene.edit_queued
     # to flip its local edit_status and re-fetch the snapshot, so
     # broadcasting the recipe (which can be MB-scale once
@@ -406,6 +410,8 @@ async def trigger_mesh(scene_id: str, body: MeshRequest | None = None) -> SceneV
         mesh_error=None,
     )
     job = await store.enqueue_job(scene.id, JobKind.mesh, payload={})
+    if job is None:
+        raise HTTPException(404, "scene was deleted")
     await events.publish_scene(scene.id, "scene.mesh_queued", job_id=job.id)
 
     refreshed = await store.get_scene(scene.id)
