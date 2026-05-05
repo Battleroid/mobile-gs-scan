@@ -1,30 +1,31 @@
 """Decide which jobs to enqueue when a capture is finalized.
 
-Mobile native (has_pose=True) → SfM step writes a COLMAP-shaped
-  workspace from the phone's poses.jsonl (backend=arcore_native);
-  no real Glomap / COLMAP run.
-Mobile web / drag-drop (has_pose=False) → real SfM via
-  settings.sfm_backend (glomap by default, colmap as fallback).
+The pipeline shape today is: extract → sfm → train → export. The
+front of the pipeline branches on input shape:
 
-We always enqueue the SfM job (modulo settings.sfm_backend=='none')
-so every downstream step can rely on `scene_dir/sfm/` existing.
-Previously the has_pose=True branch skipped SfM entirely — but
-nothing else in the pipeline produced the COLMAP workspace train
-then needs, so train would crash on a missing directory. Routing
-has_pose through the SfM job with a different backend is the
-narrowest fix that keeps the dispatch shape (sfm → train → export
-→ mesh) consistent across both paths.
+  * Image-set upload — ``capture_dir/frames/`` is already populated
+    by the api ``/upload`` route. ``extract`` enqueues but is a
+    no-op (it sees no source video and returns immediately).
+  * Video upload — ``capture_dir/source/<file>`` carries the raw
+    video; ``extract`` runs ffmpeg → frames at the user's chosen
+    fps + jpeg quality, then SfM picks up from there.
+  * Trusted-pose capture (``has_pose=True``) — SfM uses the
+    ``arcore_native`` backend to lift ``poses.jsonl`` into a
+    nerfstudio workspace without running real glomap/colmap.
+  * Untrusted-pose capture — real SfM via ``settings.sfm_backend``
+    (glomap default, colmap fallback).
+
+We always enqueue extract + sfm so downstream steps can rely on
+the scene_dir/sfm/ shape regardless of input kind.
 
 Per-capture training-iter override: the train job's iters payload
-is taken from ``capture.meta['train_iters']`` if the capture’s
-meta dict carries an integer there — the Android Settings preset
-(Low / Standard / High) sends this when creating a phone-driven
-capture. Falls back to ``settings.train_iters`` (server-wide env
-``GS_TRAIN_ITERS``) when meta doesn't carry an override.
+is taken from ``capture.meta['train_iters']`` when the capture's
+meta dict carries a positive int there. The web upload form and
+the Android client both populate this. Falls back to
+``settings.train_iters`` (env ``GS_TRAIN_ITERS``) otherwise.
 
-PR #1 always enqueues a `mesh` job too, but worker-gs treats it as
-a no-op so the pipeline still completes. PR #2 fills it in with the
-2DGS + TSDF + Poisson path.
+Mesh extraction is on-demand (post-export, user-triggered) — see
+the api ``/api/scenes/{id}/mesh`` endpoint, not enqueued here.
 """
 from __future__ import annotations
 
@@ -45,6 +46,12 @@ async def enqueue_pipeline(
 ) -> list[str]:
     settings = get_settings()
     job_ids: list[str] = []
+
+    extract_payload = await _build_extract_payload(scene_id)
+    extract = await store.enqueue_job(
+        scene_id, JobKind.extract, payload=extract_payload,
+    )
+    job_ids.append(extract.id)
 
     backend: str | None
     if has_pose:
@@ -73,13 +80,30 @@ async def enqueue_pipeline(
     )
     job_ids.append(export.id)
 
-    # Mesh extraction is on-demand (Phase 3) — user triggers it from
-    # the scene page once the splat is viewable. The auto-enqueue
-    # used to land here as a no-op stub, but it churned the pipeline
-    # list with a perpetually-completed "mesh" row that wasn't
-    # meaningful to the user. The api endpoint enqueues a real job
-    # when asked.
     return job_ids
+
+
+async def _build_extract_payload(scene_id: str) -> dict:
+    """Pull the user-supplied extract knobs out of capture.meta.
+
+    Both fields are optional. The extract step has its own defaults
+    + clamps; we just shuttle the meta values through so the worker
+    job payload is self-contained (no extra DB read at runtime).
+    """
+    payload: dict = {}
+    scene = await store.get_scene(scene_id)
+    if scene is None:
+        return payload
+    cap = await store.get_capture(scene.capture_id)
+    if cap is None or not isinstance(cap.meta, dict):
+        return payload
+    fps = cap.meta.get("extract_fps")
+    if isinstance(fps, (int, float)) and fps > 0:
+        payload["extract_fps"] = float(fps)
+    q = cap.meta.get("jpeg_quality")
+    if isinstance(q, int) and 1 <= q <= 100:
+        payload["jpeg_quality"] = q
+    return payload
 
 
 async def _resolve_train_iters(scene_id: str, fallback: int) -> int:

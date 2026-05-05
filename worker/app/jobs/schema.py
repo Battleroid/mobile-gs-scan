@@ -2,9 +2,9 @@
 
 Single SQLite db at $DATA_DIR/studio.sqlite. Three tables:
 
-  captures   one per phone session or drag-drop set.
+  captures   one per drag-drop / video upload set.
   scenes     one per finalized capture, owns the gsplat artifacts.
-  jobs       sfm / train / export / mesh steps a worker claims.
+  jobs       extract / sfm / train / export / mesh steps a worker claims.
 
 Events (the in-memory pub/sub for live progress) are *not* persisted;
 they're only useful to clients connected at the moment a step runs.
@@ -50,8 +50,6 @@ class Base(DeclarativeBase):
 
 class CaptureStatus(str, enum.Enum):
     created = "created"          # session row exists, nothing else
-    pairing = "pairing"          # phone has not connected yet, token live
-    streaming = "streaming"      # phone WS connected, frames coming in
     uploading = "uploading"      # drag-drop / video upload in progress
     queued = "queued"            # finalize done, waiting for worker
     processing = "processing"    # at least one job has started
@@ -61,9 +59,10 @@ class CaptureStatus(str, enum.Enum):
 
 
 class CaptureSource(str, enum.Enum):
-    mobile_native = "mobile_native"  # Android app via WS
-    mobile_web = "mobile_web"        # PWA via WS
-    upload = "upload"                # drag-drop image/video
+    # Single value today; kept as a one-value enum (rather than a
+    # bool / dropped column) so future capture sources (Android-app
+    # direct, drone-set, …) can land without a column-shape change.
+    upload = "upload"
 
 
 class JobStatus(str, enum.Enum):
@@ -76,6 +75,7 @@ class JobStatus(str, enum.Enum):
 
 
 class JobKind(str, enum.Enum):
+    extract = "extract"  # ffmpeg video → frames; no-op for image-set uploads
     sfm = "sfm"
     train = "train"
     export = "export"
@@ -108,15 +108,12 @@ class Capture(Base):
         Enum(CaptureStatus, native_enum=False), default=CaptureStatus.created
     )
     source: Mapped[CaptureSource] = mapped_column(
-        Enum(CaptureSource, native_enum=False), nullable=False
+        Enum(CaptureSource, native_enum=False),
+        default=CaptureSource.upload,
+        nullable=False,
     )
 
-    # Random opaque token the phone presents to claim the WS. Cleared
-    # after the WS connects so it's a strict one-shot.
-    pair_token: Mapped[str | None] = mapped_column(String, nullable=True)
-    pair_token_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-
-    # Tracked while frames are streaming.
+    # Tracked while frames are uploaded / extracted from a video.
     frame_count: Mapped[int] = mapped_column(Integer, default=0)
     dropped_count: Mapped[int] = mapped_column(Integer, default=0)
     has_pose: Mapped[bool] = mapped_column(default=False)
@@ -167,9 +164,9 @@ class Scene(Base):
     edit_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Mesh artifacts written by the on-demand mesh job. The reconstruction
-    # source is the trained Gaussian-splatting checkpoint (ns-export
-    # poisson), so it doesn't depend on the edit pipeline; mesh and
-    # edit are independent siblings of the original splat.
+    # source is the trained Gaussian-splatting .ply (Open3D Poisson),
+    # so it doesn't depend on the edit pipeline; mesh and edit are
+    # independent siblings of the original splat.
     mesh_obj_path: Mapped[str | None] = mapped_column(String, nullable=True)
     mesh_glb_path: Mapped[str | None] = mapped_column(String, nullable=True)
     mesh_status: Mapped[MeshStatus] = mapped_column(
@@ -227,4 +224,3 @@ class Job(Base):
 Index("ix_jobs_status_kind", Job.status, Job.kind)
 Index("ix_jobs_scene", Job.scene_id)
 Index("ix_captures_status", Capture.status)
-Index("ix_captures_pair_token", Capture.pair_token)

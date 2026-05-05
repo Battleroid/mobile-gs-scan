@@ -16,7 +16,6 @@ stores naive UTC; every comparison stays naive↔naive.
 """
 from __future__ import annotations
 
-import secrets
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -48,10 +47,6 @@ _sessionmaker: async_sessionmaker[AsyncSession] | None = None
 
 def _make_id() -> str:
     return uuid.uuid4().hex[:16]
-
-
-def _make_token() -> str:
-    return secrets.token_urlsafe(24)
 
 
 def _utcnow() -> datetime:
@@ -104,6 +99,18 @@ async def _apply_lightweight_migrations(conn) -> None:
         "ALTER TABLE scenes ADD COLUMN mesh_status VARCHAR DEFAULT 'none' NOT NULL",
         "ALTER TABLE scenes ADD COLUMN mesh_error TEXT",
         "ALTER TABLE scenes ADD COLUMN mesh_params JSON",
+        # One-shot post-pairing-removal repair: rows that were stuck
+        # in pairing/streaming when the WS endpoint was retired
+        # would otherwise fail to decode their status enum on read.
+        # Flip them to canceled so the row stays addressable. Safe
+        # to leave in indefinitely (idempotent no-op once no such
+        # rows exist).
+        "UPDATE captures SET status='canceled' "
+        "WHERE status IN ('pairing','streaming')",
+        # mobile_native / mobile_web are no longer valid sources;
+        # collapse legacy rows to 'upload' for the same reason.
+        "UPDATE captures SET source='upload' "
+        "WHERE source IN ('mobile_native','mobile_web')",
     ]
     for stmt in statements:
         try:
@@ -136,23 +143,15 @@ async def session() -> AsyncIterator[AsyncSession]:
 async def create_capture(
     *,
     name: str,
-    source: CaptureSource,
+    source: CaptureSource = CaptureSource.upload,
     has_pose: bool = False,
     meta: dict | None = None,
-    settings: Settings | None = None,
 ) -> Capture:
-    settings = settings or get_settings()
     cap = Capture(
         id=_make_id(),
         name=name,
         source=source,
-        status=CaptureStatus.pairing if source != CaptureSource.upload else CaptureStatus.created,
-        pair_token=_make_token() if source != CaptureSource.upload else None,
-        pair_token_expires_at=(
-            _utcnow() + timedelta(seconds=settings.pair_token_ttl_seconds)
-            if source != CaptureSource.upload
-            else None
-        ),
+        status=CaptureStatus.created,
         has_pose=has_pose,
         meta=meta or {},
     )
@@ -174,33 +173,6 @@ async def list_captures(limit: int = 100) -> list[Capture]:
 async def get_capture(capture_id: str) -> Capture | None:
     async with session() as s:
         return await s.get(Capture, capture_id)
-
-
-async def get_capture_by_pair_token(token: str) -> Capture | None:
-    async with session() as s:
-        rows = await s.execute(
-            select(Capture).where(Capture.pair_token == token).limit(1)
-        )
-        return rows.scalar_one_or_none()
-
-
-async def claim_pair_token(token: str) -> Capture | None:
-    """Atomically consume a pair token + flip the capture into streaming."""
-    async with session() as s:
-        rows = await s.execute(
-            select(Capture).where(Capture.pair_token == token).limit(1)
-        )
-        cap = rows.scalar_one_or_none()
-        if cap is None:
-            return None
-        if cap.pair_token_expires_at and cap.pair_token_expires_at < _utcnow():
-            return None
-        cap.pair_token = None
-        cap.pair_token_expires_at = None
-        cap.status = CaptureStatus.streaming
-        await s.commit()
-        await s.refresh(cap)
-        return cap
 
 
 async def bump_capture_frames(capture_id: str, *, accepted: int, dropped: int) -> None:

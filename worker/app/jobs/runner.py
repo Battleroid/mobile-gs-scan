@@ -36,6 +36,7 @@ from app.jobs.schema import (
 )
 from app.pipeline import _running
 from app.pipeline import export as export_step
+from app.pipeline import extract as extract_step
 from app.pipeline import filter as filter_step
 from app.pipeline import mesh as mesh_step
 from app.pipeline import sfm as sfm_step
@@ -59,6 +60,7 @@ async def run_forever(settings: Settings | None = None) -> None:
 
     kinds_for_class: dict[str, list[JobKind]] = {
         "gs": [
+            JobKind.extract,
             JobKind.sfm,
             JobKind.train,
             JobKind.export,
@@ -229,6 +231,20 @@ async def _run_one(job: Job, settings: Settings) -> None:
                 spz_path=spz,
             )
 
+    if job.kind == JobKind.extract:
+        # Video uploads write the source file to ``source/`` and
+        # leave ``frame_count`` at 0; ffmpeg only produces the JPEGs
+        # later, here. Bump the capture row now so the API + UI
+        # surface a real frame count for video captures (image-set
+        # captures already had it bumped at upload time and the
+        # extract step is a no-op for them — guarded by the
+        # presence of ``frames`` in the result dict).
+        n_frames = result.get("frames")
+        if isinstance(n_frames, int) and n_frames > 0:
+            await store.bump_capture_frames(
+                capture.id, accepted=n_frames, dropped=0,
+            )
+
     # Always check scene finalization after a successful job. The
     # previous "only after export" path was wrong: dispatch order is
     # sfm → train → export → mesh, so when export completes the mesh
@@ -354,6 +370,13 @@ async def _dispatch(
     scene_dir: Path,
     progress,
 ) -> dict:
+    if job.kind == JobKind.extract:
+        return await extract_step.run_extract(
+            capture_dir=capture_dir,
+            params=dict(job.payload or {}),
+            progress=progress,
+            job_id=job.id,
+        )
     if job.kind == JobKind.sfm:
         return await sfm_step.run_sfm(
             capture_dir=capture_dir,

@@ -81,25 +81,112 @@ async def run_sfm(
 
 
 async def _run_glomap(*, sfm_dir: Path, progress: ProgressCb) -> dict:
+    """Real SfM via COLMAP feature pipeline + glomap mapper.
+
+    Glomap's `mapper` operates on a populated COLMAP database. The
+    upstream tool doesn't ship its own feature extractor / matcher;
+    you're expected to run COLMAP's first. The previous version
+    skipped both and called `glomap mapper` against a
+    non-existent ``database.db`` — which surfaces as the unhelpful
+    "`database_path` is not a file" abort.
+
+    The flow:
+      1. ``colmap feature_extractor`` → populates database.db
+         with per-image keypoints + descriptors.
+      2. ``colmap sequential_matcher`` → matches features between
+         images that are close in filename order. Sequential is the
+         right shape for video-extracted frames (and for the typical
+         walk-around-the-object phone capture); for unordered drone
+         / DSLR sets we'd need exhaustive_matcher, deferred until
+         that ingestion path lands.
+      3. ``glomap mapper`` → reconstructs cameras + sparse points
+         into ``sfm_dir/sparse/``.
+
+    All three subprocesses append to ``sfm_dir/glomap.log`` so the
+    JobLogPanel sees a single combined log. Failure at any step
+    raises with the tail of the combined log.
+    """
+    images_dir = sfm_dir / "images"
+    db = sfm_dir / "database.db"
     out = sfm_dir / "sparse"
     out.mkdir(exist_ok=True)
-    cmd = [
-        "glomap", "mapper",
-        "--image_path", str(sfm_dir / "images"),
-        "--database_path", str(sfm_dir / "database.db"),
-        "--output_path", str(out),
-    ]
-    await progress(0.1, "glomap: feature extraction")
-    proc = subprocess.run(cmd, capture_output=True, text=True)
     log_path = sfm_dir / "glomap.log"
-    log_path.write_text(proc.stdout + "\n" + proc.stderr)
+    log_path.write_text("")
+
+    # COLMAP's feature extractor / matcher live in /usr/local/bin
+    # alongside glomap (both built from the same FETCH_COLMAP source
+    # tree in Dockerfile.gs). The system-image's apt colmap is too
+    # old; that's why glomap fetches its own copy.
+    if not shutil.which("colmap"):
+        raise RuntimeError(
+            "colmap binary missing — required by the glomap pipeline. "
+            "rebuild worker-gs (it's built alongside glomap)."
+        )
+
+    await progress(0.10, "glomap: feature extraction")
+    _glomap_step(
+        cmd=[
+            "colmap", "feature_extractor",
+            "--database_path", str(db),
+            "--image_path", str(images_dir),
+            "--ImageReader.single_camera", "1",
+            "--SiftExtraction.use_gpu", "1",
+        ],
+        log_path=log_path,
+        step_name="colmap feature_extractor",
+    )
+
+    await progress(0.35, "glomap: feature matching")
+    _glomap_step(
+        cmd=[
+            "colmap", "sequential_matcher",
+            "--database_path", str(db),
+            # 25-frame overlap window: at typical 5–8 fps phone /
+            # video extraction rates that's ~3-5s of motion, well
+            # within the overlap any reasonable capture motion will
+            # have. Bumping past 25 gets diminishing returns at O(n)
+            # cost-per-extra-window-step.
+            "--SequentialMatching.overlap", "25",
+            "--SiftMatching.use_gpu", "1",
+        ],
+        log_path=log_path,
+        step_name="colmap sequential_matcher",
+    )
+
+    await progress(0.65, "glomap: mapper")
+    _glomap_step(
+        cmd=[
+            "glomap", "mapper",
+            "--image_path", str(images_dir),
+            "--database_path", str(db),
+            "--output_path", str(out),
+        ],
+        log_path=log_path,
+        step_name="glomap mapper",
+    )
+
+    await progress(0.95, "glomap: done")
+    return {"backend": "glomap", "log": str(log_path), "database": str(db)}
+
+
+def _glomap_step(*, cmd: list[str], log_path: Path, step_name: str) -> None:
+    """Run one glomap-pipeline subprocess, appending to the shared log.
+
+    Raises RuntimeError with the log tail on non-zero exit so the
+    caller can surface a single error to the job row regardless of
+    which step bailed.
+    """
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    with log_path.open("a") as f:
+        f.write(f"\n=== {step_name} ===\n")
+        f.write(proc.stdout)
+        f.write("\n")
+        f.write(proc.stderr)
     if proc.returncode != 0:
         tail = tail_text(proc.stdout + "\n" + proc.stderr)
         raise RuntimeError(
-            format_subprocess_error("glomap", proc.returncode, log_path, tail)
+            format_subprocess_error(step_name, proc.returncode, log_path, tail)
         )
-    await progress(0.95, "glomap: done")
-    return {"backend": "glomap", "log": str(log_path)}
 
 
 async def _run_colmap(*, sfm_dir: Path, progress: ProgressCb) -> dict:

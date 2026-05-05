@@ -24,17 +24,16 @@ class Settings(BaseSettings):
 
     capture_max_frames: int = Field(default=2000, validation_alias="GS_CAPTURE_MAX_FRAMES")
     capture_jpeg_quality: int = Field(default=85, validation_alias="GS_CAPTURE_JPEG_QUALITY")
-    pair_token_ttl_seconds: int = Field(default=600, validation_alias="GS_PAIR_TOKEN_TTL_SECONDS")
 
     train_iters: int = Field(default=15000, validation_alias="GS_TRAIN_ITERS")
     sfm_backend: str = Field(default="glomap", validation_alias="GS_SFM_BACKEND")
 
     # Splatfacto's FullImagesDataManager auto-falls-back to ``cpu``
-    # for datasets > ~500 images to avoid OOM. On a 24GB+ GPU
-    # (e.g. an RTX 4090) we have plenty of headroom for typical
-    # phone captures, so default to forcing ``gpu`` and let the
-    # user flip to ``cpu`` via env if their card is smaller. The
-    # value passes through to the ns-train command as
+    # for datasets > ~500 images to avoid OOM. On a 24 GB+ GPU we
+    # have plenty of headroom for typical phone captures, so we
+    # default to forcing ``gpu``. Operators on smaller cards
+    # (12–16 GB) should set ``GS_TRAIN_CACHE_IMAGES=cpu`` in env.
+    # The value passes through to the ns-train command as
     # ``--pipeline.datamanager.cache-images <value>``.
     train_cache_images: str = Field(
         default="gpu", validation_alias="GS_TRAIN_CACHE_IMAGES"

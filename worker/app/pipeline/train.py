@@ -84,9 +84,9 @@ async def _run_splatfacto(
         # operator configured). Default in nerfstudio is ``gpu`` but
         # FullImagesDataManager auto-falls-back to ``cpu`` for
         # datasets > ~500 images, which costs a chunk of step time
-        # to slow CPU → GPU copies. With a 24GB+ card we usually
-        # have headroom; if this OOMs, set GS_TRAIN_CACHE_IMAGES=cpu
-        # in env.
+        # to slow CPU → GPU copies. On 24 GB+ GPUs we usually have
+        # headroom; on smaller cards (12–16 GB) set
+        # ``GS_TRAIN_CACHE_IMAGES=cpu`` in env.
         "--pipeline.datamanager.cache-images",
         settings.train_cache_images,
     ]

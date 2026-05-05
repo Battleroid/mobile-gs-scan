@@ -7,8 +7,6 @@ import type { Capture } from "@/lib/types";
 
 const STATUS_TONE: Record<Capture["status"], string> = {
   created: "text-muted",
-  pairing: "text-accent",
-  streaming: "text-accent",
   uploading: "text-accent",
   queued: "text-muted",
   processing: "text-warn",

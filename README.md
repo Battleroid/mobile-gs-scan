@@ -1,85 +1,89 @@
 # mobile-gs-scan
 
-Self-hosted 3D Gaussian Splatting capture studio. Walk around an object or
-room with your phone, stream frames + ARCore poses to a single GPU machine
-on your LAN, get back a colored 3DGS scene viewable in the browser and
-exportable to common formats.
+Self-hosted 3D Gaussian Splatting capture studio. Drop a folder of
+images or a video at the web UI and a single GPU worker on your LAN
+runs it through SfM → splatfacto → export, and serves the result back
+in a browser-side viewer with editing + Poisson mesh extraction.
 
 In the same family as Scaniverse / Kiri Engine, but the splat trainer
-runs on your own RTX 4090 (in WSL2, via Docker) instead of someone
+runs on your own NVIDIA GPU (Ampere or newer recommended; 12 GB VRAM
+minimum, 24 GB+ for room-scale captures), in Docker — not someone
 else's cloud.
 
-> **Status: PR #1 — capture-to-viewer happy path.** A working foundation,
-> not a finished product. The phone capture loop, server pipeline, and
-> web viewer all wire end-to-end, but the AR overlay is minimal and the
-> live on-device splat preview / Poisson mesh / Scaniverse-style
-> coverage cones are explicitly deferred to follow-up PRs. The full
-> roadmap is in [`docs/roadmap.md`](docs/roadmap.md).
+> **Status: MVP merged.** Capture-to-viewer is shippable end-to-end.
+> The full roadmap is in [`docs/roadmap.md`](docs/roadmap.md).
 
 ## What's in v1
 
-- **Web UI** (Next.js + React Three Fiber) with three flows:
-  - *Drag-and-drop* a folder of images or a video — server runs Glomap
-    SfM → splatfacto training → `.ply` + `.spz` export.
-  - *Live phone capture* — start a session in the browser, pair the
-    phone via QR, stream frames as you walk around, finalize, view.
+- **Web UI** (Next.js + React Three Fiber):
+  - *Drag-and-drop* a folder of images **or a single video** at
+    `/captures/new`. The server runs ffmpeg → SfM (Glomap) →
+    splatfacto training → `.ply` + `.spz` export. Per-capture
+    overrides for training iterations (5K / 15K / 30K presets +
+    custom), video extraction fps (clamped to source fps), and
+    JPEG quality.
   - *Splat viewer* powered by [Spark][spark] (`@sparkjsdev/spark`)
-    embedded in R3F.
-- **API + worker** (FastAPI + custom polling job queue, mirroring
-  lingbot-map-studio's pattern) running on the host GPU via the NVIDIA
-  Container Toolkit. Workers run Glomap, gsplat / Nerfstudio's
-  `splatfacto`, and the export step. Session-state and job-state both
-  live in a single SQLite db.
-- **Android app** (Kotlin + ARCore) for the live capture path. Captures
-  RGB frames + per-frame poses + intrinsics, streams them over a single
-  WebSocket to the API, shows a minimal AR overlay (frame counter,
-  bounding capture volume).
-- **Mobile-web PWA fallback** at `/m/<token>` for phones where you don't
-  want to install the Android app — `getUserMedia` + WebSocket frame
-  streaming, no AR. Server-side SfM recovers the poses.
-- **Caddy + mkcert** for LAN-only HTTPS so `getUserMedia` works on the
-  phone (mobile browsers refuse the camera prompt over plain HTTP).
-- **Make targets** for the entire dev loop — including the Android app:
-  `make doctor` → `make up-https` → scan QR on phone → capture → view.
-  `make android-bootstrap` + `make apk-debug` / `apk-install` for the
-  Android side.
-- **GitHub Actions** for CI (lint + build of web / worker / android on
-  every PR), GHCR image publish on `main` + `v*` tags, draft Release
-  on tag, and a branch-name validator that enforces the
-  `feature/` / `fix/` / `chore/` / `docs/` / `refactor/` / `release/`
-  prefix from CONTRIBUTING.md.
+    embedded in R3F. Cycles between splats / mono points /
+    colored points / mesh views, with a per-splat opacity / scale
+    quality slider.
+  - *Splat editor* — recipe-based ops (opacity threshold, scale
+    clamp, bbox / sphere crop + remove, statistical outlier
+    removal, DBSCAN keep-largest, lasso-authored keep-indices)
+    with in-viewer 3D widgets for bbox / sphere selection. Edits
+    are non-destructive: the original `.ply` stays addressable
+    while the edited variant lives alongside.
+  - *Poisson mesh extraction* — Open3D Poisson runs in a killable
+    subprocess against the trained splat .ply, exports `.obj` +
+    `.glb` for download or in-viewer rendering.
+- **API + worker** (FastAPI + custom polling job queue) running on
+  the host GPU via the NVIDIA Container Toolkit. Workers run
+  ffmpeg → Glomap → gsplat / Nerfstudio's `splatfacto` → the
+  export step, with on-demand mesh + filter steps. Job + capture
+  state lives in a single SQLite db.
+- **Android app** (Kotlin + ARCore) — records frames + ARCore
+  poses locally to the device's filesystem, then on the user's
+  request uploads the JPEGs to the studio over the same HTTP
+  upload path the web UI uses. No live-stream WebSocket; no
+  pairing tokens — assumed-trusted private-server deployment.
+- **Caddy** as a reverse proxy in front of api + web (single
+  origin makes development tidy; HTTPS isn't required for any
+  current flow).
+- **GitHub Actions** for CI (lint + build of web / worker /
+  android on every PR), GHCR image publish on `main` + `v*` tags,
+  draft Release on tag, and a branch-name validator that
+  enforces the `feature/` / `fix/` / `chore/` / `docs/` /
+  `refactor/` / `release/` / `claude/` / `codex/` prefix from
+  CONTRIBUTING.md.
 
 [spark]: https://github.com/sparkjsdev/spark
 
 ## What's deferred (see `docs/roadmap.md`)
 
-- Full Scaniverse-style AR coverage cones / heatmap / live splat preview
-  on the phone during capture.
-- 2DGS + TSDF + Poisson mesh worker (`.obj` / `.glb` export).
-- Cleaner non-mobile ingestion (drone / DSLR sets with EXIF).
+- AR coverage cones / heatmap / live splat preview on the phone
+  during capture.
+- Cleaner non-mobile ingestion (drone / DSLR sets with EXIF GPS
+  to seed SfM).
 - iOS native app (ARKit / LiDAR depth supervision).
 - Public-tunnel deployment (Tailscale Funnel / Cloudflare Tunnel).
-- Auth.
+- Auth (basic account or per-device pairing — currently the server
+  assumes a private LAN deployment with trusted clients).
 
-## Quick start (host: Windows + 4090 + WSL2 Ubuntu)
+## Quick start (Linux or Windows-WSL2 with NVIDIA Container Toolkit)
 
 ```bash
 # preflight: docker, gpu, nvidia-container-toolkit
 make doctor
 
-# bring up over https on the LAN
-make up-https
-# → printed: rootCA URL + capture URL (with QR codes)
+# bring up api + worker-gs + web + caddy
+make up
 
-# from your phone (same wifi):
-#   1. scan the rootCA QR, install the cert
-#   2. scan the capture URL → either open in mobile-web PWA, OR
-#      open the Android app (sideload .apk) and let it deep-link
+# drop a folder of images or a single video at:
+#   http://<host>:3000/captures/new
 ```
 
-For the drag-and-drop happy path you don't need the phone — visit
-`https://localhost/captures/new` from the host machine, drop a folder
-of images, and you'll see a finished splat in a few minutes.
+The Android client (in `android/`) records captures locally and
+uploads via the same HTTP flow when you tap "send". Build + sideload
+with the targets below.
 
 ### Building the Android app
 
@@ -89,20 +93,34 @@ make apk-debug           # builds the debug APK
 make apk-install         # builds + adb install
 ```
 
+### CUDA arch list
+
+`worker/Dockerfile.gs` builds the gsplat extension and Glomap with
+multi-arch CUDA (`8.0;8.6;8.9;9.0` — A100 / RTX 30 / RTX 40 / H100)
+so the same image works across the common GPU classes. To trim
+build time on a constrained host, override at build time:
+
+```bash
+docker build \
+  --build-arg TORCH_CUDA_ARCH_LIST=8.9 \
+  --build-arg CMAKE_CUDA_ARCHITECTURES=89 \
+  -f worker/Dockerfile.gs ...
+```
+
 ## Layout
 
 ```
 ├── docker-compose.yml         # api, worker-gs, web, caddy
-├── Makefile                   # up / up-https / shell-* / clean / apk-*
-├── caddy/                     # reverse proxy config + LAN TLS certs
+├── Makefile                   # up / shell-* / clean / apk-*
+├── caddy/                     # reverse proxy config
 ├── scripts/                   # doctor, mkcert-bootstrap
 ├── worker/                    # Python: FastAPI api + worker-gs
 │   ├── app/api/               #   HTTP + WS routers
 │   ├── app/jobs/              #   job store / events / runner
-│   ├── app/sessions/          #   capture-session store + ws ingest
-│   └── app/pipeline/          #   sfm / train / export / mesh
-├── web/                       # Next.js 16 + R3F + Tailwind + Spark
-├── android/                   # Kotlin + ARCore + WebSocket client
+│   ├── app/sessions/          #   video frame extraction
+│   └── app/pipeline/          #   extract / sfm / train / export / mesh / filter
+├── web/                       # Next.js + R3F + Tailwind + Spark
+├── android/                   # Kotlin + ARCore + HTTP upload
 └── .github/workflows/         # ci, build-images, release, branch-name
 ```
 
