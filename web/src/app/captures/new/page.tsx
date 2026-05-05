@@ -252,6 +252,26 @@ export default function NewCapturePage() {
               setTrainIters({ kind: "custom", value: n })
             }
           />
+
+          {/* Upload status — lives in the main column rather than
+           *  the aside so it stays visible on tablet / phone widths
+           *  where the aside is hidden. Failed uploads (e.g. mixed
+           *  image+video drops) surface their reason here, in front
+           *  of the user's eyes regardless of breakpoint. */}
+          {(progress || error) && (
+            <div
+              role="status"
+              aria-live="polite"
+              className={clsx(
+                "mt-4 rounded-md border px-3 py-2 font-mono text-[12px]",
+                error
+                  ? "border-danger/30 bg-danger/5 text-danger"
+                  : "border-accent/30 bg-accent/5 text-accent",
+              )}
+            >
+              {error ?? progress}
+            </div>
+          )}
         </div>
 
         <aside className="hidden w-[320px] flex-shrink-0 lg:block">
@@ -291,12 +311,9 @@ export default function NewCapturePage() {
             </p>
           </div>
 
-          {progress && (
-            <p className="mt-4 font-mono text-[11px] text-accent">{progress}</p>
-          )}
-          {error && (
-            <p className="mt-4 font-mono text-[11px] text-danger">{error}</p>
-          )}
+          {/* Progress + error moved into the main column above so
+           *  they're visible at every breakpoint, not only `lg` and
+           *  up where this aside is rendered. */}
         </aside>
         </div>
       </div>

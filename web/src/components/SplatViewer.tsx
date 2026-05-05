@@ -269,8 +269,13 @@ export function SplatViewer({
       </Canvas>
 
       {selection && onSelectionCommit && (
-        <div className="absolute top-2 left-2 flex flex-col gap-1 bg-black/70 px-3 py-2 text-xs font-mono text-fg">
-          <span className="text-muted">
+        // Light cream-tinted panel with backdrop blur — readable
+        // against any rendered splat background (the dark bg-black
+        // version was invisible against the typical dark scene
+        // backdrop). Mirrors the design's ViewerPill / ViewerIcon
+        // surface treatment from studio.jsx.
+        <div className="absolute left-3 top-3 flex flex-col gap-1 rounded-md border border-rule bg-surface/85 px-3 py-2 text-xs font-mono text-fg shadow-[0_4px_16px_rgba(0,0,0,0.12)] backdrop-blur-md">
+          <span className="text-inkSoft">
             editing {selection.kind} (drag handles to {widgetMode})
           </span>
           <div className="flex gap-2">
@@ -278,7 +283,9 @@ export function SplatViewer({
               type="button"
               onClick={() => setWidgetMode("translate")}
               className={
-                widgetMode === "translate" ? "text-accent" : "hover:text-accent"
+                widgetMode === "translate"
+                  ? "font-semibold text-accent"
+                  : "text-inkSoft hover:text-accent"
               }
             >
               translate (T)
@@ -287,7 +294,9 @@ export function SplatViewer({
               type="button"
               onClick={() => setWidgetMode("scale")}
               className={
-                widgetMode === "scale" ? "text-accent" : "hover:text-accent"
+                widgetMode === "scale"
+                  ? "font-semibold text-accent"
+                  : "text-inkSoft hover:text-accent"
               }
             >
               scale (S)
@@ -297,33 +306,36 @@ export function SplatViewer({
       )}
 
       {/* Controls overlay. Top-right corner so it doesn't cover the
-          subject most users orbit around the centre of. Translucent
-          black bg + monospace text, matches the rest of the UI. */}
-      <div className="absolute top-2 right-2 flex flex-col gap-2 bg-black/70 px-3 py-2 text-xs font-mono text-fg">
+          subject most users orbit around the centre of. Light
+          surface-tinted panel with backdrop blur so the buttons stay
+          legible against whatever splat scene background is being
+          rendered (Spark's default scene bg is dark, which made the
+          previous bg-black/70 + text-fg combo go black-on-black). */}
+      <div className="absolute right-3 top-3 flex flex-col gap-2 rounded-md border border-rule bg-surface/85 px-3 py-[10px] text-xs font-mono text-fg shadow-[0_4px_16px_rgba(0,0,0,0.12)] backdrop-blur-md">
         <button
           type="button"
           onClick={onFullscreen}
-          className="text-left hover:text-accent"
+          className="text-left text-inkSoft hover:text-accent"
         >
           {isFullscreen ? "exit fullscreen" : "fullscreen"}
         </button>
         <button
           type="button"
           onClick={onPopOut}
-          className="text-left hover:text-accent"
+          className="text-left text-inkSoft hover:text-accent"
         >
           new tab ↗
         </button>
         <button
           type="button"
           onClick={cycleViewMode}
-          className="text-left hover:text-accent"
+          className="text-left text-inkSoft hover:text-accent"
           title="cycle view: splats → points → colored points → mesh (when extracted)"
         >
-          view: {VIEW_MODE_LABELS[viewMode]}
+          view: <span className="font-semibold text-fg">{VIEW_MODE_LABELS[viewMode]}</span>
         </button>
-        <label className="flex flex-col gap-0.5">
-          <span className="text-muted">quality {maxStdDev.toFixed(1)}</span>
+        <label className="flex flex-col gap-[2px]">
+          <span className="text-inkSoft">quality {maxStdDev.toFixed(1)}</span>
           <input
             type="range"
             min="1"

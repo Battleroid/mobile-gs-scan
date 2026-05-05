@@ -170,7 +170,15 @@ export function DownloadMenu({
           )}
           {options.map((opt) => (
             <DownloadMenuItem
-              key={opt.label}
+              // Composite key: callers (e.g. capture-detail's
+              // buildDownloadOptions) supply duplicate labels —
+              // both edited and original variants share `.ply` /
+              // `.spz`. Keying by label alone made React reuse the
+              // wrong child when the edit state toggled, so the
+              // rendered href / sub could go stale. The sub line
+              // disambiguates without callers having to invent
+              // unique ids.
+              key={`${opt.label}::${opt.sub ?? ""}`}
               option={opt}
               onClick={() => setOpen(false)}
             />
