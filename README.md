@@ -1,14 +1,18 @@
-# mobile-gs-scan
+# Pebble
 
-Self-hosted 3D Gaussian Splatting capture studio. Drop a folder of
-images or a video at the web UI and a single GPU worker on your LAN
-runs it through SfM → splatfacto → export, and serves the result back
-in a browser-side viewer with editing + Poisson mesh extraction.
+A small studio for 3D scans. Drop a folder of images or a video at
+the web UI and a single GPU worker on your LAN runs it through SfM →
+splatfacto → export, and serves the result back in a browser-side
+viewer with editing + Poisson mesh extraction.
 
 In the same family as Scaniverse / Kiri Engine, but the splat trainer
 runs on your own NVIDIA GPU (Ampere or newer recommended; 12 GB VRAM
 minimum, 24 GB+ for room-scale captures), in Docker — not someone
 else's cloud.
+
+The repository is `mobile-gs-scan` (the project's original name);
+container, package, and module paths still use it. The Pebble brand
+is the user-facing identity.
 
 > **Status: MVP merged.** Capture-to-viewer is shippable end-to-end.
 > The full roadmap is in [`docs/roadmap.md`](docs/roadmap.md).

@@ -1,7 +1,9 @@
 # Contributing
 
-Single-user, single-repo studio. The conventions below keep the
-changelog readable and the CI / release tooling working cleanly.
+Pebble — a single-user, single-repo studio. The conventions below
+keep the changelog readable and the CI / release tooling working
+cleanly. (The repo path is still `mobile-gs-scan`; only user-facing
+copy uses the Pebble name.)
 
 ## Branch naming
 

@@ -1,11 +1,29 @@
 import type { Metadata, Viewport } from "next";
-import Link from "next/link";
+import { GeistSans } from "geist/font/sans";
+import { GeistMono } from "geist/font/mono";
 import { Providers } from "@/components/Providers";
+import { PebbleHeader } from "@/components/PebbleHeader";
 import "./globals.css";
 
+// Vercel's `geist` package ships the same Geist + Geist Mono woff2
+// binaries `next/font/google` would otherwise fetch from Google at
+// build time. The package's `.variable` surface is identical, so the
+// Tailwind / globals.css wiring downstream sees the same CSS vars.
+//
+// The reason we don't use `next/font/google`: Pebble is positioned
+// for self-hosted LAN deployments. `next build` then runs in air-
+// gapped environments where `fonts.googleapis.com` isn't reachable
+// and the build fails before compile. `geist` is fully local — the
+// woff2 files land in node_modules and are served alongside the app.
+//
+// (The `.variable` property is a class name applied to the HTML
+// element below; it sets `--font-sans` / `--font-mono` as CSS vars
+// scoped to <html>. Tailwind's `fontFamily.sans = var(--font-sans)`
+// picks them up without further plumbing.)
+
 export const metadata: Metadata = {
-  title: "mobile-gs-scan",
-  description: "self-hosted 3D Gaussian Splatting capture studio",
+  title: "Pebble",
+  description: "a small studio for 3D scans.",
 };
 
 export const viewport: Viewport = {
@@ -21,25 +39,11 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
+    <html lang="en" className={`${GeistSans.variable} ${GeistMono.variable}`}>
       <body className="min-h-screen flex flex-col">
         <Providers>
-          <header className="border-b border-rule px-4 py-3 flex justify-between items-baseline">
-            <Link href="/" className="font-semibold tracking-tight">
-              mobile-gs-scan
-            </Link>
-            <nav className="text-xs text-muted flex gap-4">
-              <Link href="/" className="hover:text-fg">
-                captures
-              </Link>
-              <Link href="/captures/new" className="hover:text-fg">
-                new
-              </Link>
-            </nav>
-          </header>
-          <main className="flex-1 max-w-4xl w-full mx-auto px-4 py-6">
-            {children}
-          </main>
+          <PebbleHeader />
+          <main className="flex-1 w-full">{children}</main>
         </Providers>
       </body>
     </html>

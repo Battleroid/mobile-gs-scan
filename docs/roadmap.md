@@ -1,6 +1,6 @@
 # Roadmap
 
-The MVP capture-to-viewer-to-edit-to-mesh path is shippable
+Pebble's MVP capture-to-viewer-to-edit-to-mesh path is shippable
 end-to-end. Items below are still out of scope.
 
 ## Capture polish

@@ -1,57 +1,172 @@
 "use client";
 import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import clsx from "clsx";
 import { api } from "@/lib/api";
 import type { Capture } from "@/lib/types";
+import { BigButton, FilterChip } from "./pebble";
+import { CaptureCard } from "./CaptureCard";
 
-const STATUS_TONE: Record<Capture["status"], string> = {
-  created: "text-muted",
-  uploading: "text-accent",
-  queued: "text-muted",
-  processing: "text-warn",
-  completed: "text-fg",
-  failed: "text-danger",
-  canceled: "text-muted",
-};
+type Filter = "all" | "ready" | "training" | "failed";
+
+const FILTERS: { id: Filter; label: string }[] = [
+  { id: "all", label: "All" },
+  { id: "ready", label: "Ready" },
+  { id: "training", label: "Training" },
+  { id: "failed", label: "Failed" },
+];
+const FILTER_IDS = new Set<string>(FILTERS.map((f) => f.id));
+
+// Map our richer CaptureStatus union onto the design's three filter
+// buckets. Anything in flight (uploading / queued / processing) is
+// "training" from the user's perspective; failed includes canceled
+// since neither produced a usable scene.
+function bucketize(c: Capture): Filter {
+  if (c.status === "completed") return "ready";
+  if (c.status === "failed" || c.status === "canceled") return "failed";
+  return "training";
+}
 
 export function CaptureList() {
+  // Filter lives in the URL (`?filter=failed`) so it survives
+  // navigation into a capture and back, refreshes, and bookmarks.
+  // The pain point this solves: mass-delete on a "failed" filter
+  // — without URL state, every click into a capture detail page
+  // and back resets the filter to "all" and forces re-selection.
+  // Search stays as local state — typing into a text box generates
+  // too much URL churn to be worth persisting.
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const filterParam = searchParams.get("filter");
+  const filter: Filter =
+    filterParam && FILTER_IDS.has(filterParam) ? (filterParam as Filter) : "all";
+
+  const setFilter = (next: Filter) => {
+    const params = new URLSearchParams(searchParams.toString());
+    if (next === "all") {
+      params.delete("filter");
+    } else {
+      params.set("filter", next);
+    }
+    const qs = params.toString();
+    // replace() not push() so chip-clicking doesn't pollute the
+    // back-button stack with one entry per toggle. scroll: false
+    // keeps the grid in place during the URL update.
+    router.replace(qs ? `/?${qs}` : "/", { scroll: false });
+  };
+
+  const [query, setQuery] = useState("");
+
   const { data, isLoading, error } = useQuery({
     queryKey: ["captures"],
     queryFn: api.listCaptures,
     refetchInterval: 3_000,
   });
 
-  if (isLoading) return <p className="text-muted">loading…</p>;
-  if (error) return <p className="text-danger">{(error as Error).message}</p>;
-  if (!data?.length)
-    return (
-      <p className="text-muted">
-        no captures yet. <Link href="/captures/new" className="underline">start one</Link>.
-      </p>
-    );
+  const filtered = useMemo(() => {
+    if (!data) return [];
+    const q = query.trim().toLowerCase();
+    return data.filter((c) => {
+      if (filter !== "all" && bucketize(c) !== filter) return false;
+      if (q && !c.name.toLowerCase().includes(q)) return false;
+      return true;
+    });
+  }, [data, filter, query]);
 
   return (
-    <ul className="divide-y divide-rule">
-      {data.map((c) => (
-        <li key={c.id} className="py-3">
-          <Link
-            href={`/captures/${c.id}`}
-            className="flex items-baseline justify-between gap-4 hover:bg-rule/30 px-2 -mx-2 py-1"
-          >
-            <div className="flex-1 min-w-0">
-              <div className="truncate">{c.name}</div>
-              <div className="text-xs text-muted">
-                {c.source} · {c.frame_count} frames
-                {c.dropped_count > 0 && ` (${c.dropped_count} dropped)`}
-              </div>
-            </div>
-            <span className={clsx("text-xs", STATUS_TONE[c.status])}>
-              {c.status}
-            </span>
-          </Link>
-        </li>
-      ))}
-    </ul>
+    <div className="mx-auto w-full max-w-6xl px-9">
+      {/* Hero — display "Captures" + mono kicker on the left, filter
+       *  chips + search + new-scan CTA on the right. The design puts
+       *  these on a single line on desktop; we wrap to a second row
+       *  below `md` so the chips don't get cramped. */}
+      <div className="flex flex-col gap-4 pb-2 pt-7 md:flex-row md:items-end md:justify-between">
+        <div>
+          <div className="mb-2 font-mono text-[11px] uppercase tracking-[0.12em] text-muted">
+            your shelf · {data?.length ?? 0} {data?.length === 1 ? "scan" : "scans"}
+          </div>
+          <h1 className="m-0 text-[52px] font-bold leading-none tracking-[-0.02em]">
+            Captures
+          </h1>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {FILTERS.map((f) => (
+            <FilterChip
+              key={f.id}
+              active={filter === f.id}
+              onClick={() => setFilter(f.id)}
+            >
+              {f.label}
+            </FilterChip>
+          ))}
+          <span className="mx-1 h-[22px] w-px bg-rule" />
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="search…"
+            className="w-32 rounded-md border border-rule bg-surface px-3 py-[6px] text-sm placeholder:text-muted focus:border-accent focus:outline-none"
+          />
+          <BigButton href="/captures/new">＋ New scan</BigButton>
+        </div>
+      </div>
+
+      {/* Body — grid, loading, error, empty all share the same outer
+       *  spacing so the page doesn't jolt as state changes. */}
+      <div className="py-6">
+        {isLoading && <p className="text-muted">loading…</p>}
+        {error && (
+          <p className="text-danger">{(error as Error).message}</p>
+        )}
+        {!isLoading && !error && filtered.length === 0 && (
+          <EmptyState hasAny={(data?.length ?? 0) > 0} />
+        )}
+        {!isLoading && !error && filtered.length > 0 && (
+          <div className="grid grid-cols-1 gap-[18px] sm:grid-cols-2 lg:grid-cols-3">
+            {filtered.map((c) => (
+              <CaptureCard key={c.id} capture={c} />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function EmptyState({ hasAny }: { hasAny: boolean }) {
+  if (hasAny) {
+    return (
+      <div className="rounded-lg border border-rule bg-surface p-10 text-center">
+        <div className="font-mono text-[10px] uppercase tracking-[0.12em] text-muted">
+          no matches
+        </div>
+        <div className="mt-2 text-fg">
+          Try clearing the filter or search.
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div
+      className={clsx(
+        "rounded-lg border border-rule bg-surface p-10 text-center",
+      )}
+    >
+      <div className="font-mono text-[10px] uppercase tracking-[0.12em] text-muted">
+        empty shelf
+      </div>
+      <div className="mt-2 text-[22px] font-bold tracking-[-0.02em]">
+        Nothing here yet.
+      </div>
+      <p className="mx-auto mt-2 max-w-md text-[14px] text-inkSoft">
+        Drop a folder of frames or a video file at{" "}
+        <Link href="/captures/new" className="text-accent underline">
+          new scan
+        </Link>{" "}
+        — or open the Pebble app on your phone and start recording. Captures
+        appear here as they finish.
+      </p>
+    </div>
   );
 }
