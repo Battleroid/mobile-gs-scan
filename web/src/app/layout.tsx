@@ -1,11 +1,26 @@
 import type { Metadata, Viewport } from "next";
-import Link from "next/link";
+import { Geist, Geist_Mono } from "next/font/google";
 import { Providers } from "@/components/Providers";
+import { PebbleHeader } from "@/components/PebbleHeader";
 import "./globals.css";
 
+// Both fonts surface as CSS variables so globals.css + Tailwind's
+// fontFamily extension both pick them up without further wiring.
+const geistSans = Geist({
+  subsets: ["latin"],
+  variable: "--font-sans",
+  display: "swap",
+});
+
+const geistMono = Geist_Mono({
+  subsets: ["latin"],
+  variable: "--font-mono",
+  display: "swap",
+});
+
 export const metadata: Metadata = {
-  title: "mobile-gs-scan",
-  description: "self-hosted 3D Gaussian Splatting capture studio",
+  title: "Pebble",
+  description: "a small studio for 3D scans.",
 };
 
 export const viewport: Viewport = {
@@ -21,25 +36,11 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
+    <html lang="en" className={`${geistSans.variable} ${geistMono.variable}`}>
       <body className="min-h-screen flex flex-col">
         <Providers>
-          <header className="border-b border-rule px-4 py-3 flex justify-between items-baseline">
-            <Link href="/" className="font-semibold tracking-tight">
-              mobile-gs-scan
-            </Link>
-            <nav className="text-xs text-muted flex gap-4">
-              <Link href="/" className="hover:text-fg">
-                captures
-              </Link>
-              <Link href="/captures/new" className="hover:text-fg">
-                new
-              </Link>
-            </nav>
-          </header>
-          <main className="flex-1 max-w-4xl w-full mx-auto px-4 py-6">
-            {children}
-          </main>
+          <PebbleHeader />
+          <main className="flex-1 w-full">{children}</main>
         </Providers>
       </body>
     </html>

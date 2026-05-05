@@ -1,8 +1,9 @@
 # Architecture
 
-Single-machine, single-user studio. One physical box (Linux or
-Windows-WSL2 with NVIDIA Container Toolkit). Four services run on
-it.
+Pebble — single-machine, single-user studio. One physical box
+(Linux or Windows-WSL2 with NVIDIA Container Toolkit). Four services
+run on it. (Repo / container / package paths still use the original
+`mobile-gs-scan` name; the Pebble brand is user-facing only.)
 
 ## Services
 

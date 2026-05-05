@@ -1,6 +1,10 @@
-# mobile-gs-scan/android
+# Pebble · android (`mobile-gs-scan/android`)
 
-Native Android capture client. Kotlin + ARCore + OkHttp.
+Native Android capture client. Kotlin + ARCore + OkHttp. The Pebble
+brand is rolling out to the web first; the Android UI rebuild is
+queued behind that. The on-disk paths and `applicationId`
+(`dev.battleroid.mobilegsscan`) stay the same — the rename is
+user-facing only.
 
 ## What it does
 

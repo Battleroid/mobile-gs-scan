@@ -2,22 +2,57 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Pebble tokens. Sourced from the Claude Design bundle's
+ * tokens.jsx → PALETTES.studio (locked direction: tomato accent,
+ * Geist + Geist Mono, paper-grain bg, soft radius, standard density).
+ *
+ * Tailwind reads every token below via var(--…) in tailwind.config.ts.
+ * One source of truth — flip a value here, the whole UI follows.
+ */
 :root {
-  --bg: #0b0b0d;
-  --fg: #e7e7e9;
-  --muted: #8a8a90;
-  --rule: #232328;
-  --accent: #6cf;
-  --warn: #fc6;
-  --danger: #f66;
-  --font-mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+  --bg: #FBF6EC;            /* warm cream paper */
+  --bg-alt: #F2EAD8;        /* slightly toasted cream */
+  --surface: #FFFFFF;       /* card / panel surface */
+  --fg: #1A1612;            /* espresso ink */
+  --ink-soft: #5C5347;      /* muted clay */
+  --muted: #8B8273;         /* dust */
+  --rule: #E5DCC8;          /* soft beige rule */
+  --rule-strong: #C9BCA1;
+  --accent: #FF5A36;        /* tomato (PRIMARY) */
+  --accent-2: #7B5BFF;      /* electric plum */
+  --accent-3: #22C58A;      /* sage green */
+  --warn: #F0A500;
+  --danger: #E03A2F;
+  --chip-1: #FFD9C9;        /* peach */
+  --chip-2: #E0D6FF;        /* lavender */
+  --chip-3: #C7EBD9;        /* mint */
+  --chip-4: #FFE9A8;        /* butter */
 }
 
 html,
 body {
   background: var(--bg);
   color: var(--fg);
-  font-family: var(--font-mono);
-  font-size: 14px;
+  font-family: var(--font-sans);
+  font-size: 15px;
   -webkit-font-smoothing: antialiased;
+}
+
+/* Paper grain overlay. Single fixed-position SVG noise layer rendered
+ * on top of the cream background-color. The noise data-uri is copied
+ * verbatim from tokens.jsx's paintBg() so the implementation matches
+ * the design 1:1. Pointer events disabled so interaction passes
+ * through cleanly. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' seed='3'/><feColorMatrix values='0 0 0 0 0.1  0 0 0 0 0.07  0 0 0 0 0.04  0 0 0 0.04 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+}
+
+body > * {
+  position: relative;
+  z-index: 1;
 }
