@@ -307,8 +307,16 @@ async def upload_poses(
 async def delete_capture(capture_id: str) -> dict:
     """Delete a capture: cancel any in-flight pipeline jobs first
     (so the worker stops chewing on data we're about to delete),
-    then mark the capture as canceled and tear down the on-disk
-    capture + scene directories.
+    tear down the on-disk capture + scene directories, then hard-
+    delete the capture row from the database.
+
+    Previously this only flagged the capture ``canceled`` and tore
+    down disk artifacts, leaving the row in the DB — which meant
+    ``GET /api/captures`` kept returning the capture with status
+    ``canceled``. The web ``CaptureList`` lumps ``canceled`` into the
+    "failed" filter bucket, so a deleted capture stayed visible
+    forever from the user's perspective. The hard-delete below
+    matches what the UI's "Delete" button promises.
     """
     settings = get_settings()
     cap = await store.get_capture(capture_id)
@@ -326,8 +334,6 @@ async def delete_capture(capture_id: str) -> dict:
                 if await store.cancel_job(j.id):
                     await events.publish_job(j.id, "job.canceled")
 
-    await store.set_capture_status(cap.id, CaptureStatus.canceled)
-
     cap_dir = settings.captures_dir() / cap.id
     if cap_dir.exists():
         shutil.rmtree(cap_dir, ignore_errors=True)
@@ -335,6 +341,8 @@ async def delete_capture(capture_id: str) -> dict:
         scene_dir = settings.scenes_dir() / scene.id
         if scene_dir.exists():
             shutil.rmtree(scene_dir, ignore_errors=True)
+
+    await store.delete_capture(cap.id)
 
     return {"ok": True}
 

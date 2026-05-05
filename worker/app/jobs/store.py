@@ -201,6 +201,33 @@ async def set_capture_status(
         await s.commit()
 
 
+async def delete_capture(capture_id: str) -> bool:
+    """Hard-delete a capture row + its scene + the scene's jobs.
+
+    The schema's ``ondelete="CASCADE"`` declarations are no-ops on
+    SQLite without a per-connection ``PRAGMA foreign_keys=ON``; we
+    keep FK enforcement off (turning it on globally has historically
+    surfaced latent FK issues elsewhere in the pipeline) and cascade
+    manually instead. Returns True if the row existed and was
+    removed; False if no capture had this id (caller can decide
+    whether that's a 404 or an idempotent no-op).
+    """
+    async with session() as s:
+        cap = await s.get(Capture, capture_id)
+        if cap is None:
+            return False
+        scene_rows = await s.execute(
+            select(Scene).where(Scene.capture_id == capture_id)
+        )
+        scenes = list(scene_rows.scalars())
+        for scene in scenes:
+            await s.execute(delete(Job).where(Job.scene_id == scene.id))
+            await s.delete(scene)
+        await s.delete(cap)
+        await s.commit()
+        return True
+
+
 async def set_capture_name(capture_id: str, name: str) -> None:
     """Update the user-facing name on a capture row.
 
