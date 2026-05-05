@@ -43,7 +43,24 @@ async def enqueue_pipeline(
     *,
     has_pose: bool,
     source: CaptureSource,
-) -> list[str]:
+) -> list[str] | None:
+    """Enqueue the extract → sfm → train → export pipeline for a
+    scene. Returns the full list of enqueued job ids, or ``None``
+    if the scene has been deleted out from under us at *any* point
+    between the caller's reference and the last INSERT.
+
+    All-or-nothing on purpose: each ``enqueue_job`` is atomic via
+    ``INSERT ... WHERE EXISTS`` on the scenes table, so a None at
+    any step means the scene is definitively gone. Earlier jobs we
+    successfully inserted have already been cascaded away by the
+    same ``delete_capture`` that's removing the scene (the
+    cascade's ``DELETE FROM jobs WHERE scene_id IN (…)`` covers
+    them), so returning a partial list would point the caller at
+    job ids that no longer exist.
+    Surface the race-loss with ``None`` instead — the caller
+    (``finalize_capture``) treats it as 404 rather than reporting
+    success with stale references.
+    """
     settings = get_settings()
     job_ids: list[str] = []
 
@@ -51,6 +68,9 @@ async def enqueue_pipeline(
     extract = await store.enqueue_job(
         scene_id, JobKind.extract, payload=extract_payload,
     )
+    if extract is None:
+        log.info("scene %s vanished before pipeline enqueue; bailing", scene_id)
+        return None
     job_ids.append(extract.id)
 
     backend: str | None
@@ -65,12 +85,18 @@ async def enqueue_pipeline(
         sfm = await store.enqueue_job(
             scene_id, JobKind.sfm, payload={"backend": backend}
         )
+        if sfm is None:
+            log.info("scene %s vanished mid-pipeline (sfm); bailing", scene_id)
+            return None
         job_ids.append(sfm.id)
 
     train_iters = await _resolve_train_iters(scene_id, settings.train_iters)
     train = await store.enqueue_job(
         scene_id, JobKind.train, payload={"iters": train_iters}
     )
+    if train is None:
+        log.info("scene %s vanished mid-pipeline (train); bailing", scene_id)
+        return None
     job_ids.append(train.id)
 
     export = await store.enqueue_job(
@@ -78,6 +104,9 @@ async def enqueue_pipeline(
         JobKind.export,
         payload={"formats": ["ply", "spz"]},
     )
+    if export is None:
+        log.info("scene %s vanished mid-pipeline (export); bailing", scene_id)
+        return None
     job_ids.append(export.id)
 
     return job_ids

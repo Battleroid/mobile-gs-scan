@@ -126,13 +126,31 @@ async def run_forever(settings: Settings | None = None) -> None:
 
 
 async def _ack_user_cancel(job: Job) -> bool:
-    """If the job's DB row is in canceled state, mark completed_at
-    so the reaper doesn't cycle it, publish the canceled event,
-    and return True. Otherwise return False so the caller falls
-    through to the genuine-failure path.
+    """If the job's DB row is in a canceled state (or gone entirely),
+    treat the in-flight CancelledError / RuntimeError as a user
+    cancel: publish the canceled event and return True so the
+    worker loop continues.
+
+    A missing row is treated the same as an explicit cancel: the
+    only path that vanishes a still-running job's row is
+    ``DELETE /api/captures/{id}`` cascading through scenes → jobs,
+    which is the strongest possible cancel signal. Without this
+    branch the heartbeat's ``j is None`` cancel path would re-raise
+    out of ``run_forever`` and the worker process would exit until
+    restart.
     """
     refreshed = await store.get_job(job.id)
-    if refreshed is None or refreshed.status != JobStatus.canceled:
+    if refreshed is None:
+        log.info(
+            "job %s row deleted (capture removed); acking as canceled",
+            job.id,
+        )
+        # No row to ``update_job`` against; the capture-delete
+        # cascade already removed it. Still publish the event so
+        # any subscribed websocket clients can drop their state.
+        await events.publish_job(job.id, "job.canceled")
+        return True
+    if refreshed.status != JobStatus.canceled:
         return False
     log.info("job %s canceled by user", job.id)
     await store.update_job(job.id, completed=True)
@@ -526,16 +544,27 @@ async def _heartbeat(job_id: str, dispatch_task: asyncio.Task) -> None:
     """Heartbeat task: keeps claimed_by fresh AND watches for user
     cancellation. On cancel, kills any registered subprocess for
     the job and cancels the dispatch coroutine.
+
+    A missing row (``get_job`` returns ``None``) is treated as
+    cancellation-equivalent: the only path that removes a still-
+    running job's row is ``DELETE /api/captures/{id}`` cascading
+    through the scene's jobs, which is the strongest possible
+    "stop now" signal. Without this, a delete-during-train would
+    leave the worker grinding on already-removed disk files until
+    the subprocess noticed an I/O error on its own — sometimes
+    minutes later.
     """
     while True:
         try:
             await asyncio.sleep(HEARTBEAT_INTERVAL)
             await store.update_job(job_id, heartbeat=True)
             j = await store.get_job(job_id)
-            if j is not None and j.status == JobStatus.canceled:
+            if j is None or j.status == JobStatus.canceled:
+                reason = "row deleted" if j is None else "status=canceled"
                 log.info(
-                    "job %s canceled — killing subprocess + dispatch task",
+                    "job %s %s — killing subprocess + dispatch task",
                     job_id,
+                    reason,
                 )
                 # SIGKILL the subprocess if a step has spawned one;
                 # subprocess death will propagate as RuntimeError
