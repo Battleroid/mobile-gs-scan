@@ -167,8 +167,11 @@ export default function NewCapturePage() {
   return (
     <div className="flex h-[calc(100vh-72px)] flex-col">
       {/* Body — main column + status / tip aside. Scrolls
-       *  internally so the action footer stays anchored. */}
-      <div className="flex flex-1 gap-7 overflow-auto px-9 pb-6 pt-9">
+       *  internally so the action footer stays anchored. The flex
+       *  pair sits inside a centered max-width wrapper so the form
+       *  isn't pinned to the left edge on wide displays. */}
+      <div className="flex flex-1 justify-center overflow-auto px-9 pb-6 pt-9">
+        <div className="flex w-full max-w-[1100px] gap-7">
         <div className="w-full max-w-[720px] flex-1">
           <Eyebrow>step 1 / 3</Eyebrow>
           <DisplayHeading className="mb-2 mt-2">
@@ -295,6 +298,7 @@ export default function NewCapturePage() {
             <p className="mt-4 font-mono text-[11px] text-danger">{error}</p>
           )}
         </aside>
+        </div>
       </div>
 
       {/* Footer — sticky action row. Save-as-draft is decorative for
@@ -517,20 +521,28 @@ function FidelityScale({
   active: number;
   onChange: (idx: number) => void;
 }) {
+  // Visual stack with a hidden native range input layered on top.
+  // The native input owns drag + keyboard accessibility for free
+  // (pointer capture, ←/→ keys, screen-reader); we just paint the
+  // dots and let the input dispatch the integer onChange. The
+  // wrapper's relative position scopes the dots so they don't drift
+  // out of the track when the slider stretches.
   return (
-    <div>
+    <div className="select-none">
       <div className="relative mx-3 mb-3 mt-5 h-1 rounded-full bg-rule">
+        {/* Filled portion behind the active dot. */}
         <div
           className="absolute left-0 top-0 h-full rounded-full bg-accent"
           style={{ width: `${active * 50}%` }}
         />
+        {/* Three visual stops — purely cosmetic. The clickable hit
+         *  area is the wider native input below. */}
         {[0, 1, 2].map((i) => (
-          <button
+          <span
             key={i}
-            type="button"
-            onClick={() => onChange(i)}
+            aria-hidden
             className={clsx(
-              "absolute top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full transition-all",
+              "pointer-events-none absolute top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full transition-all",
               i === active
                 ? "h-[22px] w-[22px] border-[4px] border-white bg-accent shadow-[0_0_0_1px_var(--accent),0_4px_10px_rgba(255,90,54,0.3)]"
                 : i < active
@@ -538,9 +550,24 @@ function FidelityScale({
                   : "h-3 w-3 border-2 border-rule bg-surface",
             )}
             style={{ left: `${(i / 2) * 100}%` }}
-            aria-label={FIDELITY_STOPS[i].label}
           />
         ))}
+        {/* Native range input layered transparently — owns the
+         *  drag + keyboard interaction. step=1 snaps to the three
+         *  preset stops; opacity-0 keeps it invisible while still
+         *  receiving pointer events. The wider hit area lets users
+         *  drag from anywhere on the track instead of having to
+         *  land precisely on a 22-px dot. */}
+        <input
+          type="range"
+          min={0}
+          max={2}
+          step={1}
+          value={active}
+          onChange={(e) => onChange(parseInt(e.target.value, 10))}
+          aria-label={`Training fidelity: ${FIDELITY_STOPS[active]?.label ?? ""}`}
+          className="absolute inset-x-0 top-1/2 z-10 h-7 w-full -translate-y-1/2 cursor-pointer appearance-none bg-transparent opacity-0"
+        />
       </div>
       <div className="flex justify-between px-2">
         {FIDELITY_STOPS.map((stop, i) => (

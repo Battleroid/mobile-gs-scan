@@ -13,7 +13,12 @@ import { MeshPanel } from "@/components/MeshPanel";
 import { SplatEditor, type SplatEditorHandle } from "@/components/SplatEditor";
 import type { SelectionWidget } from "@/components/SplatViewer";
 import type { Capture, Job, Scene } from "@/lib/types";
-import { BigButton, Eyebrow } from "@/components/pebble";
+import {
+  BigButton,
+  DownloadMenu,
+  Eyebrow,
+  type DownloadOption,
+} from "@/components/pebble";
 
 // Heavy three.js viewer — keep it out of the SSR bundle.
 const SplatViewer = dynamic(
@@ -132,16 +137,9 @@ export default function CaptureDetailPage({ params }: PageProps) {
           <CaptureNameEditor capture={capture} />
           <MetaRow capture={capture} scene={scene} />
         </div>
-        <div className="flex flex-wrap gap-2">
-          {scene?.spz_url && (
-            <BigButton variant="secondary" href={api.base() + scene.spz_url}>
-              Download .spz
-            </BigButton>
-          )}
-          {scene?.ply_url && (
-            <BigButton variant="secondary" href={api.base() + scene.ply_url}>
-              Download .ply
-            </BigButton>
+        <div className="flex flex-wrap items-center gap-2">
+          {scene && (
+            <DownloadMenu {...buildDownloadOptions(scene, hasEdit)} />
           )}
           <BigButton
             variant="secondary"
@@ -154,24 +152,28 @@ export default function CaptureDetailPage({ params }: PageProps) {
         </div>
       </div>
 
-      {/* Two-column body — viewer left, pipeline / tip / exports right.
-       *  When the scene isn't ready yet we still render the right
-       *  column so users see live training progress. */}
-      <div className="grid grid-cols-1 gap-[18px] lg:grid-cols-[1.7fr_1fr]">
-        <ViewerPanel
-          scene={scene}
-          viewing={viewing}
-          widgetSelection={widgetSelection}
-          handleWidgetCommit={handleWidgetCommit}
-          hasEdit={hasEdit}
-        />
-        <RightStack capture={capture} scene={scene} />
+      {/* Splat front and centre — full width up top so it stays the
+       *  visual focus regardless of pipeline status. Pipeline + edit
+       *  + mesh panels stack below. */}
+      <ViewerPanel
+        scene={scene}
+        viewing={viewing}
+        widgetSelection={widgetSelection}
+        handleWidgetCommit={handleWidgetCommit}
+        hasEdit={hasEdit}
+      />
+
+      <div className="mt-6">
+        <PipelineCard capture={capture} scene={scene} />
       </div>
 
-      {/* Editor + mesh — only when training is done. They live below
-       *  the design's two-column layout so the splat preview stays
-       *  the focal point while jobs run; afterwards these panels are
-       *  the primary actions. */}
+      {scene?.status !== "completed" && scene && (
+        <div className="mt-4">
+          <TipCard scene={scene} />
+        </div>
+      )}
+
+      {/* Editor + mesh — only when training is done. */}
       {scene && scene.status === "completed" && (
         <div className="mt-6 space-y-4">
           <SplatEditor
@@ -196,6 +198,64 @@ export default function CaptureDetailPage({ params }: PageProps) {
       )}
     </div>
   );
+}
+
+// ─── Download menu builder ───────────────────────────────────────
+
+/**
+ * Compose primary + dropdown options for the action-row download
+ * menu. When the scene has an edited variant the user is most likely
+ * to want, the edited .ply leads; the original .ply slides into the
+ * dropdown. Without an edit, the original .ply leads. Mesh artifacts
+ * (.glb / .obj) and the .spz fast-loading variant always live in the
+ * dropdown — pending entries when not yet ready.
+ */
+function buildDownloadOptions(
+  scene: Scene,
+  hasEdit: boolean,
+): { primary: DownloadOption; options: DownloadOption[] } {
+  const url = (rel: string | null) => (rel ? api.base() + rel : null);
+  const editedPly: DownloadOption = {
+    label: ".ply",
+    sub: "edited",
+    href: url(scene.edited_ply_url),
+  };
+  const editedSpz: DownloadOption = {
+    label: ".spz",
+    sub: "edited",
+    href: url(scene.edited_spz_url),
+  };
+  const originalPly: DownloadOption = {
+    label: ".ply",
+    sub: "original",
+    href: url(scene.ply_url),
+  };
+  const originalSpz: DownloadOption = {
+    label: ".spz",
+    sub: "original",
+    href: url(scene.spz_url),
+  };
+  const meshGlb: DownloadOption = {
+    label: ".glb",
+    sub: "mesh",
+    href: url(scene.mesh_glb_url),
+  };
+  const meshObj: DownloadOption = {
+    label: ".obj",
+    sub: "mesh",
+    href: url(scene.mesh_obj_url),
+  };
+
+  if (hasEdit) {
+    return {
+      primary: editedPly,
+      options: [editedSpz, originalPly, originalSpz, meshGlb, meshObj],
+    };
+  }
+  return {
+    primary: originalPly,
+    options: [originalSpz, meshGlb, meshObj],
+  };
 }
 
 // ─── Title meta row (mono pills) ─────────────────────────────────
@@ -251,14 +311,14 @@ function ViewerPanel({
   // Spark drops the prior buffer.
   if (!scene) {
     return (
-      <div className="rounded-lg border border-rule bg-surface p-10 text-center text-muted">
+      <div className="flex min-h-[560px] items-center justify-center rounded-lg border border-rule bg-surface text-muted">
         Waiting for scene…
       </div>
     );
   }
   if (scene.status !== "completed" || (!scene.ply_url && !scene.spz_url)) {
     return (
-      <div className="relative flex min-h-[480px] items-center justify-center overflow-hidden rounded-lg border border-rule bg-gradient-to-br from-chip3 to-chip4 p-10 text-center">
+      <div className="relative flex min-h-[560px] items-center justify-center overflow-hidden rounded-lg border border-rule bg-gradient-to-br from-chip3 to-chip4 p-10 text-center">
         <div className="relative">
           <div className="font-mono text-[10px] uppercase tracking-[0.12em] text-inkSoft">
             preview
@@ -282,7 +342,7 @@ function ViewerPanel({
     ? scene.edited_ply_url ?? scene.ply_url
     : scene.ply_url;
   return (
-    <div className="relative min-h-[480px] overflow-hidden rounded-lg border border-rule bg-surface">
+    <div className="relative min-h-[560px] overflow-hidden rounded-lg border border-rule bg-surface">
       <SplatViewer
         key={splatUrl}
         url={api.base() + splatUrl}
@@ -301,22 +361,6 @@ function ViewerPanel({
 }
 
 // ─── Right column — pipeline / tip / exports ─────────────────────
-
-function RightStack({
-  capture,
-  scene,
-}: {
-  capture: Capture;
-  scene: Scene | null;
-}) {
-  return (
-    <div className="flex flex-col gap-[14px]">
-      <PipelineCard capture={capture} scene={scene} />
-      {scene?.status !== "completed" && <TipCard scene={scene} />}
-      <ExportsCard scene={scene} />
-    </div>
-  );
-}
 
 function PipelineCard({
   capture: _capture,
@@ -455,78 +499,6 @@ function TipCard({ scene }: { scene: Scene | null }) {
         — we&apos;ll keep training and the result will be ready when you
         come back.
       </p>
-    </div>
-  );
-}
-
-function ExportsCard({ scene }: { scene: Scene | null }) {
-  const rows = [
-    {
-      label: ".ply",
-      url: scene?.ply_url,
-    },
-    {
-      label: ".spz",
-      url: scene?.spz_url,
-    },
-    {
-      label: ".glb",
-      url: scene?.mesh_glb_url,
-    },
-    {
-      label: ".obj",
-      url: scene?.mesh_obj_url,
-    },
-  ];
-  return (
-    <div className="rounded-lg border border-rule bg-surface p-[18px]">
-      <Eyebrow className="mb-3 !text-[10px] !tracking-[0.08em]">
-        Exports
-      </Eyebrow>
-      {rows.map((r) => (
-        <ExportRow key={r.label} label={r.label} url={r.url ?? null} />
-      ))}
-      {(scene?.edited_ply_url || scene?.edited_spz_url) && (
-        <>
-          <div className="my-3 h-px bg-rule" />
-          <Eyebrow className="mb-2 !text-[10px] !tracking-[0.08em]">
-            edited
-          </Eyebrow>
-          {scene.edited_ply_url && (
-            <ExportRow label="edited .ply" url={scene.edited_ply_url} />
-          )}
-          {scene.edited_spz_url && (
-            <ExportRow label="edited .spz" url={scene.edited_spz_url} />
-          )}
-        </>
-      )}
-    </div>
-  );
-}
-
-function ExportRow({ label, url }: { label: string; url: string | null }) {
-  const ready = !!url;
-  return (
-    <div className="flex items-center justify-between border-b border-rule py-2 last:border-b-0">
-      <div>
-        <div className="font-mono text-[13px] font-semibold">{label}</div>
-        <div className="font-mono text-[10px] text-muted">
-          {ready ? "ready" : "pending"}
-        </div>
-      </div>
-      {ready ? (
-        <a
-          href={api.base() + url}
-          download
-          className="rounded-sm bg-fg px-[10px] py-[5px] font-mono text-[11px] text-bg hover:opacity-90"
-        >
-          download
-        </a>
-      ) : (
-        <span className="rounded-sm border border-rule px-[10px] py-[5px] font-mono text-[11px] text-muted">
-          pending
-        </span>
-      )}
     </div>
   );
 }

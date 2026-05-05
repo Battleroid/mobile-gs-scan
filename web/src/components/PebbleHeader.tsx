@@ -29,7 +29,12 @@ export function PebbleHeader() {
   const pathname = usePathname();
   if (pathname && HEADERLESS.has(pathname)) return null;
   return (
-    <header className="border-b border-rule bg-bg/80 backdrop-blur-sm">
+    // sticky + z-50 so the avatar dropdown floats over page
+    // content on every route — without this, App Router pages with
+    // their own stacking contexts (capture cards with translate
+    // transforms, the splat viewer canvas) end up rendering on top
+    // of the dropdown panel.
+    <header className="sticky top-0 z-50 border-b border-rule bg-bg/80 backdrop-blur-sm">
       <div className="mx-auto flex max-w-6xl items-center justify-between gap-6 px-9 py-4">
         <Link href="/" className="flex items-center gap-3">
           <PebbleMark size={28} />

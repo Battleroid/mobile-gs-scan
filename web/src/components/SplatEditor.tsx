@@ -12,10 +12,12 @@
 // SplatMesh.setSplat) is a Phase-1.5 follow-up; the recipe DSL +
 // apply/download flow is the load-bearing piece and works without
 // it.
+import clsx from "clsx";
 import { forwardRef, useEffect, useImperativeHandle, useState } from "react";
 import { api } from "@/lib/api";
 import type { EditOp, EditRecipe, Scene } from "@/lib/types";
 import type { SelectionWidget } from "@/components/SplatViewer";
+import { BigButton, Eyebrow } from "@/components/pebble";
 
 export interface SplatEditorHandle {
   /** Apply a widget commit (bbox or sphere drag) to the form state.
@@ -254,20 +256,25 @@ export const SplatEditor = forwardRef<SplatEditorHandle, Props>(function SplatEd
   const progressPct = Math.round(((editProgress?.progress ?? 0) * 100));
 
   return (
-    <section className="border border-rule p-4 space-y-4">
+    <section className="space-y-4 rounded-lg border border-rule bg-surface p-5">
       <header className="flex items-baseline justify-between gap-4">
-        <h2 className="text-sm text-muted">edit / clean up the splat</h2>
+        <div>
+          <Eyebrow className="!text-[10px] !tracking-[0.08em]">edit</Eyebrow>
+          <div className="text-[18px] font-bold tracking-[-0.02em]">
+            Clean up the splat
+          </div>
+        </div>
         {(hasEdit || isRunning) && (
-          <div className="flex items-center gap-2 text-xs">
-            <span className="text-muted">view:</span>
+          <div className="inline-flex items-center gap-1 rounded-pill border border-rule bg-bg p-[3px] font-mono text-[11px]">
             <button
               type="button"
               onClick={() => onChangeView("original")}
-              className={
+              className={clsx(
+                "rounded-pill px-[10px] py-[4px] uppercase tracking-[0.06em] transition-colors",
                 viewing === "original"
-                  ? "underline text-fg"
-                  : "text-muted hover:text-fg"
-              }
+                  ? "bg-fg text-bg"
+                  : "text-inkSoft hover:text-fg",
+              )}
             >
               original
             </button>
@@ -275,11 +282,12 @@ export const SplatEditor = forwardRef<SplatEditorHandle, Props>(function SplatEd
               type="button"
               onClick={() => onChangeView("edited")}
               disabled={!hasEdit}
-              className={
+              className={clsx(
+                "rounded-pill px-[10px] py-[4px] uppercase tracking-[0.06em] transition-colors disabled:cursor-not-allowed disabled:opacity-40",
                 viewing === "edited"
-                  ? "underline text-fg"
-                  : "text-muted hover:text-fg disabled:opacity-40 disabled:cursor-not-allowed"
-              }
+                  ? "bg-fg text-bg"
+                  : "text-inkSoft hover:text-fg",
+              )}
             >
               edited
             </button>
@@ -288,12 +296,12 @@ export const SplatEditor = forwardRef<SplatEditorHandle, Props>(function SplatEd
       </header>
 
       {isRunning && (
-        <div className="space-y-1 text-xs">
-          <p className="text-warn">
+        <div className="space-y-1">
+          <p className="font-mono text-[11px] text-accent">
             filtering… {progressPct}%
             {editProgress?.message ? ` · ${editProgress.message}` : ""}
           </p>
-          <div className="h-1 bg-rule">
+          <div className="h-[6px] overflow-hidden rounded-full bg-rule">
             <div
               className="h-full bg-accent transition-all"
               style={{ width: `${progressPct}%` }}
@@ -303,13 +311,13 @@ export const SplatEditor = forwardRef<SplatEditorHandle, Props>(function SplatEd
       )}
 
       {scene.edit_status === "failed" && scene.edit_error && (
-        <p className="text-xs text-danger">
+        <p className="rounded-sm border border-danger/30 bg-danger/5 p-2 font-mono text-[11px] text-danger">
           last apply failed: {scene.edit_error}
         </p>
       )}
 
       {lastEditResult && !isRunning && scene.edit_status === "completed" && (
-        <p className="text-xs text-muted">
+        <p className="font-mono text-[11px] text-inkSoft">
           last apply: {lastEditResult.total.toLocaleString()} →{" "}
           {lastEditResult.kept.toLocaleString()} gaussians (
           {Math.round(
@@ -320,7 +328,9 @@ export const SplatEditor = forwardRef<SplatEditorHandle, Props>(function SplatEd
       )}
 
       <fieldset className="space-y-3" disabled={isRunning || submitting}>
-        <legend className="text-xs text-muted">filters</legend>
+        <legend className="font-mono text-[10px] uppercase tracking-[0.08em] text-muted">
+          filters
+        </legend>
 
         <Toggle
           label="opacity threshold"
@@ -389,11 +399,12 @@ export const SplatEditor = forwardRef<SplatEditorHandle, Props>(function SplatEd
           />
           <button
             type="button"
-            className={
+            className={clsx(
+              "self-end rounded-pill border px-3 py-1 font-mono text-[11px] uppercase tracking-[0.06em] transition-colors",
               activeWidget === "bbox"
-                ? "text-accent text-xs underline"
-                : "text-muted text-xs underline hover:text-fg"
-            }
+                ? "border-accent bg-accent/10 text-accent"
+                : "border-rule bg-bg text-inkSoft hover:border-ruleStrong",
+            )}
             onClick={() =>
               onActivateWidget(activeWidget === "bbox" ? null : "bbox")
             }
@@ -412,10 +423,12 @@ export const SplatEditor = forwardRef<SplatEditorHandle, Props>(function SplatEd
           }}
         >
           <label
-            className="flex flex-col gap-0.5 text-xs"
+            className="flex flex-col gap-1 text-xs"
             title="crop = keep only the gaussians inside the sphere (the visual default — pairs with the widget). remove = drop everything inside (use the nuke-origin preset for the classic noise-cluster cleanup)."
           >
-            <span className="text-muted">mode</span>
+            <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-muted">
+              mode
+            </span>
             <select
               value={ops.sphere.mode}
               onChange={(e) =>
@@ -427,7 +440,7 @@ export const SplatEditor = forwardRef<SplatEditorHandle, Props>(function SplatEd
                   },
                 }))
               }
-              className="w-32 bg-transparent border-b border-rule px-1 focus:outline-none focus:border-accent"
+              className="w-44 rounded-sm border border-rule bg-bg px-2 py-1 text-sm focus:border-accent focus:outline-none"
             >
               <option value="crop">crop (keep inside)</option>
               <option value="remove">remove (drop inside)</option>
@@ -454,7 +467,7 @@ export const SplatEditor = forwardRef<SplatEditorHandle, Props>(function SplatEd
           />
           <button
             type="button"
-            className="text-xs text-muted underline hover:text-fg"
+            className="self-end rounded-pill border border-rule bg-bg px-3 py-1 font-mono text-[11px] uppercase tracking-[0.06em] text-inkSoft hover:border-ruleStrong"
             onClick={() =>
               setOps((s) => ({
                 ...s,
@@ -550,34 +563,30 @@ export const SplatEditor = forwardRef<SplatEditorHandle, Props>(function SplatEd
         </Toggle>
       </fieldset>
 
-      <div className="flex flex-wrap items-center gap-3 text-xs">
-        <button
-          type="button"
-          onClick={onApply}
-          disabled={isRunning || submitting}
-          className="border border-rule px-3 py-1 hover:bg-rule disabled:opacity-50"
-        >
-          {submitting ? "queueing…" : "apply & save"}
-        </button>
-        <button
-          type="button"
+      <div className="flex flex-wrap items-center gap-3">
+        <BigButton onClick={onApply} disabled={isRunning || submitting}>
+          {submitting ? "Queueing…" : "Apply & save"}
+        </BigButton>
+        <BigButton
+          variant="secondary"
           onClick={onReset}
           disabled={isRunning || submitting}
-          className="text-muted underline hover:text-fg disabled:opacity-40"
         >
-          reset
-        </button>
+          Reset
+        </BigButton>
         {hasEdit && (
-          <button
-            type="button"
+          <BigButton
+            variant="secondary"
             onClick={onDiscard}
             disabled={isRunning || discarding}
-            className="text-danger underline hover:text-fg disabled:opacity-40"
+            className="!text-danger"
           >
-            {discarding ? "discarding…" : "discard edit"}
-          </button>
+            {discarding ? "Discarding…" : "Discard edit"}
+          </BigButton>
         )}
-        {error && <span className="text-danger">{error}</span>}
+        {error && (
+          <span className="font-mono text-[11px] text-danger">{error}</span>
+        )}
       </div>
     </section>
   );
@@ -637,8 +646,10 @@ function NumberField({
   step?: number;
 }) {
   return (
-    <label className="flex flex-col gap-0.5 text-xs">
-      <span className="text-muted">{label}</span>
+    <label className="flex flex-col gap-1 text-xs">
+      <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-muted">
+        {label}
+      </span>
       <input
         type="number"
         value={value}
@@ -649,7 +660,7 @@ function NumberField({
         min={min}
         max={max}
         step={step ?? 0.01}
-        className="w-24 bg-transparent border-b border-rule px-1 focus:outline-none focus:border-accent"
+        className="w-24 rounded-sm border border-rule bg-bg px-2 py-1 font-mono text-sm focus:border-accent focus:outline-none"
       />
     </label>
   );

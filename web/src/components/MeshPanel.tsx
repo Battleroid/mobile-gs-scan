@@ -14,6 +14,7 @@
 import { useState } from "react";
 import { api } from "@/lib/api";
 import type { MeshStatus, Scene } from "@/lib/types";
+import { BigButton, Eyebrow } from "@/components/pebble";
 
 interface ParamsState {
   num_points: number;
@@ -115,24 +116,28 @@ export function MeshPanel({ scene, meshProgress }: Props) {
   };
 
   return (
-    <section className="border border-rule p-4 space-y-4">
-      <header>
-        <h2 className="text-sm text-muted">extract mesh (poisson)</h2>
+    <section className="space-y-4 rounded-lg border border-rule bg-surface p-5">
+      <header className="flex items-baseline justify-between gap-3">
+        <div>
+          <Eyebrow className="!text-[10px] !tracking-[0.08em]">mesh</Eyebrow>
+          <div className="text-[18px] font-bold tracking-[-0.02em]">
+            Extract mesh (Poisson)
+          </div>
+        </div>
         {hasMesh && (
-          <p className="text-xs text-muted mt-1">
-            view in the splat viewer above — switch the “view” cycle to
-            “mesh”.
-          </p>
+          <span className="font-mono text-[11px] text-inkSoft">
+            switch viewer to <b>mesh</b> to preview
+          </span>
         )}
       </header>
 
       {isRunning && (
-        <div className="space-y-1 text-xs">
-          <p className="text-warn">
+        <div className="space-y-1">
+          <p className="font-mono text-[11px] text-accent">
             extracting… {progressPct}%
             {meshProgress?.message ? ` · ${meshProgress.message}` : ""}
           </p>
-          <div className="h-1 bg-rule">
+          <div className="h-[6px] overflow-hidden rounded-full bg-rule">
             <div
               className="h-full bg-accent transition-all"
               style={{ width: `${progressPct}%` }}
@@ -142,16 +147,22 @@ export function MeshPanel({ scene, meshProgress }: Props) {
       )}
 
       {status === "failed" && scene.mesh_error && (
-        <p className="text-xs text-danger">last extract failed: {scene.mesh_error}</p>
+        <p className="rounded-sm border border-danger/30 bg-danger/5 p-2 font-mono text-[11px] text-danger">
+          last extract failed: {scene.mesh_error}
+        </p>
       )}
 
-      <fieldset className="space-y-3" disabled={isRunning || submitting}>
-        <legend className="text-xs text-muted">params</legend>
+      <fieldset
+        className="grid grid-cols-1 gap-3 sm:grid-cols-3"
+        disabled={isRunning || submitting}
+      >
         <label
-          className="flex flex-col gap-0.5 text-xs"
+          className="flex flex-col gap-1"
           title="Number of points sampled from the trained Gaussians for Poisson surface reconstruction. More points = denser, more detailed mesh, but longer extraction + larger output."
         >
-          <span className="text-muted">point sample count</span>
+          <Eyebrow className="!text-[10px] !tracking-[0.08em]">
+            point sample count
+          </Eyebrow>
           <input
             type="number"
             value={params.num_points}
@@ -163,11 +174,11 @@ export function MeshPanel({ scene, meshProgress }: Props) {
                 setParams((s) => ({ ...s, num_points: n }));
               }
             }}
-            className="w-32 bg-transparent border-b border-rule px-1 focus:outline-none focus:border-accent"
+            className="rounded-sm border border-rule bg-bg px-3 py-2 font-mono text-sm text-fg focus:border-accent focus:outline-none disabled:opacity-60"
           />
         </label>
         <label
-          className="flex items-center gap-2 text-sm cursor-pointer"
+          className="flex cursor-pointer items-center gap-2 self-end pb-2 text-sm"
           title="Run Open3D's statistical outlier removal on the sampled point cloud before reconstruction. Cleans up most spurious surfaces; turn off if your scene has thin geometry that gets shaved."
         >
           <input
@@ -181,7 +192,7 @@ export function MeshPanel({ scene, meshProgress }: Props) {
           remove outliers
         </label>
         <label
-          className="flex items-center gap-2 text-sm cursor-pointer"
+          className="flex cursor-pointer items-center gap-2 self-end pb-2 text-sm"
           title="Crop point sampling to the trained scene bbox. Helpful when stray gaussians sit far outside the subject; only enable if your training run set sensible scene bounds."
         >
           <input
@@ -196,48 +207,30 @@ export function MeshPanel({ scene, meshProgress }: Props) {
         </label>
       </fieldset>
 
-      <div className="flex flex-wrap items-center gap-3 text-xs">
-        <button
-          type="button"
+      <div className="flex flex-wrap items-center gap-3">
+        <BigButton
           onClick={onExtract}
           disabled={isRunning || submitting}
-          className="border border-rule px-3 py-1 hover:bg-rule disabled:opacity-50"
         >
           {submitting
-            ? "queueing…"
+            ? "Queueing…"
             : hasMesh
-              ? "re-extract"
-              : "extract mesh"}
-        </button>
+              ? "Re-extract"
+              : "Extract mesh"}
+        </BigButton>
         {hasMesh && (
-          <button
-            type="button"
+          <BigButton
+            variant="secondary"
             onClick={onDiscard}
             disabled={isRunning || discarding}
-            className="text-danger underline hover:text-fg disabled:opacity-40"
+            className="!text-danger"
           >
-            {discarding ? "discarding…" : "discard mesh"}
-          </button>
+            {discarding ? "Discarding…" : "Discard mesh"}
+          </BigButton>
         )}
-        {scene.mesh_obj_url && (
-          <a
-            href={api.base() + scene.mesh_obj_url}
-            download
-            className="underline hover:text-fg"
-          >
-            download .obj
-          </a>
+        {error && (
+          <span className="font-mono text-[11px] text-danger">{error}</span>
         )}
-        {scene.mesh_glb_url && (
-          <a
-            href={api.base() + scene.mesh_glb_url}
-            download
-            className="underline hover:text-fg"
-          >
-            download .glb
-          </a>
-        )}
-        {error && <span className="text-danger">{error}</span>}
       </div>
     </section>
   );

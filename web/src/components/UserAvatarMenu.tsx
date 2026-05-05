@@ -75,7 +75,7 @@ export function UserAvatarMenu({
       {open && (
         <div
           role="menu"
-          className="absolute right-0 top-full z-20 mt-2 w-48 rounded-md border border-rule bg-surface p-1 shadow-lg"
+          className="absolute right-0 top-full z-50 mt-2 w-48 rounded-md border border-rule bg-surface p-1 shadow-lg"
         >
           <MenuLink href="/account" label="Account" sub="profile + storage" />
           <MenuLink href="/sign-in" label="Sign out" sub="ends this session" />

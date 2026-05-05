@@ -1,3 +1,4 @@
+"use client";
 /**
  * Pebble UI primitives. Shared across `/`, `/sign-in`, `/account`,
  * `/captures/new`, and `/captures/[id]`. One source of truth so the
@@ -7,10 +8,15 @@
  * The shapes mirror studio.jsx's BigButton / FilterChip / Panel /
  * Stat / Legend / UserAvatar — translated from inline-style React to
  * Tailwind classes that read the global Pebble tokens.
+ *
+ * Marked "use client" because DownloadMenu owns dropdown open/close
+ * + outside-click state. The other primitives are pure-presentational
+ * but live in this file for ergonomics — fine to ship under the same
+ * boundary since they're consumer-rendered without SSR-only logic.
  */
 import { clsx } from "clsx";
 import Link from "next/link";
-import type { ComponentProps, ReactNode } from "react";
+import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
 
 // ─── BigButton ────────────────────────────────────────────────────
 
@@ -61,6 +67,150 @@ export function BigButton({
     <button className={cls} {...props}>
       {children}
     </button>
+  );
+}
+
+// ─── DownloadMenu (split button) ──────────────────────────────────
+
+export type DownloadOption = {
+  label: string;
+  /** Absolute URL or anchor href for `<a download>`. Disabled when null. */
+  href: string | null;
+  /** Optional secondary line shown in the dropdown — e.g. "edited" or
+   *  format-specific notes. */
+  sub?: string;
+};
+
+/**
+ * Split button: the left half is a `<a download>` for the primary
+ * option, the right half is a chevron that toggles a small dropdown
+ * with every other option. Disabled options render but route to a
+ * neutral "pending" tile so the dropdown still tells the user what
+ * the scene will eventually offer.
+ *
+ * Replaces both the old per-format Download buttons and the right-
+ * column Exports panel on the capture detail page.
+ */
+export function DownloadMenu({
+  primary,
+  options,
+}: {
+  primary: DownloadOption;
+  options: DownloadOption[];
+}) {
+  const [open, setOpen] = useState(false);
+  const root = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointer = (e: MouseEvent) => {
+      if (!root.current) return;
+      if (!root.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("mousedown", onPointer);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onPointer);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const primaryReady = !!primary.href;
+  return (
+    <div ref={root} className="relative inline-flex">
+      {primaryReady ? (
+        <a
+          href={primary.href!}
+          download
+          className="inline-flex items-center gap-2 rounded-l-md border border-rule bg-surface px-[18px] py-[10px] text-sm font-semibold text-fg hover:border-ruleStrong"
+        >
+          Download {primary.label}
+          {primary.sub && (
+            <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-accent">
+              {primary.sub}
+            </span>
+          )}
+        </a>
+      ) : (
+        <span className="inline-flex items-center gap-2 rounded-l-md border border-rule bg-surface px-[18px] py-[10px] text-sm font-semibold text-muted">
+          Download {primary.label}
+        </span>
+      )}
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label="More download formats"
+        className="inline-flex items-center justify-center rounded-r-md border border-l-0 border-rule bg-surface px-2 py-[10px] text-sm text-fg hover:border-ruleStrong"
+      >
+        <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden>
+          <path
+            d="M2 4l4 4 4-4"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            fill="none"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute right-0 top-full z-50 mt-2 w-64 rounded-md border border-rule bg-surface p-1 shadow-lg"
+        >
+          {options.length === 0 && (
+            <div className="px-3 py-2 font-mono text-[11px] text-muted">
+              no other formats yet
+            </div>
+          )}
+          {options.map((opt) => (
+            <DownloadMenuItem
+              key={opt.label}
+              option={opt}
+              onClick={() => setOpen(false)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DownloadMenuItem({
+  option,
+  onClick,
+}: {
+  option: DownloadOption;
+  onClick: () => void;
+}) {
+  if (!option.href) {
+    return (
+      <div className="block rounded-sm px-3 py-2 opacity-60">
+        <div className="text-sm text-fg">{option.label}</div>
+        <div className="font-mono text-[10px] uppercase tracking-[0.08em] text-muted">
+          {option.sub ?? "pending"}
+        </div>
+      </div>
+    );
+  }
+  return (
+    <a
+      role="menuitem"
+      href={option.href}
+      download
+      onClick={onClick}
+      className="block rounded-sm px-3 py-2 hover:bg-bgAlt"
+    >
+      <div className="text-sm text-fg">{option.label}</div>
+      <div className="font-mono text-[10px] uppercase tracking-[0.08em] text-muted">
+        {option.sub ?? "ready"}
+      </div>
+    </a>
   );
 }
 
