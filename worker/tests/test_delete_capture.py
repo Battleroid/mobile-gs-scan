@@ -208,6 +208,58 @@ def test_heartbeat_kills_subprocess_when_row_deleted(
     _run(go())
 
 
+def test_ack_user_cancel_treats_missing_row_as_canceled(isolated_store):
+    """The outer worker loop's CancelledError handler calls
+    ``_ack_user_cancel`` and re-raises if it returns False — which
+    would terminate the worker process. After the heartbeat fix,
+    a row going missing (capture deleted out from under a running
+    job) MUST be ack'd as user-cancel so the worker loop continues
+    instead of exiting until restart.
+
+    Regression for the second codex P1 on PR #81 — the heartbeat
+    fix alone was insufficient because the cancel chain
+    (heartbeat → dispatch_task.cancel() → CancelledError →
+    _ack_user_cancel → raise) ended at ``raise`` when the row was
+    gone, taking down the worker.
+    """
+    async def go():
+        cap = await store.create_capture(name="cap-y", source="upload")
+        scene = await store.create_scene(cap.id)
+        job = await store.enqueue_job(scene.id, JobKind.train)
+        await store.update_job(job.id, status=JobStatus.running)
+
+        # Hold a reference to the Job object the way run_forever
+        # does — _ack_user_cancel takes the job DTO and re-fetches
+        # by id, so the original is fine to keep around.
+        job_ref = job
+
+        # Sanity — running row, not canceled. Should not ack.
+        assert await runner._ack_user_cancel(job_ref) is False
+
+        # Delete the capture — cascades the row away.
+        await store.delete_capture(cap.id)
+
+        # Row gone. _ack_user_cancel must return True so
+        # run_forever swallows the CancelledError and continues.
+        assert await runner._ack_user_cancel(job_ref) is True
+
+    _run(go())
+
+
+def test_ack_user_cancel_returns_true_for_canceled_row(isolated_store):
+    """The pre-existing canceled-status path stays working — the
+    missing-row fix above is additive."""
+    async def go():
+        cap = await store.create_capture(name="cap-z", source="upload")
+        scene = await store.create_scene(cap.id)
+        job = await store.enqueue_job(scene.id, JobKind.train)
+        await store.update_job(job.id, status=JobStatus.running)
+        await store.cancel_job(job.id)
+        assert await runner._ack_user_cancel(job) is True
+
+    _run(go())
+
+
 def test_heartbeat_kills_subprocess_when_status_canceled(
     isolated_store, monkeypatch: pytest.MonkeyPatch
 ):
