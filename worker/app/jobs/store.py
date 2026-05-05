@@ -16,6 +16,7 @@ stores naive UTC; every comparison stays naive↔naive.
 """
 from __future__ import annotations
 
+import json
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -329,18 +330,53 @@ async def update_scene(scene_id: str, **fields) -> None:
 # ─── jobs ────────────────────────────────────────
 
 
-async def enqueue_job(scene_id: str, kind: JobKind, payload: dict | None = None) -> Job:
-    job = Job(
-        id=_make_id(),
-        scene_id=scene_id,
-        kind=kind,
-        payload=payload or {},
-    )
+async def enqueue_job(
+    scene_id: str, kind: JobKind, payload: dict | None = None
+) -> Job | None:
+    """Enqueue a job for a scene. Returns None if the scene doesn't
+    exist (caller treats as race-loss and surfaces a 404 / bails the
+    pipeline).
+
+    Atomic via ``INSERT ... SELECT ... WHERE EXISTS`` so a concurrent
+    ``delete_capture`` cascading the scene away can't race past
+    ``finalize`` between ``create_scene`` and ``enqueue_pipeline``.
+    Without this guard we'd insert orphan jobs that workers later
+    fail with ``scene vanished``.
+
+    Same SQLite single-writer-lock semantics as ``create_scene``:
+    either we win the race against ``delete_capture``'s scene/job
+    cascade (rowcount=1, job returned) or delete wins (rowcount=0,
+    no orphan, return None).
+    """
+    job_id = _make_id()
+    now = _utcnow()
+    payload_json = json.dumps(payload or {})
     async with session() as s:
-        s.add(job)
+        result = await s.execute(
+            text(
+                """
+                INSERT INTO jobs (
+                    id, scene_id, kind, status, progress,
+                    payload, result, created_at, updated_at
+                )
+                SELECT
+                    :jid, :sid, :kind, 'queued', 0.0,
+                    :payload, '{}', :now, :now
+                WHERE EXISTS (SELECT 1 FROM scenes WHERE id = :sid)
+                """
+            ),
+            {
+                "jid": job_id,
+                "sid": scene_id,
+                "kind": kind.value,
+                "payload": payload_json,
+                "now": now,
+            },
+        )
         await s.commit()
-        await s.refresh(job)
-    return job
+        if result.rowcount == 0:
+            return None
+        return await s.get(Job, job_id)
 
 
 async def list_jobs_for_scene(scene_id: str) -> list[Job]:

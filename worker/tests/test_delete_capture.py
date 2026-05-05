@@ -337,3 +337,43 @@ def test_create_scene_returns_scene_for_existing_capture(isolated_store):
         assert scene.status == CaptureStatus.queued
 
     _run(go())
+
+
+def test_enqueue_job_returns_none_when_scene_gone(isolated_store):
+    """If the scene gets deleted between finalize()'s create_scene
+    and enqueue_pipeline's first enqueue_job — concurrent
+    delete_capture cascading scenes/jobs away — enqueue_job must
+    return None, not orphan a job pointing at a dangling scene id.
+    Workers would otherwise pick up the orphan and fail with
+    'scene vanished'.
+
+    Regression for the codex P1 #5 on PR #81.
+    """
+    async def go():
+        cap = await store.create_capture(name="ghost-scene", source="upload")
+        scene = await store.create_scene(cap.id)
+        assert scene is not None
+        # Delete the capture (cascades the scene + any jobs).
+        assert await store.delete_capture(cap.id) is True
+
+        # finalize would now reach enqueue_job with a stale scene id.
+        job = await store.enqueue_job(scene.id, JobKind.train)
+        assert job is None
+
+    _run(go())
+
+
+def test_enqueue_job_returns_job_for_existing_scene(isolated_store):
+    """Happy path stays intact after the WHERE EXISTS guard."""
+    async def go():
+        cap = await store.create_capture(name="alive", source="upload")
+        scene = await store.create_scene(cap.id)
+        assert scene is not None
+        job = await store.enqueue_job(scene.id, JobKind.train, payload={"x": 1})
+        assert job is not None
+        assert job.scene_id == scene.id
+        assert job.kind == JobKind.train
+        assert job.status == JobStatus.queued
+        assert job.payload == {"x": 1}
+
+    _run(go())

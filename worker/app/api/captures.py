@@ -165,7 +165,15 @@ async def finalize_capture(capture_id: str, body: FinalizeBody) -> dict:
     if scene is None:
         raise HTTPException(404, "capture deleted before finalize completed")
     await store.set_capture_status(cap.id, CaptureStatus.queued)
-    await enqueue_pipeline(scene.id, has_pose=cap.has_pose, source=cap.source)
+    job_ids = await enqueue_pipeline(
+        scene.id, has_pose=cap.has_pose, source=cap.source
+    )
+    if not job_ids:
+        # Scene cascaded away between create_scene and the first
+        # enqueue_job — concurrent capture-delete won the race after
+        # we got past the create_scene atomicity gate. The scene row
+        # is gone too at this point; nothing to return.
+        raise HTTPException(404, "capture deleted before finalize completed")
     await events.publish_capture(cap.id, "capture.finalized", scene_id=scene.id)
     return {"scene_id": scene.id}
 

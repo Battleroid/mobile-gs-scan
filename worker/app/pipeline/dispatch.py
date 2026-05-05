@@ -44,6 +44,20 @@ async def enqueue_pipeline(
     has_pose: bool,
     source: CaptureSource,
 ) -> list[str]:
+    """Enqueue the extract → sfm → train → export pipeline for a
+    scene. Returns the list of enqueued job ids, or an empty list
+    if the scene has been deleted out from under us between the
+    caller's reference and the first INSERT (e.g. a concurrent
+    ``DELETE /api/captures/{id}`` cascade between ``finalize_capture``'s
+    ``create_scene`` and this call).
+
+    Each ``enqueue_job`` is atomic via ``INSERT ... WHERE EXISTS``
+    on the scenes table, so a None at any step means the scene is
+    definitively gone — bail out, return what we have. The caller
+    treats an empty list as "race lost" and surfaces a 404 rather
+    than enqueueing orphan jobs that workers would later fail with
+    ``scene vanished``.
+    """
     settings = get_settings()
     job_ids: list[str] = []
 
@@ -51,6 +65,9 @@ async def enqueue_pipeline(
     extract = await store.enqueue_job(
         scene_id, JobKind.extract, payload=extract_payload,
     )
+    if extract is None:
+        log.info("scene %s vanished before pipeline enqueue; bailing", scene_id)
+        return job_ids
     job_ids.append(extract.id)
 
     backend: str | None
@@ -65,12 +82,16 @@ async def enqueue_pipeline(
         sfm = await store.enqueue_job(
             scene_id, JobKind.sfm, payload={"backend": backend}
         )
+        if sfm is None:
+            return job_ids
         job_ids.append(sfm.id)
 
     train_iters = await _resolve_train_iters(scene_id, settings.train_iters)
     train = await store.enqueue_job(
         scene_id, JobKind.train, payload={"iters": train_iters}
     )
+    if train is None:
+        return job_ids
     job_ids.append(train.id)
 
     export = await store.enqueue_job(
@@ -78,6 +99,8 @@ async def enqueue_pipeline(
         JobKind.export,
         payload={"formats": ["ply", "spz"]},
     )
+    if export is None:
+        return job_ids
     job_ids.append(export.id)
 
     return job_ids
