@@ -202,30 +202,46 @@ async def set_capture_status(
 
 
 async def delete_capture(capture_id: str) -> bool:
-    """Hard-delete a capture row + its scene + the scene's jobs.
+    """Hard-delete a capture row + its scenes + the scenes' jobs.
 
     The schema's ``ondelete="CASCADE"`` declarations are no-ops on
     SQLite without a per-connection ``PRAGMA foreign_keys=ON``; we
     keep FK enforcement off (turning it on globally has historically
     surfaced latent FK issues elsewhere in the pipeline) and cascade
-    manually instead. Returns True if the row existed and was
-    removed; False if no capture had this id (caller can decide
-    whether that's a 404 or an idempotent no-op).
+    manually. Returns True if the row existed and was removed;
+    False if no capture had this id (caller can decide whether
+    that's a 404 or an idempotent no-op).
+
+    Concurrency: cascades run as bulk DELETE statements (no SELECT-
+    then-iterate) so each WHERE clause sees the live state at the
+    moment that statement runs, not a snapshot. SQLite's first
+    write in a session also acquires the database-level write lock,
+    so a concurrent ``finalize_capture`` trying to ``create_scene``
+    for this capture id blocks behind us until commit. That closes
+    the race window where a finalize landing between a SELECT-
+    scenes and DELETE-capture would leave an orphan scene pointing
+    at a deleted capture.
     """
     async with session() as s:
-        cap = await s.get(Capture, capture_id)
-        if cap is None:
-            return False
-        scene_rows = await s.execute(
-            select(Scene).where(Scene.capture_id == capture_id)
+        # Delete jobs whose scene belongs to this capture. Subselect
+        # by capture_id (not by a precomputed scene id list) so any
+        # scene a concurrent finalize() raced in is also cleaned up —
+        # same shape as the next two deletes.
+        await s.execute(
+            delete(Job).where(
+                Job.scene_id.in_(
+                    select(Scene.id).where(Scene.capture_id == capture_id)
+                )
+            )
         )
-        scenes = list(scene_rows.scalars())
-        for scene in scenes:
-            await s.execute(delete(Job).where(Job.scene_id == scene.id))
-            await s.delete(scene)
-        await s.delete(cap)
+        await s.execute(
+            delete(Scene).where(Scene.capture_id == capture_id)
+        )
+        result = await s.execute(
+            delete(Capture).where(Capture.id == capture_id)
+        )
         await s.commit()
-        return True
+        return result.rowcount > 0
 
 
 async def set_capture_name(capture_id: str, name: str) -> None:
