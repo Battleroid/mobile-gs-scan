@@ -70,21 +70,33 @@ export function UploadDropzone({ name }: Props) {
   async function stage(files: File[]) {
     if (!files.length) return;
     setError(null);
-    const kinds = files.map(classify);
-    if (kinds.some((k) => k === "image") && kinds.some((k) => k === "video")) {
+    // Filter out anything we can't ingest (hidden / system files
+    // a folder pick smuggles in — .DS_Store, Thumbs.db, etc.) up
+    // front so the routing branches below only ever see the two
+    // shapes we actually support.
+    const classified = files
+      .map((f) => ({ file: f, kind: classify(f) }))
+      .filter((c) => c.kind !== "other");
+    if (classified.length === 0) {
+      setError("nothing to upload — drop image files or a single video.");
+      return;
+    }
+    const images = classified.filter((c) => c.kind === "image").map((c) => c.file);
+    const videos = classified.filter((c) => c.kind === "video").map((c) => c.file);
+    if (images.length > 0 && videos.length > 0) {
       setError("drop either image files or one video — not both.");
       return;
     }
-    if (kinds.filter((k) => k === "video").length > 1) {
+    if (videos.length > 1) {
       setError("only one video per capture is supported.");
       return;
     }
-    if (kinds.every((k) => k === "image")) {
-      setStaged({ files, kind: "images" });
+    if (videos.length === 0) {
+      setStaged({ files: images, kind: "images" });
       return;
     }
     // Single-video path: probe metadata for a source-fps ceiling.
-    const video = files.find((_, i) => kinds[i] === "video")!;
+    const video = videos[0];
     const meta = await probeVideo(video);
     setStaged({ files: [video], kind: "video", video: meta });
     if (meta.fps > 0) {

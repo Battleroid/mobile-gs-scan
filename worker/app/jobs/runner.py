@@ -231,6 +231,20 @@ async def _run_one(job: Job, settings: Settings) -> None:
                 spz_path=spz,
             )
 
+    if job.kind == JobKind.extract:
+        # Video uploads write the source file to ``source/`` and
+        # leave ``frame_count`` at 0; ffmpeg only produces the JPEGs
+        # later, here. Bump the capture row now so the API + UI
+        # surface a real frame count for video captures (image-set
+        # captures already had it bumped at upload time and the
+        # extract step is a no-op for them — guarded by the
+        # presence of ``frames`` in the result dict).
+        n_frames = result.get("frames")
+        if isinstance(n_frames, int) and n_frames > 0:
+            await store.bump_capture_frames(
+                capture.id, accepted=n_frames, dropped=0,
+            )
+
     # Always check scene finalization after a successful job. The
     # previous "only after export" path was wrong: dispatch order is
     # sfm → train → export → mesh, so when export completes the mesh

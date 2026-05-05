@@ -184,14 +184,19 @@ async def upload_to_capture(
     if cap.source != CaptureSource.upload:
         raise HTTPException(400, "capture is not an upload session")
 
-    suffixes = [Path(f.filename or "").suffix.lower() for f in files]
-    images = [s for s in suffixes if s in _IMAGE_SUFFIXES]
-    videos = [s for s in suffixes if s in _VIDEO_SUFFIXES]
-    if images and videos:
+    # Tag each part with its kind up front so we can route on the
+    # shape of the request without ever indexing into ``files`` by
+    # an assumption about which slot the video lives in.
+    classified = [
+        (f, Path(f.filename or "").suffix.lower()) for f in files
+    ]
+    image_parts = [(f, s) for f, s in classified if s in _IMAGE_SUFFIXES]
+    video_parts = [(f, s) for f, s in classified if s in _VIDEO_SUFFIXES]
+    if image_parts and video_parts:
         raise HTTPException(
             422, "upload either image files or one video — not both",
         )
-    if len(videos) > 1:
+    if len(video_parts) > 1:
         raise HTTPException(
             422, "only one video per upload is supported",
         )
@@ -199,14 +204,13 @@ async def upload_to_capture(
     capture_dir = settings.captures_dir() / cap.id
     await store.set_capture_status(cap.id, CaptureStatus.uploading)
 
-    if videos:
+    if video_parts:
         # Single-video path: stash the source under ``source/`` so the
         # extract step picks it up. Don't bump frame_count yet — the
         # worker increments it as ffmpeg writes frames.
         source_dir = capture_dir / "source"
         source_dir.mkdir(parents=True, exist_ok=True)
-        f = files[0]
-        suffix = Path(f.filename or "").suffix.lower()
+        f, suffix = video_parts[0]
         dst = source_dir / f"video{suffix}"
         with dst.open("wb") as out:
             shutil.copyfileobj(f.file, out)
