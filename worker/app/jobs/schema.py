@@ -81,6 +81,11 @@ class JobKind(str, enum.Enum):
     export = "export"
     mesh = "mesh"  # On-demand Poisson mesh extraction (Phase 3).
     filter = "filter"  # user-triggered post-processing of an existing splat
+    # Render a single PNG thumbnail of the trained splat for the
+    # web home grid. Runs after export. Failure is non-fatal —
+    # the scene stays "completed" without a thumbnail and the
+    # web CaptureCard falls back to a chip-tinted gradient.
+    thumbnail = "thumbnail"
 
 
 class EditStatus(str, enum.Enum):

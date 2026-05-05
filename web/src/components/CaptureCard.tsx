@@ -63,38 +63,52 @@ export function CaptureCard({ capture }: { capture: Capture }) {
   const { label, tone } = statusLabel(capture);
   const isTraining = capture.status === "processing" || capture.status === "queued";
 
-  // Pull the scene ONLY for training rows — the only consumer of
-  // this query is the progress overlay (rendered when isTraining
-  // && progress !== null). Polling completed / failed / uploading
-  // shelves would otherwise fire an N+1 burst of getScene requests
-  // on every grid mount (plus tanstack's default refetch-on-focus
-  // / refetch-on-mount) for data the card never reads. On a busy
-  // shelf this dwarfs the cost of the actual list query.
+  // Pull the scene whenever the capture has one — both readers
+  // (progress overlay during training, thumbnail PNG once
+  // training completes) need scene-shaped data the capture row
+  // doesn't carry. The 3-second poll is still gated to active
+  // captures so completed shelves don't keep refetching scene
+  // data that won't change.
   const { data: scene } = useQuery<Scene | null>({
     queryKey: ["scene", capture.scene_id],
     queryFn: () => api.getScene(capture.scene_id!),
-    enabled: !!capture.scene_id && isTraining,
+    enabled: !!capture.scene_id,
     refetchInterval: isTraining ? 3_000 : false,
   });
 
   const progress = progressOf(scene?.jobs);
+  const thumbUrl = scene?.thumb_url
+    ? api.base() + scene.thumb_url
+    : null;
 
   return (
     <Link
       href={`/captures/${capture.id}`}
       className="group block overflow-hidden rounded-lg border border-rule bg-surface shadow-[0_1px_0_rgba(0,0,0,0.02)] transition-transform hover:-translate-y-[2px] hover:shadow-md"
     >
-      {/* Thumbnail. Gradient placeholder keyed off id; trained scenes
-       *  with a thumb_url (PR-D) will override the gradient with a
-       *  real PNG. Training cards get a light overlay strip showing
-       *  splatfacto progress + a bottom progress bar. */}
+      {/* Thumbnail. Trained scenes serve a server-rendered PNG via
+       *  the JobKind.thumbnail step — when present, it replaces the
+       *  gradient + sparse-particle placeholder. Training cards
+       *  layer a progress bar + 'splatfacto · NN%' chip on top of
+       *  whichever background is showing. */}
       <div
         className="relative h-[180px] overflow-hidden"
         style={{
           background: `linear-gradient(135deg, ${from} 0%, ${to} 100%)`,
         }}
       >
-        <Particles seed={capture.id} />
+        {thumbUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={thumbUrl}
+            alt=""
+            className="absolute inset-0 h-full w-full object-cover"
+            loading="lazy"
+            decoding="async"
+          />
+        ) : (
+          <Particles seed={capture.id} />
+        )}
         {isTraining && progress !== null && (
           <>
             <div className="absolute left-3 right-3 top-3 flex justify-between font-mono text-[10px] text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.4)]">
