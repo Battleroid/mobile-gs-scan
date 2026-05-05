@@ -202,6 +202,38 @@ async def upload_to_capture(
         )
 
     capture_dir = settings.captures_dir() / cap.id
+    # Cross-request invariant: a capture is *either* an image set *or*
+    # a single-video upload, never both — even split across multiple
+    # /upload calls (Android batches frames; the user might also
+    # split a multi-folder drag into multiple POSTs). Reject the
+    # request if the on-disk state from prior calls disagrees with
+    # what this one is trying to add.
+    has_existing_video = (capture_dir / "source").exists() and any(
+        p.suffix.lower() in _VIDEO_SUFFIXES
+        for p in (capture_dir / "source").iterdir()
+        if p.is_file()
+    )
+    has_existing_frames = cap.frame_count > 0 or (
+        (capture_dir / "frames").exists()
+        and any((capture_dir / "frames").iterdir())
+    )
+    if video_parts and has_existing_frames:
+        raise HTTPException(
+            422,
+            "this capture already has uploaded images; videos can't be "
+            "added to the same capture",
+        )
+    if image_parts and has_existing_video:
+        raise HTTPException(
+            422,
+            "this capture already has an uploaded video; images can't be "
+            "added to the same capture",
+        )
+    if video_parts and has_existing_video:
+        raise HTTPException(
+            422, "a video has already been uploaded for this capture",
+        )
+
     await store.set_capture_status(cap.id, CaptureStatus.uploading)
 
     if video_parts:

@@ -56,6 +56,11 @@ export function UploadDropzone({ name }: Props) {
   } | null>(null);
   const [extractFps, setExtractFps] = useState<number>(EXTRACT_FPS_DEFAULT);
   const [jpegQuality, setJpegQuality] = useState<number>(JPEG_QUALITY_DEFAULT);
+  // ``pending`` from useTransition only covers the router.push, not the
+  // async createCapture → uploadFiles → finalize chain. Without this
+  // separate flag the start button stays clickable through every
+  // await and a quick double-tap fires duplicate captures.
+  const [submitting, setSubmitting] = useState(false);
 
   function onDrop(e: React.DragEvent) {
     e.preventDefault();
@@ -108,7 +113,8 @@ export function UploadDropzone({ name }: Props) {
   }
 
   async function submit() {
-    if (!staged) return;
+    if (!staged || submitting) return;
+    setSubmitting(true);
     setError(null);
     const iters = clampTrainIters(trainIters);
     // Prefer the user-supplied capture name when present. Fall back
@@ -155,7 +161,12 @@ export function UploadDropzone({ name }: Props) {
     } catch (e) {
       setError((e as Error).message);
       setProgress(null);
+      setSubmitting(false);
     }
+    // Note: on success we deliberately leave submitting=true so the
+    // button stays disabled until startTransition's navigation
+    // unmounts the component. Otherwise the brief gap between the
+    // resolved promise and React unmounting would re-enable it.
   }
 
   return (
@@ -180,7 +191,7 @@ export function UploadDropzone({ name }: Props) {
         className={clsx(
           "border border-dashed border-rule p-10 text-center transition-colors",
           over && "border-accent bg-rule/40",
-          pending && "opacity-60 pointer-events-none",
+          (pending || submitting) && "opacity-60 pointer-events-none",
         )}
       >
         {staged ? (
@@ -218,10 +229,10 @@ export function UploadDropzone({ name }: Props) {
           <button
             type="button"
             onClick={submit}
-            disabled={pending}
+            disabled={pending || submitting}
             className="mt-3 px-4 py-2 border border-rule hover:bg-rule/30 disabled:opacity-60"
           >
-            {pending ? "uploading…" : "start"}
+            {pending || submitting ? "uploading…" : "start"}
           </button>
         )}
         {progress && <p className="text-xs text-accent mt-3">{progress}</p>}
