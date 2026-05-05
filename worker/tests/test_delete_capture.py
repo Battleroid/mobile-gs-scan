@@ -21,8 +21,9 @@ from pathlib import Path
 import pytest
 
 from app.config import Settings
-from app.jobs import store
+from app.jobs import runner, store
 from app.jobs.schema import CaptureStatus, JobKind, JobStatus
+from app.pipeline import _running
 
 
 @pytest.fixture
@@ -144,5 +145,101 @@ def test_delete_capture_only_affects_target(isolated_store):
         kept = await store.get_job(keep_job.id)
         assert kept is not None
         assert kept.status == JobStatus.queued
+
+    _run(go())
+
+
+def test_heartbeat_kills_subprocess_when_row_deleted(
+    isolated_store, monkeypatch: pytest.MonkeyPatch
+):
+    """When a capture is deleted while one of its jobs is mid-flight,
+    cascading row removal must trigger the worker's heartbeat to kill
+    the subprocess and cancel the dispatch task. Otherwise the worker
+    would keep grinding on already-deleted disk until the subprocess
+    noticed an I/O error on its own — sometimes minutes later.
+
+    Regression for the codex P1 on PR #81: the heartbeat used to
+    silently skip when ``get_job`` returned ``None`` (only acting on
+    explicit status=canceled), so a delete-during-train left the
+    pipeline running.
+    """
+    async def go():
+        # Speed the heartbeat up so the test doesn't sit on the
+        # 5s production interval. Patched at module-level so the
+        # _heartbeat coroutine's `asyncio.sleep(HEARTBEAT_INTERVAL)`
+        # picks it up.
+        monkeypatch.setattr(runner, "HEARTBEAT_INTERVAL", 0.02)
+
+        # Stub kill_for_job so we don't need a real subprocess.
+        # Track which job ids it's called with.
+        killed: list[str] = []
+        monkeypatch.setattr(
+            _running, "kill_for_job", lambda jid: killed.append(jid)
+        )
+
+        cap = await store.create_capture(name="cap-delete", source="upload")
+        scene = await store.create_scene(cap.id)
+        job = await store.enqueue_job(scene.id, JobKind.train)
+        # Move the job into running state so it looks like real work.
+        await store.update_job(job.id, status=JobStatus.running)
+
+        # Stand-in for the dispatch coroutine — sleeps long enough
+        # that the heartbeat is the one to terminate it.
+        dispatch_task = asyncio.create_task(asyncio.sleep(60))
+        hb_task = asyncio.create_task(runner._heartbeat(job.id, dispatch_task))
+
+        # Let the heartbeat tick a couple of times.
+        await asyncio.sleep(0.05)
+        # User deletes the capture — cascades through to job rows.
+        assert await store.delete_capture(cap.id) is True
+        # Heartbeat should observe the missing row on its next tick
+        # and call kill_for_job + dispatch_task.cancel(), then exit.
+        await asyncio.wait_for(hb_task, timeout=2.0)
+
+        assert killed == [job.id], (
+            "heartbeat must SIGKILL the running subprocess when its "
+            "job row is gone (capture was deleted out from under it)"
+        )
+        assert dispatch_task.cancelled() or dispatch_task.done()
+        # Clean up the dispatch_task placeholder.
+        if not dispatch_task.done():
+            dispatch_task.cancel()
+
+    _run(go())
+
+
+def test_heartbeat_kills_subprocess_when_status_canceled(
+    isolated_store, monkeypatch: pytest.MonkeyPatch
+):
+    """The pre-existing canceled-status path must still work — the
+    deleted-row fix above adds a second trigger, doesn't replace this
+    one. The API DELETE handler cancels jobs first, then deletes the
+    row; whichever the heartbeat sees first should result in the
+    same kill.
+    """
+    async def go():
+        monkeypatch.setattr(runner, "HEARTBEAT_INTERVAL", 0.02)
+        killed: list[str] = []
+        monkeypatch.setattr(
+            _running, "kill_for_job", lambda jid: killed.append(jid)
+        )
+
+        cap = await store.create_capture(name="cap-cancel", source="upload")
+        scene = await store.create_scene(cap.id)
+        job = await store.enqueue_job(scene.id, JobKind.train)
+        await store.update_job(job.id, status=JobStatus.running)
+
+        dispatch_task = asyncio.create_task(asyncio.sleep(60))
+        hb_task = asyncio.create_task(runner._heartbeat(job.id, dispatch_task))
+
+        await asyncio.sleep(0.05)
+        # Flip status to canceled but leave the row in place.
+        assert await store.cancel_job(job.id) is True
+        await asyncio.wait_for(hb_task, timeout=2.0)
+
+        assert killed == [job.id]
+        assert dispatch_task.cancelled() or dispatch_task.done()
+        if not dispatch_task.done():
+            dispatch_task.cancel()
 
     _run(go())

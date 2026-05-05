@@ -526,16 +526,27 @@ async def _heartbeat(job_id: str, dispatch_task: asyncio.Task) -> None:
     """Heartbeat task: keeps claimed_by fresh AND watches for user
     cancellation. On cancel, kills any registered subprocess for
     the job and cancels the dispatch coroutine.
+
+    A missing row (``get_job`` returns ``None``) is treated as
+    cancellation-equivalent: the only path that removes a still-
+    running job's row is ``DELETE /api/captures/{id}`` cascading
+    through the scene's jobs, which is the strongest possible
+    "stop now" signal. Without this, a delete-during-train would
+    leave the worker grinding on already-removed disk files until
+    the subprocess noticed an I/O error on its own — sometimes
+    minutes later.
     """
     while True:
         try:
             await asyncio.sleep(HEARTBEAT_INTERVAL)
             await store.update_job(job_id, heartbeat=True)
             j = await store.get_job(job_id)
-            if j is not None and j.status == JobStatus.canceled:
+            if j is None or j.status == JobStatus.canceled:
+                reason = "row deleted" if j is None else "status=canceled"
                 log.info(
-                    "job %s canceled — killing subprocess + dispatch task",
+                    "job %s %s — killing subprocess + dispatch task",
                     job_id,
+                    reason,
                 )
                 # SIGKILL the subprocess if a step has spawned one;
                 # subprocess death will propagate as RuntimeError
