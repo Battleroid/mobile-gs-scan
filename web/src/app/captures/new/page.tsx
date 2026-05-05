@@ -47,7 +47,13 @@ const FIDELITY_STOPS: {
  */
 export default function NewCapturePage() {
   const router = useRouter();
-  const [name, setName] = useState("oak side chair");
+  // Empty by default so the label's promise ("or we'll pick one")
+  // actually works — submit() falls back to the dropped folder name
+  // first, then to undefined (server auto-generates a memorable
+  // random name). Pre-filling here was a literal lift from the
+  // design mock; in a real flow it would override every capture
+  // with the same string.
+  const [name, setName] = useState("");
   const [staged, setStaged] = useState<Staged | null>(null);
   const [trainIters, setTrainIters] = useState<TrainIters>({
     kind: "preset",
@@ -378,14 +384,17 @@ function DropZone({
             <>
               <div className="text-[17px] font-semibold">Drop frames here</div>
               <div className="text-[13px] text-inkSoft">
-                Folder of stills · video file (.mp4 / .mov) · zip archive
+                Folder of stills · video file (.mp4 / .mov / .webm / .mkv)
               </div>
+              {/* Format chips advertise only what the picker `accept`
+               *  + classify() actually ingest. The design mock also
+               *  showed a zip chip; the worker doesn't unpack archives
+               *  yet so we keep that out until pipeline support lands. */}
               <div className="mt-3 flex flex-wrap gap-[6px] font-mono text-[11px] text-inkSoft">
                 <FormatChip tone="chip3">jpg</FormatChip>
                 <FormatChip tone="chip3">png</FormatChip>
                 <FormatChip tone="chip2">mp4</FormatChip>
                 <FormatChip tone="chip2">mov</FormatChip>
-                <FormatChip tone="chip4">zip</FormatChip>
               </div>
             </>
           )}
@@ -422,14 +431,10 @@ function FormatChip({
   tone,
   children,
 }: {
-  tone: "chip2" | "chip3" | "chip4";
+  tone: "chip2" | "chip3";
   children: React.ReactNode;
 }) {
-  const bg = {
-    chip2: "bg-chip2",
-    chip3: "bg-chip3",
-    chip4: "bg-chip4",
-  }[tone];
+  const bg = { chip2: "bg-chip2", chip3: "bg-chip3" }[tone];
   return (
     <span className={`rounded-xs px-2 py-[3px] ${bg}`}>{children}</span>
   );
