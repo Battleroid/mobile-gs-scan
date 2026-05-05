@@ -115,9 +115,11 @@ up-pull: .env ## pull from ghcr.io + start (uses prebuilt image tags)
 	@$(MAKE) -s pull
 	$(COMPOSE) $(PREBUILT) up
 
-# HTTPS via Caddy + a mkcert-issued cert. Required for `getUserMedia`
-# (and thus the /m/<token> mobile-web PWA + the Android cleartext-only
-# fallback) to work from a phone.
+# HTTPS via Caddy + a mkcert-issued cert. The current capture flow
+# (web drag-drop / video upload + Android HTTP upload) doesn't need
+# HTTPS, but `up-https` is still around for operators who want to
+# front the studio with TLS for any other reason (corporate network
+# policy, an internal CA, etc.).
 #
 # Single-command path: `make up-https` does everything — bootstraps
 # mkcert + cert pair + root CA, builds (locally) with an empty

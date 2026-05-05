@@ -34,12 +34,12 @@ import java.util.UUID
  *   │                  (per-capture splatfacto override).
  *   ├─ frames/
  *   │  └─ NNNNNN.jpg   one JPEG per ARCore frame, idx zero-padded
- *   └─ poses.jsonl     append-only line file; each line is the JSON
- *                      header that StreamingClient.sendFrame would
- *                      emit, sans the "type":"frame" tag — i.e.
- *                      {idx, pose: [16 floats], intrinsics, ts}.
- *                      One line per frame; matches the index of the
- *                      JPEG in frames/.
+ *   └─ poses.jsonl     append-only line file; one JSON object per
+ *                      ARCore frame: {idx, pose: [16 floats],
+ *                      intrinsics, ts}. Indices match the JPEGs in
+ *                      frames/. Currently retained for future
+ *                      ARCore-poses upload paths; the HTTP upload
+ *                      flow uses only the JPEG frames.
  *
  * Lifecycle:
  *   - [DraftStore.newDraft] creates a fresh dir + meta, returns a
@@ -167,6 +167,16 @@ class Draft internal constructor(
     fun readFrameJpeg(idx: Int): ByteArray? {
         val f = File(framesDir, String.format("%06d.jpg", idx))
         return if (f.exists()) f.readBytes() else null
+    }
+
+    /**
+     * Sorted list of JPEG frame Files in the draft. Used by the
+     * HTTP-upload path so the uploader can stream the bytes
+     * directly off disk rather than loading them into RAM.
+     */
+    fun frameFiles(): List<File> {
+        val files = framesDir.listFiles { f -> f.isFile && f.name.endsWith(".jpg") }
+        return files?.sortedBy { it.name }.orEmpty()
     }
 
     /** Path to a representative thumbnail (first frame). May not exist. */

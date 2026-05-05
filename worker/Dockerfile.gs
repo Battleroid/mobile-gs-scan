@@ -7,7 +7,20 @@ FROM ${BASE_IMAGE}
 # rest of the stack stays runnable while the real CUDA install is
 # still being shaken out.
 
-ENV TORCH_CUDA_ARCH_LIST="8.9" \
+# Compute capabilities the CUDA-bound deps (torch ext modules, gsplat,
+# Glomap below) get compiled for. Multi-arch keeps the same image
+# usable across the common GPU classes:
+#   8.0 — A100 (Ampere datacenter)
+#   8.6 — RTX 30-series, A6000, etc. (Ampere consumer / pro)
+#   8.9 — RTX 40-series (incl. 4090), L4, L40 (Ada Lovelace)
+#   9.0 — H100 (Hopper)
+# Trade-off: each extra arch ~doubles the gsplat extension's CUDA
+# compile time on a fresh build. After the first build the layer is
+# cached. To trim build time on a constrained host, override at
+# build-time, e.g. `--build-arg TORCH_CUDA_ARCH_LIST=8.9` and the
+# matching --build-arg CMAKE_CUDA_ARCHITECTURES=89 below.
+ARG TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"
+ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
     CUDA_HOME=/usr/local/cuda
 
 # Pinned to the tested combo as of early 2026:
@@ -41,11 +54,16 @@ RUN python -m pip install --extra-index-url https://download.pytorch.org/whl/cu1
 # qtbase5-dev + libqt5opengl5-dev installed in the base image, which
 # we'd rather avoid.
 ARG GLOMAP_TAG=1.0.0
+# Same arch set as TORCH_CUDA_ARCH_LIST above, expressed in CMake's
+# semicolon-list format (no decimals: "8.9" → "89"). Override via
+# --build-arg CMAKE_CUDA_ARCHITECTURES=... when trimming for a
+# specific card class.
+ARG CMAKE_CUDA_ARCHITECTURES="80;86;89;90"
 RUN (git clone --depth 1 --branch ${GLOMAP_TAG} https://github.com/colmap/glomap.git /tmp/glomap \
         || git clone --depth 1 https://github.com/colmap/glomap.git /tmp/glomap) && \
     cmake -S /tmp/glomap -B /tmp/glomap/build -GNinja \
         -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_CUDA_ARCHITECTURES=89 \
+        -DCMAKE_CUDA_ARCHITECTURES="${CMAKE_CUDA_ARCHITECTURES}" \
         -DGUI_ENABLED=OFF \
         -DFETCH_COLMAP=ON \
         -DFETCH_POSELIB=ON && \

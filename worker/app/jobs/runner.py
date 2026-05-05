@@ -36,6 +36,7 @@ from app.jobs.schema import (
 )
 from app.pipeline import _running
 from app.pipeline import export as export_step
+from app.pipeline import extract as extract_step
 from app.pipeline import filter as filter_step
 from app.pipeline import mesh as mesh_step
 from app.pipeline import sfm as sfm_step
@@ -59,6 +60,7 @@ async def run_forever(settings: Settings | None = None) -> None:
 
     kinds_for_class: dict[str, list[JobKind]] = {
         "gs": [
+            JobKind.extract,
             JobKind.sfm,
             JobKind.train,
             JobKind.export,
@@ -354,6 +356,13 @@ async def _dispatch(
     scene_dir: Path,
     progress,
 ) -> dict:
+    if job.kind == JobKind.extract:
+        return await extract_step.run_extract(
+            capture_dir=capture_dir,
+            params=dict(job.payload or {}),
+            progress=progress,
+            job_id=job.id,
+        )
     if job.kind == JobKind.sfm:
         return await sfm_step.run_sfm(
             capture_dir=capture_dir,

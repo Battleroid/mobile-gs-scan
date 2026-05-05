@@ -1,44 +1,53 @@
 # Roadmap
 
-PR #1 = capture-to-viewer happy path on room-scale captures from the
-Android app or a drag-and-drop image set. Everything below is
-explicitly out of scope for the first PR.
+The MVP capture-to-viewer-to-edit-to-mesh path is shippable
+end-to-end. Items below are still out of scope.
 
-## PR #2 — capture polish
+## Capture polish
 
-- Scaniverse-style AR coverage cones / heatmap on Android.
+- AR coverage cones / heatmap on Android during recording.
 - Live downsampled point-cloud preview pushed back to the phone
   during capture.
-- Mobile-web PWA: device-motion + IMU pose prior.
-- Auto-stop heuristic when bounding sphere coverage uniform.
+- Auto-stop heuristic when bounding-sphere coverage is uniform.
 
-## PR #3 — mesh + alternate exports
+## On-device splat preview
 
-- 2DGS + TSDF + Open3D Poisson → .obj / .glb / .fbx.
-- SuGaR fallback for difficult scenes.
-- Texture baking from the splat radiance field.
+- Brush / wgpu viewer in the Android app. Partial-checkpoint push
+  from the worker once training has progress to show.
 
-## PR #4 — on-device splat preview
+## Non-mobile ingestion polish
 
-- Brush wgpu viewer in the Android app + PWA. Partial-checkpoint
-  push from the worker once training has progress to show.
-
-## PR #5 — non-mobile ingestion polish
-
-- Drone (EXIF + SRT GPS priors).
-- DSLR sets (timestamps, GPS, blur filter, splatfacto-w appearance).
+- Drone (EXIF + SRT GPS priors used as seed for SfM).
+- DSLR sets (timestamps, GPS, blur filter, splatfacto-w
+  appearance modeling).
 - Resume-able multipart uploads for large sets.
 
-## PR #6 — iOS native + LiDAR
+## iOS native + LiDAR
 
 - ARKit native iOS app + optional LiDAR depth supervision.
 
-## PR #7 — public-tunnel deployment
+## Auth / multi-device
 
-- Tailscale Funnel + Cloudflare Tunnel. Per-tunnel shared secret.
+- Basic per-device pairing or a small account model so the studio
+  can stop assuming a private LAN with trusted clients. The
+  spring-cleaning pass dropped the previous QR-pair flow; this
+  re-introduces a simpler, more durable replacement (likely a
+  device-token bearer header on the Android client + a config
+  page on the web UI).
+
+## Public-tunnel deployment
+
+- Tailscale Funnel + Cloudflare Tunnel.
+- Per-tunnel shared secret.
+
+## Alternate mesh exports
+
+- SuGaR fallback for difficult scenes (when Poisson smears).
+- Texture baking from the splat radiance field.
 
 ## Forever-deferred
 
 - Multi-tenant accounts.
 - Hosted cloud version.
-- In-studio editing tools (export to SuperSplat/Blender instead).
+- In-studio editing tools beyond the recipe ops (export to
+  SuperSplat / Blender instead).

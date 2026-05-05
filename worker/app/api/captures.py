@@ -12,7 +12,6 @@ from fastapi import (
     APIRouter,
     File,
     HTTPException,
-    Query,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
@@ -24,7 +23,6 @@ from app.config import get_settings
 from app.jobs import events, store
 from app.jobs.schema import Capture, CaptureSource, CaptureStatus, JobStatus
 from app.pipeline.dispatch import enqueue_pipeline
-from app.sessions.ingest import run_stream_session
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +38,7 @@ class CaptureCreate(BaseModel):
     # the phone / web "+ new capture" flows skip the naming dialog
     # entirely; the user can rename later via PATCH.
     name: str | None = None
-    source: CaptureSource = CaptureSource.mobile_native
+    source: CaptureSource = CaptureSource.upload
     has_pose: bool = False
     meta: dict[str, Any] = {}
 
@@ -55,8 +53,6 @@ class CaptureView(BaseModel):
     name: str
     status: CaptureStatus
     source: CaptureSource
-    pair_token: str | None
-    pair_url: str | None
     frame_count: int
     dropped_count: int
     has_pose: bool
@@ -68,14 +64,11 @@ class CaptureView(BaseModel):
 
 
 def _to_view(cap: Capture, scene_id: str | None = None) -> CaptureView:
-    pair_url = f"/m/{cap.pair_token}" if cap.pair_token else None
     return CaptureView(
         id=cap.id,
         name=cap.name,
         status=cap.status,
         source=cap.source,
-        pair_token=cap.pair_token,
-        pair_url=pair_url,
         frame_count=cap.frame_count,
         dropped_count=cap.dropped_count,
         has_pose=cap.has_pose,
@@ -145,24 +138,16 @@ async def rename_capture(capture_id: str, body: CaptureRename) -> CaptureView:
     return _to_view(cap, scene_id=scene.id if scene else None)
 
 
-@router.get("/by-token/{token}")
-async def resolve_pair_token(token: str) -> CaptureView:
-    """Phone calls this immediately after scanning the QR to confirm
-    the token is still valid (separate from claiming it via WS)."""
-    cap = await store.get_capture_by_pair_token(token)
-    if cap is None:
-        raise HTTPException(404, "invalid or consumed token")
-    return _to_view(cap)
-
-
 class FinalizeBody(BaseModel):
     reason: str = "user"
 
 
 @router.post("/{capture_id}/finalize")
 async def finalize_capture(capture_id: str, body: FinalizeBody) -> dict:
-    """Used by the upload path. Phone-stream finalize comes through
-    the WebSocket itself."""
+    """Marks an upload-mode capture as ready for the pipeline. Caller
+    should hit /upload first and then /finalize once all files are
+    in. Idempotent: a second call after the scene exists returns the
+    same scene id."""
     cap = await store.get_capture(capture_id)
     if cap is None:
         raise HTTPException(404, "capture not found")
@@ -177,14 +162,21 @@ async def finalize_capture(capture_id: str, body: FinalizeBody) -> dict:
     return {"scene_id": scene.id}
 
 
+_IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp")
+_VIDEO_SUFFIXES = (".mp4", ".mov", ".webm", ".mkv")
+
+
 @router.post("/{capture_id}/upload")
 async def upload_to_capture(
     capture_id: str,
     files: list[UploadFile] = File(...),
 ) -> dict:
-    """Drag-and-drop image-set upload. The web UI POSTs the image
-    files here (one request, multiple parts) and then calls
-    /finalize when the upload is done."""
+    """Drag-drop / video upload. Image files land in
+    ``capture_dir/frames/`` immediately; a single video file lands in
+    ``capture_dir/source/`` and is left there for the worker's
+    ``extract`` step (ffmpeg) to crack open. Mixed image+video drops
+    are rejected so the post-conditions stay simple.
+    """
     settings = get_settings()
     cap = await store.get_capture(capture_id)
     if cap is None:
@@ -192,15 +184,44 @@ async def upload_to_capture(
     if cap.source != CaptureSource.upload:
         raise HTTPException(400, "capture is not an upload session")
 
-    frames_dir = settings.captures_dir() / cap.id / "frames"
-    frames_dir.mkdir(parents=True, exist_ok=True)
+    suffixes = [Path(f.filename or "").suffix.lower() for f in files]
+    images = [s for s in suffixes if s in _IMAGE_SUFFIXES]
+    videos = [s for s in suffixes if s in _VIDEO_SUFFIXES]
+    if images and videos:
+        raise HTTPException(
+            422, "upload either image files or one video — not both",
+        )
+    if len(videos) > 1:
+        raise HTTPException(
+            422, "only one video per upload is supported",
+        )
 
+    capture_dir = settings.captures_dir() / cap.id
     await store.set_capture_status(cap.id, CaptureStatus.uploading)
+
+    if videos:
+        # Single-video path: stash the source under ``source/`` so the
+        # extract step picks it up. Don't bump frame_count yet — the
+        # worker increments it as ffmpeg writes frames.
+        source_dir = capture_dir / "source"
+        source_dir.mkdir(parents=True, exist_ok=True)
+        f = files[0]
+        suffix = Path(f.filename or "").suffix.lower()
+        dst = source_dir / f"video{suffix}"
+        with dst.open("wb") as out:
+            shutil.copyfileobj(f.file, out)
+        return {"accepted_video": dst.name, "total": 0}
+
+    # Image-set path: drop each accepted file into ``frames/`` with a
+    # six-digit index. Anything outside the image suffix allowlist
+    # silently drops (count is reported).
+    frames_dir = capture_dir / "frames"
+    frames_dir.mkdir(parents=True, exist_ok=True)
     accepted = 0
     next_idx = cap.frame_count
     for f in files:
         suffix = Path(f.filename or "").suffix.lower() or ".jpg"
-        if suffix not in (".jpg", ".jpeg", ".png", ".webp"):
+        if suffix not in _IMAGE_SUFFIXES:
             continue
         dst = frames_dir / f"{next_idx:06d}{suffix}"
         with dst.open("wb") as out:
@@ -246,20 +267,6 @@ async def delete_capture(capture_id: str) -> dict:
             shutil.rmtree(scene_dir, ignore_errors=True)
 
     return {"ok": True}
-
-
-@router.websocket("/{capture_id}/stream")
-async def stream_endpoint(
-    ws: WebSocket,
-    capture_id: str,
-    token: str = Query(...),
-) -> None:
-    cap = await store.get_capture_by_pair_token(token)
-    if cap is None or cap.id != capture_id:
-        await ws.close(code=4401, reason="invalid token for this capture")
-        return
-    await ws.accept()
-    await run_stream_session(ws, pair_token=token)
 
 
 @router.websocket("/{capture_id}/events")

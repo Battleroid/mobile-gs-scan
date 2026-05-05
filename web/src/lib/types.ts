@@ -3,8 +3,6 @@
 
 export type CaptureStatus =
   | "created"
-  | "pairing"
-  | "streaming"
   | "uploading"
   | "queued"
   | "processing"
@@ -12,15 +10,16 @@ export type CaptureStatus =
   | "failed"
   | "canceled";
 
-export type CaptureSource = "mobile_native" | "mobile_web" | "upload";
+// Single value today; kept as a union (not a literal alias) so a
+// future capture source (Android-app direct, drone-set, …) lands
+// without re-typing every consumer.
+export type CaptureSource = "upload";
 
 export interface Capture {
   id: string;
   name: string;
   status: CaptureStatus;
   source: CaptureSource;
-  pair_token: string | null;
-  pair_url: string | null;
   frame_count: number;
   dropped_count: number;
   has_pose: boolean;
@@ -31,7 +30,7 @@ export interface Capture {
   updated_at: string;
 }
 
-export type JobKind = "sfm" | "train" | "export" | "mesh" | "filter";
+export type JobKind = "extract" | "sfm" | "train" | "export" | "mesh" | "filter";
 
 export type EditStatus =
   | "none"

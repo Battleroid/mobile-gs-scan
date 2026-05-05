@@ -62,8 +62,6 @@ export const api = {
   base: apiBase,
   listCaptures: () => jsonReq<Capture[]>("/api/captures"),
   getCapture: (id: string) => jsonReq<Capture>(`/api/captures/${id}`),
-  resolvePairToken: (token: string) =>
-    jsonReq<Capture>(`/api/captures/by-token/${token}`),
   createCapture: (body: {
     name?: string;
     source: CaptureSource;
@@ -94,7 +92,10 @@ export const api = {
       body: fd,
     });
     if (!res.ok) throw new Error(await res.text());
-    return res.json() as Promise<{ accepted: number; total: number }>;
+    return res.json() as Promise<
+      | { accepted: number; total: number }
+      | { accepted_video: string; total: number }
+    >;
   },
   deleteCapture: (id: string) =>
     fetch(`${apiBase()}/api/captures/${id}`, { method: "DELETE" }),

@@ -49,20 +49,6 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-
-            <!-- Deep link from the studio's QR code. The QR encodes a
-                 https://<host>/m/<token> URL; the system camera app
-                 forwards that to us via this filter, the studio web
-                 server still returns the PWA fallback if the app
-                 isn't installed. We grab the host + token out of the
-                 path and skip the browser entirely. -->
-            <intent-filter android:autoVerify="false">
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="https" />
-                <data android:pathPrefix="/m/" />
-            </intent-filter>
         </activity>
 
         <activity

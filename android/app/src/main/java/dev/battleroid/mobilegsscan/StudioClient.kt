@@ -7,31 +7,31 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.File
 import java.util.concurrent.TimeUnit
 
 /**
  * Coroutine-friendly HTTP client for the studio API.
  *
- * Two responsibilities:
- *   1. Health check (`GET /api/health`) so the home screen can show
- *      an online/offline indicator.
- *   2. Capture-session lifecycle:
- *        GET    /api/captures            — list for the home screen
- *        POST   /api/captures            — start a phone-driven session
- *        GET    /api/captures/{id}       — detail for the native
- *                                         session screen
- *        PATCH  /api/captures/{id}       — rename a capture
- *        GET    /api/scenes/{id}         — scene + embedded jobs list
- *        GET    /api/jobs/{id}           — single-job detail
- *        GET    /api/jobs/{id}/log       — tail of the subprocess log
- *                                         (sfm: glomap.log; train:
- *                                         train.log; export: export.log)
+ * Capture-session lifecycle (HTTP only — frame ingest is
+ * multipart upload, not a WebSocket):
+ *   GET    /api/captures             list for the home screen
+ *   POST   /api/captures             create a capture row
+ *   GET    /api/captures/{id}        detail
+ *   PATCH  /api/captures/{id}        rename
+ *   POST   /api/captures/{id}/upload multipart frame upload
+ *   POST   /api/captures/{id}/finalize trigger pipeline
+ *   GET    /api/scenes/{id}          scene + embedded jobs list
+ *   GET    /api/jobs/{id}            single-job detail
+ *   GET    /api/jobs/{id}/log        tail of the subprocess log
  *
- * The WebSocket frame ingest is handled by StreamingClient. This
- * class is HTTP-only.
+ * Plus a `/api/health` ping so the home screen can show an
+ * online/offline indicator.
  */
 class StudioClient(private val baseUrl: String) {
     // encodeDefaults = false here is *intentional* for the response-
@@ -44,7 +44,8 @@ class StudioClient(private val baseUrl: String) {
 
     private val http: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
         .build()
 
     @Serializable
@@ -53,8 +54,6 @@ class StudioClient(private val baseUrl: String) {
         val name: String,
         val status: String,
         val source: String,
-        val pair_token: String? = null,
-        val pair_url: String? = null,
         val frame_count: Int = 0,
         val dropped_count: Int = 0,
         val has_pose: Boolean = false,
@@ -214,17 +213,23 @@ class StudioClient(private val baseUrl: String) {
         }
 
     /**
-     * Create a new capture session. ``name`` is now optional —
-     * pass null to let the server assign a memorable random name
+     * Create a new capture session. ``name`` is optional — pass
+     * null to let the server assign a memorable random name
      * (`<adjective> <color> <noun>`). ``meta`` is a free-form bag
-     * of per-capture overrides the worker's dispatch step reads to
-     * specialize the pipeline — currently the only key is
-     * ``train_iters`` (per-capture splatfacto iter count override).
+     * of per-capture overrides the worker's dispatch step reads
+     * (currently ``train_iters``; future video knobs land here too).
+     *
+     * The Android app's local-record-then-upload flow uploads
+     * already-extracted JPEG frames over HTTP, so it always passes
+     * ``source="upload"`` and ``has_pose=false`` (the splat
+     * pipeline runs glomap from scratch on the uploaded set).
+     * ``has_pose=true`` is reserved for a future ARCore-poses
+     * upload variant.
      */
     suspend fun createCapture(
         name: String? = null,
-        hasPose: Boolean = true,
-        source: String = "mobile_native",
+        hasPose: Boolean = false,
+        source: String = "upload",
         meta: JsonObject = JsonObject(emptyMap()),
     ): Capture = withContext(Dispatchers.IO) {
         val payload = json.encodeToString(
@@ -248,4 +253,61 @@ class StudioClient(private val baseUrl: String) {
             json.decodeFromString<Capture>(body)
         }
     }
+
+    /**
+     * Multipart upload of one batch of JPEG frames to an existing
+     * capture. The server appends them to the capture's
+     * ``frames/`` directory, six-digit-padded indices continuing
+     * from the current ``frame_count``. Caller is expected to
+     * batch reasonable chunks (~50–200 files / request) so a
+     * single multipart body doesn't get unwieldy.
+     */
+    suspend fun uploadFrames(
+        captureId: String,
+        files: List<File>,
+    ): Unit = withContext(Dispatchers.IO) {
+        if (files.isEmpty()) return@withContext
+        val builder = MultipartBody.Builder().setType(MultipartBody.FORM)
+        for (f in files) {
+            builder.addFormDataPart(
+                "files",
+                f.name,
+                f.asRequestBody("image/jpeg".toMediaType()),
+            )
+        }
+        val req = Request.Builder()
+            .url("$baseUrl/api/captures/$captureId/upload")
+            .post(builder.build())
+            .build()
+        http.newCall(req).execute().use { res ->
+            if (!res.isSuccessful) {
+                error("HTTP ${res.code}: ${res.body?.string().orEmpty()}")
+            }
+        }
+    }
+
+    /**
+     * Mark an upload-mode capture as complete and trigger the
+     * worker pipeline. Returns the freshly-created scene id.
+     */
+    suspend fun finalizeCapture(captureId: String): String =
+        withContext(Dispatchers.IO) {
+            val req = Request.Builder()
+                .url("$baseUrl/api/captures/$captureId/finalize")
+                .post(
+                    "{\"reason\":\"user\"}"
+                        .toRequestBody("application/json".toMediaType()),
+                )
+                .build()
+            http.newCall(req).execute().use { res ->
+                if (!res.isSuccessful) {
+                    error("HTTP ${res.code}: ${res.body?.string().orEmpty()}")
+                }
+                val body = res.body?.string().orEmpty()
+                val obj = json.decodeFromString<JsonObject>(body)
+                (obj["scene_id"] as? kotlinx.serialization.json.JsonPrimitive)
+                    ?.content
+                    .orEmpty()
+            }
+        }
 }

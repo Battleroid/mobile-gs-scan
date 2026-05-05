@@ -21,7 +21,6 @@ services:
       MODELS_DIR: /models
       LOG_LEVEL: ${LOG_LEVEL:-info}
       GS_CAPTURE_MAX_FRAMES: ${GS_CAPTURE_MAX_FRAMES:-2000}
-      GS_PAIR_TOKEN_TTL_SECONDS: ${GS_PAIR_TOKEN_TTL_SECONDS:-600}
       GS_TRAIN_ITERS: ${GS_TRAIN_ITERS:-15000}
       GS_SFM_BACKEND: ${GS_SFM_BACKEND:-glomap}
     volumes:
@@ -68,8 +67,8 @@ services:
       GS_SFM_BACKEND: ${GS_SFM_BACKEND:-glomap}
       # Splatfacto image cache: "gpu" (default) or "cpu". Default
       # nerfstudio behavior auto-falls-back to cpu for >500 images
-      # which slows step time. With a 24GB+ card we have plenty of
-      # headroom; flip to cpu here if your GPU is smaller and OOMs.
+      # which slows step time. On 24 GB+ GPUs there's plenty of
+      # headroom; flip to cpu on smaller cards (12–16 GB).
       GS_TRAIN_CACHE_IMAGES: ${GS_TRAIN_CACHE_IMAGES:-gpu}
       # Persist torch.hub checkpoint cache across container restarts
       # / rebuilds. splatfacto loads AlexNet for LPIPS perceptual

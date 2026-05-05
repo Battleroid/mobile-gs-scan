@@ -1,8 +1,6 @@
 package dev.battleroid.mobilegsscan
 
 import android.app.AlertDialog
-import android.content.Intent
-import android.net.Uri
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
@@ -45,10 +43,8 @@ import kotlinx.coroutines.launch
  * Falls back to a "configure your studio" empty state when
  * [ServerConfig.studioUrl] is unset, but only for the captures
  * list and health indicator — drafts work without a studio URL.
- *
- * Also handles the legacy https://<studio>/m/<token> deep link
- * intent for backwards compatibility with the web QR flow. Drafts
- * are filesDir-local so they survive process death and reboots.
+ * Drafts are filesDir-local so they survive process death and
+ * reboots.
  */
 class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
@@ -93,12 +89,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        handleDeepLink(intent)
-    }
-
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        handleDeepLink(intent)
     }
 
     override fun onResume() {
@@ -253,22 +243,6 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun handleDeepLink(intent: Intent?) {
-        // Legacy QR-token deep link path. Phone gets routed here via
-        // a https://<studio>/m/<token> URL. Pre-pivot this would
-        // open CaptureActivity directly with the pair token; now we
-        // just absorb the studio URL and ignore the token (the
-        // local-record flow doesn't need it). The token-based
-        // server flow will be retired alongside this PR's web
-        // /captures/new pairing UI in a follow-up.
-        val data: Uri = intent?.data ?: return
-        val segments = data.pathSegments
-        if (segments.size < 2 || segments[0] != "m") return
-        val baseUrl = "${data.scheme}://${data.host}${
-            if (data.port > 0) ":${data.port}" else ""
-        }"
-        ServerConfig.setStudioUrl(this, baseUrl)
-    }
 }
 
 /** RecyclerView adapter for the captures list. */

@@ -1,30 +1,27 @@
 # mobile-gs-scan/android
 
-Native Android capture client. Kotlin + ARCore + OkHttp WebSocket.
+Native Android capture client. Kotlin + ARCore + OkHttp.
 
-## What it does today (PR #1)
+## What it does
 
-1. Lets you set the studio URL once (e.g. `https://studio.local` or
-   `https://192.168.1.42`) — stored in `SharedPreferences`.
-2. Resolves a pair token after you scan the studio's QR code (via the
-   system camera, then deep-linking back to the app — see
-   `AndroidManifest.xml`'s `<intent-filter>` on `MainActivity`).
-3. Opens a foreground `CaptureActivity` with an ARCore session — RGB
-   frames + per-frame world-space camera pose.
-4. Encodes frames to JPEG, streams them + the pose matrix + the
-   ARCore-reported intrinsics to the studio over a single WebSocket
-   following the wire protocol in `docs/architecture.md`.
-5. Renders a minimal AR overlay: a wireframe bounding cube + a frame
+1. Lets you set the studio URL once (e.g. `http://studio.local:8000`
+   or `http://192.168.1.42:8000`) — stored in `SharedPreferences`.
+2. Opens a foreground `CaptureActivity` with an ARCore session — RGB
+   frames + per-frame world-space camera pose. Encodes each frame to
+   JPEG locally to the device's filesystem (`DraftStore`).
+3. On finish, lets you upload the draft to the studio over HTTP. The
+   app POSTs to `/api/captures` (capture-create) → `/api/captures/{id}/upload`
+   (multipart batches of JPEGs) → `/api/captures/{id}/finalize`. The
+   server runs SfM (Glomap) → splatfacto → export, same flow as the
+   web drag-drop path. Drafts that fail to upload stay on the device
+   for a retry.
+4. Renders a minimal AR overlay: a wireframe bounding cube + a frame
    counter / dropped counter.
-6. On finish, calls the WebSocket `finalize` message + opens the
-   browser to the capture detail page so the user can watch the
-   pipeline run.
 
-## Deferred to PR #2 / #4
-
-- Coverage cones (which surfaces have been seen and from how many
-  angles), missing-surface heatmap, capture-volume hint.
-- Brush / Spark-WebGPU on-device live splat preview.
+There's no live frame stream / WebSocket / pair-token handshake — the
+upload is a plain HTTP POST sequence. The studio is assumed-trusted
+on a private LAN. A future auth design will reintroduce per-device
+authorization.
 
 ## Building
 
@@ -39,15 +36,14 @@ make apk-release            # build release APK (unsigned)
 make android-clean          # clean build outputs
 ```
 
-Open the app, paste the studio URL into Settings, then either:
-
-- scan the studio QR with the system camera (the app intercepts via
-  the deep-link intent filter), or
-- scan the QR with the in-app scanner inside CaptureActivity.
+Open the app, paste the studio URL into Settings, record a draft,
+then tap "send" to push it to the studio.
 
 ## Network
 
-ARCore captures are big — multi-MB/s sustained. Use the same wifi as
-the studio. The mkcert root CA must be installed on the phone first
-(see `make up-https` output). The app's
-`network_security_config.xml` trusts user-added CAs in debug builds.
+ARCore captures produce sizable JPEG streams (tens of MB for a short
+session). Use the same wifi as the studio. The HTTP upload path is
+plain HTTP — no certificate setup needed; if you put the studio
+behind a TLS-fronted reverse proxy (Caddy / nginx with a real cert
+or a corporate internal CA), the app's `network_security_config.xml`
+trusts user-added CAs in debug builds.

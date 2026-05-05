@@ -7,7 +7,6 @@ import clsx from "clsx";
 import { api } from "@/lib/api";
 import { useCaptureEvents } from "@/hooks/useCaptureEvents";
 import { useSceneEvents } from "@/hooks/useSceneEvents";
-import { CapturePairing } from "@/components/CapturePairing";
 import { JobLogPanel } from "@/components/JobLogPanel";
 import { MeshPanel } from "@/components/MeshPanel";
 import { SplatEditor, type SplatEditorHandle } from "@/components/SplatEditor";
@@ -127,15 +126,7 @@ export default function CaptureDetailPage({ params }: PageProps) {
         </button>
       </header>
 
-      {capture.status === "pairing" && capture.pair_url && (
-        <section className="border border-rule p-4">
-          <h2 className="text-sm mb-3 text-muted">scan from your phone</h2>
-          <CapturePairing pairUrl={capture.pair_url} />
-        </section>
-      )}
-
-      {(capture.status === "streaming" ||
-        capture.status === "uploading" ||
+      {(capture.status === "uploading" ||
         capture.status === "queued") && (
         <section className="border border-rule p-4 space-y-1">
           <h2 className="text-sm text-muted">capturing</h2>
