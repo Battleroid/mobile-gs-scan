@@ -18,7 +18,7 @@ import {
 
 export default function AccountPage() {
   return (
-    <div className="mx-auto w-full max-w-5xl px-9 py-8">
+    <div className="mx-auto w-full max-w-6xl px-9 py-8">
       <Eyebrow>account</Eyebrow>
       <DisplayHeading className="mt-2">Profile</DisplayHeading>
 

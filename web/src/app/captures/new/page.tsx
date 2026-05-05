@@ -167,11 +167,15 @@ export default function NewCapturePage() {
   return (
     <div className="flex h-[calc(100vh-72px)] flex-col">
       {/* Body — main column + status / tip aside. Scrolls
-       *  internally so the action footer stays anchored. The flex
-       *  pair sits inside a centered max-width wrapper so the form
-       *  isn't pinned to the left edge on wide displays. */}
-      <div className="flex flex-1 justify-center overflow-auto px-9 pb-6 pt-9">
-        <div className="flex w-full max-w-[1100px] gap-7">
+       *  internally so the action footer stays anchored. Outer
+       *  wrapper matches the global header's max-w-6xl + px-9 so
+       *  the page lines up edge-to-edge with the brand mark and
+       *  avatar. The 720-px main column is the design's reading
+       *  width; the 320-px aside fits to the right with `gap-7` so
+       *  the pair fills max-w-6xl on wide displays without
+       *  stretching the form. */}
+      <div className="flex flex-1 overflow-auto pb-6 pt-9">
+        <div className="mx-auto flex w-full max-w-6xl gap-7 px-9">
         <div className="w-full max-w-[720px] flex-1">
           <Eyebrow>step 1 / 3</Eyebrow>
           <DisplayHeading className="mb-2 mt-2">
@@ -318,27 +322,33 @@ export default function NewCapturePage() {
         </div>
       </div>
 
-      {/* Footer — sticky action row. Save-as-draft is decorative for
-       *  now (no draft store on the web); the primary CTA fires the
-       *  same submit() chain UploadDropzone used to. */}
-      <div className="flex items-center justify-between border-t border-rule bg-surface px-9 py-4">
-        <span className="font-mono text-[11px] text-muted">
-          esc to cancel · ⌘↵ to start
-        </span>
-        <div className="flex gap-2">
-          <BigButton
-            variant="secondary"
-            onClick={() => router.push("/")}
-            disabled={submitting || pending}
-          >
-            Save as draft
-          </BigButton>
-          <BigButton
-            onClick={submit}
-            disabled={!staged || submitting || pending}
-          >
-            {submitting || pending ? "Uploading…" : "Start scanning →"}
-          </BigButton>
+      {/* Footer — sticky action row. The bar spans the viewport
+       *  (its border-t is meant to read as a hard boundary against
+       *  the body), but the inner content lines up with max-w-6xl
+       *  + px-9 to match the body and global header. Save-as-draft
+       *  is decorative for now (no draft store on the web); the
+       *  primary CTA fires the same submit() chain UploadDropzone
+       *  used to. */}
+      <div className="border-t border-rule bg-surface">
+        <div className="mx-auto flex w-full max-w-6xl items-center justify-between gap-4 px-9 py-4">
+          <span className="font-mono text-[11px] text-muted">
+            esc to cancel · ⌘↵ to start
+          </span>
+          <div className="flex gap-2">
+            <BigButton
+              variant="secondary"
+              onClick={() => router.push("/")}
+              disabled={submitting || pending}
+            >
+              Save as draft
+            </BigButton>
+            <BigButton
+              onClick={submit}
+              disabled={!staged || submitting || pending}
+            >
+              {submitting || pending ? "Uploading…" : "Start scanning →"}
+            </BigButton>
+          </div>
         </div>
       </div>
     </div>

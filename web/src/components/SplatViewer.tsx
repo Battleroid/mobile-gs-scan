@@ -272,9 +272,12 @@ export function SplatViewer({
         // Light cream-tinted panel with backdrop blur — readable
         // against any rendered splat background (the dark bg-black
         // version was invisible against the typical dark scene
-        // backdrop). Mirrors the design's ViewerPill / ViewerIcon
-        // surface treatment from studio.jsx.
-        <div className="absolute left-3 top-3 flex flex-col gap-1 rounded-md border border-rule bg-surface/85 px-3 py-2 text-xs font-mono text-fg shadow-[0_4px_16px_rgba(0,0,0,0.12)] backdrop-blur-md">
+        // backdrop). bg-white/90 (rather than bg-surface/85) so
+        // Tailwind reliably emits the alpha channel — opacity
+        // modifiers on CSS-var colors only work with an
+        // `<alpha-value>` placeholder, which our `var(--surface)`
+        // wiring doesn't have.
+        <div className="absolute left-3 top-3 flex flex-col gap-1 rounded-md border border-rule bg-white/90 px-3 py-2 text-xs font-mono text-fg shadow-[0_4px_16px_rgba(0,0,0,0.12)] backdrop-blur-md">
           <span className="text-inkSoft">
             editing {selection.kind} (drag handles to {widgetMode})
           </span>
@@ -311,7 +314,7 @@ export function SplatViewer({
           legible against whatever splat scene background is being
           rendered (Spark's default scene bg is dark, which made the
           previous bg-black/70 + text-fg combo go black-on-black). */}
-      <div className="absolute right-3 top-3 flex flex-col gap-2 rounded-md border border-rule bg-surface/85 px-3 py-[10px] text-xs font-mono text-fg shadow-[0_4px_16px_rgba(0,0,0,0.12)] backdrop-blur-md">
+      <div className="absolute right-3 top-3 flex flex-col gap-2 rounded-md border border-rule bg-white/90 px-3 py-[10px] text-xs font-mono text-fg shadow-[0_4px_16px_rgba(0,0,0,0.12)] backdrop-blur-md">
         <button
           type="button"
           onClick={onFullscreen}
