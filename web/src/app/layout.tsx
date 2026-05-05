@@ -1,22 +1,25 @@
 import type { Metadata, Viewport } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { GeistSans } from "geist/font/sans";
+import { GeistMono } from "geist/font/mono";
 import { Providers } from "@/components/Providers";
 import { PebbleHeader } from "@/components/PebbleHeader";
 import "./globals.css";
 
-// Both fonts surface as CSS variables so globals.css + Tailwind's
-// fontFamily extension both pick them up without further wiring.
-const geistSans = Geist({
-  subsets: ["latin"],
-  variable: "--font-sans",
-  display: "swap",
-});
-
-const geistMono = Geist_Mono({
-  subsets: ["latin"],
-  variable: "--font-mono",
-  display: "swap",
-});
+// Vercel's `geist` package ships the same Geist + Geist Mono woff2
+// binaries `next/font/google` would otherwise fetch from Google at
+// build time. The package's `.variable` surface is identical, so the
+// Tailwind / globals.css wiring downstream sees the same CSS vars.
+//
+// The reason we don't use `next/font/google`: Pebble is positioned
+// for self-hosted LAN deployments. `next build` then runs in air-
+// gapped environments where `fonts.googleapis.com` isn't reachable
+// and the build fails before compile. `geist` is fully local — the
+// woff2 files land in node_modules and are served alongside the app.
+//
+// (The `.variable` property is a class name applied to the HTML
+// element below; it sets `--font-sans` / `--font-mono` as CSS vars
+// scoped to <html>. Tailwind's `fontFamily.sans = var(--font-sans)`
+// picks them up without further plumbing.)
 
 export const metadata: Metadata = {
   title: "Pebble",
@@ -36,7 +39,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className={`${geistSans.variable} ${geistMono.variable}`}>
+    <html lang="en" className={`${GeistSans.variable} ${GeistMono.variable}`}>
       <body className="min-h-screen flex flex-col">
         <Providers>
           <PebbleHeader />
