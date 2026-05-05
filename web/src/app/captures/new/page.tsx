@@ -445,7 +445,16 @@ function DropZone({
           multiple
           accept={"image/*," + VIDEO_EXTS.join(",")}
           className="hidden"
-          onChange={(e) => onPick(Array.from(e.target.files ?? []))}
+          onChange={(e) => {
+            const files = Array.from(e.target.files ?? []);
+            // Reset the input value so re-selecting the same file
+            // after a clear actually fires `change` again. Without
+            // this, browsers silently ignore the second pick when
+            // the FileList equals the current value — making the
+            // browse → clear → browse-same-files retry path dead.
+            e.currentTarget.value = "";
+            onPick(files);
+          }}
         />
       </div>
       <div className="mt-[10px] flex items-center gap-2 font-mono text-[11px] text-muted">

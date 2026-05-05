@@ -167,11 +167,20 @@ export default function CaptureDetailPage({ params }: PageProps) {
         <PipelineCard capture={capture} scene={scene} />
       </div>
 
-      {scene?.status !== "completed" && scene && (
-        <div className="mt-4">
-          <TipCard scene={scene} />
-        </div>
-      )}
+      {scene &&
+        (scene.status === "queued" ||
+          scene.status === "processing" ||
+          scene.status === "uploading") && (
+          // Tip is "while you wait" — only relevant while a scene
+          // is actively in flight. Terminal states (failed,
+          // canceled) get the failure banner below instead;
+          // showing the tip in those states would directly
+          // contradict the failure message and read as misleading
+          // recovery guidance.
+          <div className="mt-4">
+            <TipCard scene={scene} />
+          </div>
+        )}
 
       {/* Editor + mesh — only when training is done. */}
       {scene && scene.status === "completed" && (
