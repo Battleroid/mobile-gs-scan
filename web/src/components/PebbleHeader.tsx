@@ -20,8 +20,14 @@ const NAV: { href: string; label: string }[] = [
  * sections produces a single sliding pill rather than separate
  * fade-in / fade-out elements (the only motion element in PR-A).
  */
+// Routes that render their own chrome and shouldn't show the
+// global header (sign-in's two-column collage owns its top bar; the
+// standalone splat viewer popup is fullscreen).
+const HEADERLESS = new Set(["/sign-in", "/viewer"]);
+
 export function PebbleHeader() {
   const pathname = usePathname();
+  if (pathname && HEADERLESS.has(pathname)) return null;
   return (
     <header className="border-b border-rule bg-bg/80 backdrop-blur-sm">
       <div className="mx-auto flex max-w-6xl items-center justify-between gap-6 px-9 py-4">

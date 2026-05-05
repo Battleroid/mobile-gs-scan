@@ -1,19 +1,9 @@
-import Link from "next/link";
 import { CaptureList } from "@/components/CaptureList";
 
+// Home shell is a thin wrapper — the design's hero, filter chips,
+// search, and grid all live inside CaptureList because they all
+// depend on the same query state (filter + search + the captures
+// data).
 export default function HomePage() {
-  return (
-    <div className="space-y-6">
-      <div className="flex items-baseline justify-between">
-        <h1 className="text-lg font-semibold">captures</h1>
-        <Link
-          href="/captures/new"
-          className="px-3 py-1 border border-rule text-sm hover:bg-rule/30"
-        >
-          new capture
-        </Link>
-      </div>
-      <CaptureList />
-    </div>
-  );
+  return <CaptureList />;
 }
