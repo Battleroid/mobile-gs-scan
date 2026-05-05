@@ -63,13 +63,17 @@ export function CaptureCard({ capture }: { capture: Capture }) {
   const { label, tone } = statusLabel(capture);
   const isTraining = capture.status === "processing" || capture.status === "queued";
 
-  // Pull the scene only when the capture has one — the home page
-  // grid would otherwise fire N requests for captures that haven't
-  // produced a scene yet (still uploading / failed).
+  // Pull the scene ONLY for training rows — the only consumer of
+  // this query is the progress overlay (rendered when isTraining
+  // && progress !== null). Polling completed / failed / uploading
+  // shelves would otherwise fire an N+1 burst of getScene requests
+  // on every grid mount (plus tanstack's default refetch-on-focus
+  // / refetch-on-mount) for data the card never reads. On a busy
+  // shelf this dwarfs the cost of the actual list query.
   const { data: scene } = useQuery<Scene | null>({
     queryKey: ["scene", capture.scene_id],
     queryFn: () => api.getScene(capture.scene_id!),
-    enabled: !!capture.scene_id,
+    enabled: !!capture.scene_id && isTraining,
     refetchInterval: isTraining ? 3_000 : false,
   });
 
