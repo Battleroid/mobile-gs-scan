@@ -1,5 +1,6 @@
 "use client";
 import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import clsx from "clsx";
@@ -16,6 +17,7 @@ const FILTERS: { id: Filter; label: string }[] = [
   { id: "training", label: "Training" },
   { id: "failed", label: "Failed" },
 ];
+const FILTER_IDS = new Set<string>(FILTERS.map((f) => f.id));
 
 // Map our richer CaptureStatus union onto the design's three filter
 // buckets. Anything in flight (uploading / queued / processing) is
@@ -28,7 +30,33 @@ function bucketize(c: Capture): Filter {
 }
 
 export function CaptureList() {
-  const [filter, setFilter] = useState<Filter>("all");
+  // Filter lives in the URL (`?filter=failed`) so it survives
+  // navigation into a capture and back, refreshes, and bookmarks.
+  // The pain point this solves: mass-delete on a "failed" filter
+  // — without URL state, every click into a capture detail page
+  // and back resets the filter to "all" and forces re-selection.
+  // Search stays as local state — typing into a text box generates
+  // too much URL churn to be worth persisting.
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const filterParam = searchParams.get("filter");
+  const filter: Filter =
+    filterParam && FILTER_IDS.has(filterParam) ? (filterParam as Filter) : "all";
+
+  const setFilter = (next: Filter) => {
+    const params = new URLSearchParams(searchParams.toString());
+    if (next === "all") {
+      params.delete("filter");
+    } else {
+      params.set("filter", next);
+    }
+    const qs = params.toString();
+    // replace() not push() so chip-clicking doesn't pollute the
+    // back-button stack with one entry per toggle. scroll: false
+    // keeps the grid in place during the URL update.
+    router.replace(qs ? `/?${qs}` : "/", { scroll: false });
+  };
+
   const [query, setQuery] = useState("");
 
   const { data, isLoading, error } = useQuery({
