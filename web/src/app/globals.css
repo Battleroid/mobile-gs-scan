@@ -27,6 +27,15 @@
   --chip-2: #E0D6FF;        /* lavender */
   --chip-3: #C7EBD9;        /* mint */
   --chip-4: #FFE9A8;        /* butter */
+
+  /* Public font tokens. The `geist` package's .variable className
+   * sets --font-geist-sans / --font-geist-mono on <html>; we alias
+   * those to --font-sans / --font-mono so Tailwind's font-sans /
+   * font-mono utilities (and every consumer) stay font-agnostic.
+   * Swapping fonts later means changing these two lines, not every
+   * reference across the codebase. */
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
 }
 
 html,
