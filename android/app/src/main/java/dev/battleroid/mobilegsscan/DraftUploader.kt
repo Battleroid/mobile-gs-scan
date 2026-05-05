@@ -11,14 +11,20 @@ import kotlinx.serialization.json.buildJsonObject
 /**
  * Replays a [Draft] directory through the studio's HTTP upload API:
  *
- *   1. POST /api/captures with the draft's name + train_iters meta
- *      (source = "upload", has_pose = false). Server returns a
- *      capture id.
+ *   1. POST /api/captures with the draft's name + train_iters meta.
+ *      ``has_pose=true`` when the draft has a poses.jsonl on disk
+ *      (typical case — every ARCore frame writes one); the
+ *      dispatcher uses that to pick the cheap ``arcore_native`` SfM
+ *      backend (transforms.json built from the phone's poses, no
+ *      glomap run). Falls back to ``has_pose=false`` for
+ *      poseless drafts so the server runs real SfM via glomap.
  *   2. POST /api/captures/{id}/upload (multipart) for each batch of
  *      JPEG frames, walked sorted off disk.
- *   3. POST /api/captures/{id}/finalize to flip the capture into
+ *   3. POST /api/captures/{id}/poses with the draft's poses.jsonl
+ *      (skipped on poseless drafts). Sent as a single .jsonl body.
+ *   4. POST /api/captures/{id}/finalize to flip the capture into
  *      ``queued`` and trigger the worker pipeline.
- *   4. **Wait for the server's finalize response** before deleting
+ *   5. **Wait for the server's finalize response** before deleting
  *      the draft directory. If anything fails partway, the local
  *      data stays put and the user can retry.
  *
@@ -28,9 +34,7 @@ import kotlinx.serialization.json.buildJsonObject
  * through [onProgress] callbacks (frames sent / total).
  *
  * History note: the previous implementation used a WebSocket
- * frame-stream + pair-token endpoint that's been removed. The
- * server now treats every Android upload as an image-set
- * upload — the same shape the web drag-drop flow uses.
+ * frame-stream + pair-token endpoint that's been removed.
  */
 class DraftUploader(
     @Suppress("unused") private val ctx: Context,
@@ -58,6 +62,8 @@ class DraftUploader(
         if (total == 0) {
             return@withContext Result.Failed("draft has no frames")
         }
+        val poses = draft.posesFileOrNull()
+        val hasPose = poses != null
 
         val createMeta: JsonObject = buildJsonObject {
             put("source_kind", JsonPrimitive("images"))
@@ -68,7 +74,7 @@ class DraftUploader(
         val capture = try {
             client.createCapture(
                 name = meta.name,
-                hasPose = false,
+                hasPose = hasPose,
                 source = "upload",
                 meta = createMeta,
             )
@@ -90,6 +96,9 @@ class DraftUploader(
                 client.uploadFrames(capture.id, batch)
                 sent += batch.size
                 onProgress(sent, total)
+            }
+            if (poses != null) {
+                client.uploadPoses(capture.id, poses)
             }
             val sceneId = client.finalizeCapture(capture.id)
             // Server has the data + the scene row. Safe to drop the

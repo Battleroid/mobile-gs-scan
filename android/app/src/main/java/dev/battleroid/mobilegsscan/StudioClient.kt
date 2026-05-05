@@ -287,6 +287,34 @@ class StudioClient(private val baseUrl: String) {
     }
 
     /**
+     * Upload the draft's ``poses.jsonl`` (per-frame ARCore poses +
+     * intrinsics) so the worker's SfM step can route through the
+     * cheap ``arcore_native`` backend. Sent as a single multipart
+     * field named ``file`` to match the server's expected shape.
+     */
+    suspend fun uploadPoses(
+        captureId: String,
+        file: File,
+    ): Unit = withContext(Dispatchers.IO) {
+        val body = MultipartBody.Builder().setType(MultipartBody.FORM)
+            .addFormDataPart(
+                "file",
+                file.name,
+                file.asRequestBody("application/x-ndjson".toMediaType()),
+            )
+            .build()
+        val req = Request.Builder()
+            .url("$baseUrl/api/captures/$captureId/poses")
+            .post(body)
+            .build()
+        http.newCall(req).execute().use { res ->
+            if (!res.isSuccessful) {
+                error("HTTP ${res.code}: ${res.body?.string().orEmpty()}")
+            }
+        }
+    }
+
+    /**
      * Mark an upload-mode capture as complete and trigger the
      * worker pipeline. Returns the freshly-created scene id.
      */

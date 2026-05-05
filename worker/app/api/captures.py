@@ -233,6 +233,40 @@ async def upload_to_capture(
     return {"accepted": accepted, "total": next_idx}
 
 
+@router.post("/{capture_id}/poses")
+async def upload_poses(
+    capture_id: str,
+    file: UploadFile = File(...),
+) -> dict:
+    """Upload the per-frame ARCore poses + intrinsics for a capture.
+
+    Used by the Android client's record-then-upload flow to ship
+    ``poses.jsonl`` alongside the JPEG frames. Lets the dispatcher
+    pick the ``arcore_native`` SfM backend (transforms.json from
+    poses, no real glomap run) instead of re-deriving everything
+    via feature matching.
+
+    Body is a single .jsonl file (one JSON object per line, fields
+    ``idx``, ``pose`` [16 floats column-major], ``intrinsics``,
+    ``ts``). Server writes it verbatim to
+    ``captures/<id>/poses.jsonl``; the SfM step's
+    ``write_arcore_transforms_json`` parses it from there.
+    """
+    cap = await store.get_capture(capture_id)
+    if cap is None:
+        raise HTTPException(404, "capture not found")
+    if cap.source != CaptureSource.upload:
+        raise HTTPException(400, "capture is not an upload session")
+
+    settings = get_settings()
+    capture_dir = settings.captures_dir() / cap.id
+    capture_dir.mkdir(parents=True, exist_ok=True)
+    dst = capture_dir / "poses.jsonl"
+    with dst.open("wb") as out:
+        shutil.copyfileobj(file.file, out)
+    return {"ok": True, "path": str(dst.relative_to(settings.data_dir))}
+
+
 @router.delete("/{capture_id}")
 async def delete_capture(capture_id: str) -> dict:
     """Delete a capture: cancel any in-flight pipeline jobs first

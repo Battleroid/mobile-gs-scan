@@ -179,6 +179,15 @@ class Draft internal constructor(
         return files?.sortedBy { it.name }.orEmpty()
     }
 
+    /**
+     * Path to the draft's poses.jsonl, or null if no frames have
+     * been recorded yet (and so no poses written). The HTTP-upload
+     * path ships this file alongside the JPEG frames so the worker's
+     * SfM step can route through the cheap arcore_native backend
+     * instead of re-running glomap from scratch.
+     */
+    fun posesFileOrNull(): File? = posesFile.takeIf { it.exists() && it.length() > 0 }
+
     /** Path to a representative thumbnail (first frame). May not exist. */
     fun thumbnailFile(): File? {
         val first = framesDir.listFiles()?.minByOrNull { it.name }
