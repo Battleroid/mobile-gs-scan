@@ -582,6 +582,122 @@ def test_finalize_completes_when_ply_present(
     _run(go())
 
 
+def test_backfill_enqueues_for_pre_existing_completed_scenes(
+    isolated_store, tmp_path: Path
+):
+    """Captures that completed before JobKind.thumbnail shipped
+    have a ply_path but no thumbnail_path and no thumbnail jobs.
+    The boot-time backfill must pick them up and enqueue a render.
+    """
+    async def go():
+        cap = await store.create_capture(name="pre-existing", source="upload")
+        scene = await store.create_scene(cap.id)
+        assert scene is not None
+        ply_path = tmp_path / "scene.ply"
+        _write_minimal_ply(ply_path)
+        await store.update_scene(scene.id, ply_path=str(ply_path))
+
+        # Pre-condition: no thumbnail job exists, scene has ply.
+        needing = await store.list_scenes_needing_thumbnail()
+        assert any(s.id == scene.id for s in needing)
+
+        await runner._backfill_thumbnails()
+
+        # Post-condition: a queued thumbnail job is now on the
+        # scene, and the same scene no longer shows up in the
+        # needing-thumbnail set (since there's an active job).
+        jobs = await store.list_jobs_for_scene(scene.id)
+        thumb_jobs = [j for j in jobs if j.kind == JobKind.thumbnail]
+        assert len(thumb_jobs) == 1
+        assert thumb_jobs[0].status == JobStatus.queued
+
+        needing_after = await store.list_scenes_needing_thumbnail()
+        assert all(s.id != scene.id for s in needing_after)
+
+    _run(go())
+
+
+def test_backfill_skips_scenes_with_active_thumbnail_job(
+    isolated_store, tmp_path: Path
+):
+    """Worker restart mid-backfill must not double-enqueue. Any
+    scene already carrying a queued/running/claimed thumbnail job
+    is excluded from the needing-thumbnail set.
+    """
+    async def go():
+        cap = await store.create_capture(name="already-queued", source="upload")
+        scene = await store.create_scene(cap.id)
+        assert scene is not None
+        ply_path = tmp_path / "scene.ply"
+        _write_minimal_ply(ply_path)
+        await store.update_scene(scene.id, ply_path=str(ply_path))
+        # Pre-existing queued thumbnail job (worker crashed before
+        # claiming it).
+        existing = await store.enqueue_job(
+            scene.id, JobKind.thumbnail, payload={}
+        )
+        assert existing is not None
+
+        # Backfill must NOT add a second thumbnail job.
+        await runner._backfill_thumbnails()
+        jobs = await store.list_jobs_for_scene(scene.id)
+        thumb_jobs = [j for j in jobs if j.kind == JobKind.thumbnail]
+        assert len(thumb_jobs) == 1, (
+            "backfill must skip scenes that already have a queued "
+            "thumbnail job; got "
+            + ", ".join(f"{j.id}={j.status.value}" for j in thumb_jobs)
+        )
+
+    _run(go())
+
+
+def test_backfill_skips_scenes_already_with_thumbnail(
+    isolated_store, tmp_path: Path
+):
+    """Scenes with thumbnail_path already set are off-limits — we
+    don't want backfill ever clobbering / re-rendering work the
+    earlier pipeline produced cleanly."""
+    async def go():
+        cap = await store.create_capture(name="has-thumb", source="upload")
+        scene = await store.create_scene(cap.id)
+        assert scene is not None
+        ply_path = tmp_path / "scene.ply"
+        thumb_path = tmp_path / "thumb.png"
+        _write_minimal_ply(ply_path)
+        thumb_path.write_bytes(b"png")
+        await store.update_scene(
+            scene.id, ply_path=str(ply_path), thumbnail_path=str(thumb_path),
+        )
+
+        await runner._backfill_thumbnails()
+        jobs = await store.list_jobs_for_scene(scene.id)
+        thumb_jobs = [j for j in jobs if j.kind == JobKind.thumbnail]
+        assert thumb_jobs == [], (
+            "backfill must not touch scenes that already have a "
+            "thumbnail_path"
+        )
+
+    _run(go())
+
+
+def test_backfill_skips_scenes_without_ply_path(
+    isolated_store, tmp_path: Path
+):
+    """No .ply means there's nothing to render; backfill must
+    leave such scenes alone (they were canceled mid-pipeline)."""
+    async def go():
+        cap = await store.create_capture(name="no-ply", source="upload")
+        scene = await store.create_scene(cap.id)
+        assert scene is not None
+        # Don't set ply_path.
+
+        await runner._backfill_thumbnails()
+        jobs = await store.list_jobs_for_scene(scene.id)
+        assert all(j.kind != JobKind.thumbnail for j in jobs)
+
+    _run(go())
+
+
 # ─── helpers ───────────────────────────────────────────────
 
 

@@ -76,6 +76,19 @@ async def run_forever(settings: Settings | None = None) -> None:
 
     reaper = asyncio.create_task(_reap_loop())
 
+    # One-shot backfill of thumbnails for captures that completed
+    # before JobKind.thumbnail shipped (or whose earlier render
+    # was skipped because ns-render wasn't installed on the host
+    # at the time). Idempotent: ``list_scenes_needing_thumbnail``
+    # excludes scenes with an active thumbnail job, so a worker
+    # restart mid-backfill doesn't double-enqueue, and scenes that
+    # already have a ``thumbnail_path`` are never re-touched. Only
+    # runs on workers that handle the thumbnail kind so a future
+    # worker class that doesn't (e.g. CPU-only) doesn't end up
+    # enqueueing work it can't dispatch.
+    if JobKind.thumbnail in kinds:
+        await _backfill_thumbnails()
+
     try:
         while True:
             job = await store.claim_next_job(worker_id=worker, kinds=kinds)
@@ -160,6 +173,55 @@ async def _ack_user_cancel(job: Job) -> bool:
     await store.update_job(job.id, completed=True)
     await events.publish_job(job.id, "job.canceled")
     return True
+
+
+async def _backfill_thumbnails() -> None:
+    """Enqueue thumbnail jobs for completed scenes that don't have
+    a thumbnail yet.
+
+    Picks up two cases on every worker boot:
+      (a) Captures that finished BEFORE ``JobKind.thumbnail`` shipped
+          (PR-D) — they have a .ply but never had a thumbnail step
+          enqueued.
+      (b) Captures that ran the thumbnail step earlier but produced
+          no PNG (e.g., the worker host hadn't installed
+          ``ns-render`` at the time). Re-enqueueing them costs a
+          single extra render once the binary lands.
+
+    The store query already excludes scenes with an in-flight
+    thumbnail job, so a worker restart mid-backfill doesn't
+    double-enqueue, and scenes that already have a
+    ``thumbnail_path`` are never touched. Logged loudly enough that
+    a curious operator can see what happened on startup but quiet
+    when the queue's empty (no spam in the no-op case).
+    """
+    try:
+        scenes = await store.list_scenes_needing_thumbnail()
+    except Exception:
+        log.exception("thumbnail backfill: query failed; skipping")
+        return
+    if not scenes:
+        return
+    enqueued = 0
+    for scene in scenes:
+        try:
+            job = await store.enqueue_job(
+                scene.id, JobKind.thumbnail, payload={}
+            )
+        except Exception:
+            log.exception(
+                "thumbnail backfill: enqueue failed for scene %s",
+                scene.id,
+            )
+            continue
+        if job is not None:
+            enqueued += 1
+    log.info(
+        "thumbnail backfill: enqueued %d job(s) for %d scene(s) "
+        "missing thumbnails",
+        enqueued,
+        len(scenes),
+    )
 
 
 async def _reap_loop() -> None:

@@ -326,6 +326,37 @@ async def get_scene_for_capture(capture_id: str) -> Scene | None:
         return rows.scalar_one_or_none()
 
 
+async def list_scenes_needing_thumbnail() -> list[Scene]:
+    """Find scenes that have a trained .ply but no thumbnail PNG
+    yet AND no in-flight thumbnail job.
+
+    Used by the worker's boot-time backfill to render thumbnails
+    for captures that completed before PR-D shipped (or whose
+    earlier render failed back when ``ns-render`` wasn't on PATH).
+    Excluding scenes with an active thumbnail job avoids
+    double-enqueuing when the worker restarts mid-pipeline.
+    A previously-failed thumbnail (job in ``failed`` /
+    ``canceled`` / ``completed`` with no ``thumbnail_path``) is
+    re-tried on each boot — cheap, idempotent, and lets a one-time
+    install of ns-render fix every previously-skipped scene.
+    """
+    async with session() as s:
+        active = select(Job.scene_id).where(
+            Job.kind == JobKind.thumbnail,
+            Job.status.in_(
+                [JobStatus.queued, JobStatus.claimed, JobStatus.running]
+            ),
+        )
+        rows = await s.execute(
+            select(Scene).where(
+                Scene.ply_path.is_not(None),
+                Scene.thumbnail_path.is_(None),
+                Scene.id.not_in(active),
+            )
+        )
+        return list(rows.scalars())
+
+
 async def update_scene(scene_id: str, **fields) -> None:
     if not fields:
         return
