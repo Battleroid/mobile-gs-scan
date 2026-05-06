@@ -751,6 +751,19 @@ async def _maybe_finalize_scene(scene: Scene) -> None:
     event for a deleted capture — corrupting websocket subscriber
     state. Costs one extra query per finalize call; negligible vs
     the correctness win.
+
+    A second guard distinguishes "every job ran cleanly" from
+    "an essential upstream job was canceled and never produced
+    artifacts". Cancellation counts as terminal in the all-jobs
+    pass (so a canceled thumbnail doesn't block finalize over a
+    cosmetic step), but if the scene's ``ply_path`` is null when we
+    reach the finalize point, an essential job (extract / sfm /
+    train / export) was canceled before producing artifacts.
+    Flipping to ``completed`` in that state would leave a broken
+    capture whose viewer 404s on ``/artifacts/ply``; mark the
+    scene + capture ``canceled`` instead so the UI surfaces it
+    accurately. Artifact-presence rather than hardcoding "essential"
+    JobKinds keeps the rule durable as the pipeline evolves.
     """
     refreshed = await store.get_scene(scene.id)
     if refreshed is None:
@@ -760,6 +773,17 @@ async def _maybe_finalize_scene(scene: Scene) -> None:
         return
     if any(j.status == JobStatus.failed for j in jobs):
         return
+
+    if not refreshed.ply_path:
+        # Essential upstream job was canceled mid-pipeline; don't
+        # mislead the user into thinking this capture is ready.
+        await store.update_scene(refreshed.id, status=CaptureStatus.canceled)
+        await events.publish_scene(refreshed.id, "scene.canceled")
+        cap = await store.get_capture(refreshed.capture_id)
+        if cap:
+            await store.set_capture_status(cap.id, CaptureStatus.canceled)
+        return
+
     await store.update_scene(refreshed.id, status=CaptureStatus.completed)
     await events.publish_scene(refreshed.id, "scene.completed")
     cap = await store.get_capture(refreshed.capture_id)

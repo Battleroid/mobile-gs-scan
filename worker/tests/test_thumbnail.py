@@ -250,6 +250,13 @@ def test_run_thumbnail_cancel_finalizes_scene(
         # Bring the scene + capture to a state where every other
         # job is already terminal — extract / sfm / train / export
         # all completed. Thumbnail is the only outstanding work.
+        # Set ply_path to model what export's success branch would
+        # have done; without this _maybe_finalize_scene's missing-
+        # ply guard would (correctly) refuse to flip to completed,
+        # since a real completed export always writes the .ply.
+        ply_path = tmp_path / "scene.ply"
+        ply_path.write_bytes(b"fake ply for fixture")
+        await store.update_scene(scene.id, ply_path=str(ply_path))
         for kind in (JobKind.extract, JobKind.sfm, JobKind.train, JobKind.export):
             j = await store.enqueue_job(scene.id, kind, payload={})
             assert j is not None
@@ -473,6 +480,104 @@ def test_run_thumbnail_pre_commit_cancel_guard_skips_thumb_url_event(
             "thumbnail_path must not be committed when the row is "
             "canceled at pre-commit time"
         )
+
+    _run(go())
+
+
+def test_finalize_treats_missing_ply_as_canceled_not_completed(
+    isolated_store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """User-visible bug: cancelling export from the pipeline UI
+    leaves the scene without a .ply, but the queued thumbnail job
+    still runs (skip-with-no-ply branch) and then triggers
+    _maybe_finalize_scene. Pre-fix, _maybe_finalize_scene would see
+    every job terminal (export=canceled, thumbnail=completed) +
+    no failures, and flip the scene/capture to ``completed`` —
+    leaving a 'ready' capture whose /artifacts/ply 404s.
+
+    Post-fix, the missing .ply triggers a 'canceled' end-state
+    instead, which is what the UI should actually surface.
+
+    Regression for the codex P1 on PR #82.
+    """
+    async def go():
+        cap = await store.create_capture(name="export-canceled", source="upload")
+        scene = await store.create_scene(cap.id)
+        assert scene is not None
+        # Stage every essential upstream job. extract/sfm/train all
+        # ran cleanly; export was canceled mid-flight (no .ply
+        # written); thumbnail then ran and skipped because there's
+        # no source ply.
+        for kind, status in (
+            (JobKind.extract, JobStatus.completed),
+            (JobKind.sfm, JobStatus.completed),
+            (JobKind.train, JobStatus.completed),
+            (JobKind.export, JobStatus.canceled),
+            (JobKind.thumbnail, JobStatus.completed),
+        ):
+            j = await store.enqueue_job(scene.id, kind, payload={})
+            assert j is not None
+            await store.update_job(
+                j.id, status=status, completed=True,
+            )
+
+        # Sanity: scene has no ply_path yet (export canceled).
+        live_scene = await store.get_scene(scene.id)
+        assert live_scene is not None
+        assert live_scene.ply_path is None
+
+        await runner._maybe_finalize_scene(live_scene)
+
+        # The scene must NOT flip to completed without a .ply —
+        # that would surface as 'ready' in the UI but every viewer
+        # / download path would 404. Mark it canceled instead.
+        scene_after = await store.get_scene(scene.id)
+        assert scene_after is not None
+        assert scene_after.status == CaptureStatus.canceled, (
+            f"scene with no .ply must finalize as canceled, not "
+            f"completed (got {scene_after.status.value})"
+        )
+        cap_after = await store.get_capture(cap.id)
+        assert cap_after is not None
+        assert cap_after.status == CaptureStatus.canceled
+
+    _run(go())
+
+
+def test_finalize_completes_when_ply_present(
+    isolated_store, tmp_path: Path
+):
+    """The happy path stays intact: scene with all jobs terminal,
+    no failures, AND a ply_path on disk → flip to completed.
+    """
+    async def go():
+        cap = await store.create_capture(name="happy", source="upload")
+        scene = await store.create_scene(cap.id)
+        assert scene is not None
+        ply_path = tmp_path / "scene.ply"
+        _write_minimal_ply(ply_path)
+        await store.update_scene(scene.id, ply_path=str(ply_path))
+
+        for kind in (
+            JobKind.extract, JobKind.sfm, JobKind.train,
+            JobKind.export, JobKind.thumbnail,
+        ):
+            j = await store.enqueue_job(scene.id, kind, payload={})
+            assert j is not None
+            await store.update_job(
+                j.id, status=JobStatus.completed, completed=True,
+            )
+
+        live_scene = await store.get_scene(scene.id)
+        assert live_scene is not None
+        await runner._maybe_finalize_scene(live_scene)
+
+        scene_after = await store.get_scene(scene.id)
+        assert scene_after is not None
+        assert scene_after.status == CaptureStatus.completed
+        cap_after = await store.get_capture(cap.id)
+        assert cap_after is not None
+        assert cap_after.status == CaptureStatus.completed
 
     _run(go())
 
