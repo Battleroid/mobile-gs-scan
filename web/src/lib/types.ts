@@ -30,7 +30,18 @@ export interface Capture {
   updated_at: string;
 }
 
-export type JobKind = "extract" | "sfm" | "train" | "export" | "mesh" | "filter";
+export type JobKind =
+  | "extract"
+  | "sfm"
+  | "train"
+  | "export"
+  | "mesh"
+  | "filter"
+  // PR-D: server-rendered PNG thumbnail. Soft-failure step that
+  // runs after export. Kept in sync with worker/app/jobs/schema.py
+  // — exhaustive switches over JobKind would otherwise treat valid
+  // thumbnail rows from /api/scenes as impossible and fall through.
+  | "thumbnail";
 
 export type EditStatus =
   | "none"
