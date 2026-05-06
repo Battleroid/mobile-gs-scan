@@ -143,7 +143,9 @@ def test_run_thumbnail_skips_when_ns_render_unavailable(tmp_path: Path):
             os.environ["PATH"] = prior_path
 
     result = _run(go())
-    assert result == {}
+    # Permanent-skip marker: backfill needs this to know not to
+    # re-enqueue every cycle.
+    assert result == {"permanent_skip": "ns-render unavailable"}
     # Should still report progress so the UI sees the step finishing
     # (even if it didn't produce an artifact).
     assert any(p[0] == 1.0 for p in progress_calls), (
@@ -170,7 +172,7 @@ def test_run_thumbnail_skips_for_stub_scene(tmp_path: Path):
     result = _run(thumbnail_step.run_thumbnail(
         scene_dir=scene_dir, src_ply=src_ply, progress=progress,
     ))
-    assert result == {}
+    assert result == {"permanent_skip": "synthetic stub scene"}
 
 
 def test_camera_for_ply_handles_empty(tmp_path: Path):
@@ -726,6 +728,162 @@ def test_backfill_recovers_multi_worker_race(
             "now has a ply_path; "
             f"thumb job statuses: {[j.status.value for j in thumb_jobs]}"
         )
+
+    _run(go())
+
+
+def test_backfill_excludes_scenes_with_permanent_skip_marker(
+    isolated_store, tmp_path: Path
+):
+    """A previous thumbnail job with ``result.permanent_skip`` set
+    must be excluded from the backfill scan — these are scenes
+    that structurally can't be rendered on this host (stub
+    training, ns-render absent, no nerfstudio config). Without
+    this gate, the periodic backfill loop would re-enqueue them
+    every minute forever, creating unbounded terminal job rows
+    and wasting render attempts that will all fail the same way.
+
+    Regression for the codex P2 on PR #82.
+    """
+    async def go():
+        cap = await store.create_capture(name="permanent-skip", source="upload")
+        scene = await store.create_scene(cap.id)
+        assert scene is not None
+        ply_path = tmp_path / "scene.ply"
+        _write_minimal_ply(ply_path)
+        await store.update_scene(scene.id, ply_path=str(ply_path))
+
+        # Stage a thumbnail job that previously ran and returned
+        # a permanent_skip marker (e.g., ns-render unavailable).
+        prior = await store.enqueue_job(scene.id, JobKind.thumbnail, payload={})
+        assert prior is not None
+        await store.update_job(
+            prior.id,
+            status=JobStatus.completed,
+            completed=True,
+            result={"permanent_skip": "ns-render unavailable"},
+        )
+
+        # Backfill must NOT re-enqueue.
+        needing = await store.list_scenes_needing_thumbnail()
+        assert all(s.id != scene.id for s in needing), (
+            "scenes whose latest thumbnail had permanent_skip in "
+            "result must not be re-queued by the backfill scan"
+        )
+
+        await runner._backfill_thumbnails()
+        jobs = await store.list_jobs_for_scene(scene.id)
+        thumb_jobs = [j for j in jobs if j.kind == JobKind.thumbnail]
+        # Still only the original prior job — no replay.
+        assert len(thumb_jobs) == 1
+
+    _run(go())
+
+
+def test_backfill_still_retries_transient_skip(
+    isolated_store, tmp_path: Path
+):
+    """The transient-skip case (multi-worker race where ply landed
+    after thumbnail) is still re-queued. Distinguishes the two
+    skip shapes: ``{"skipped": "no .ply"}`` (transient) vs
+    ``{"permanent_skip": ...}`` (permanent)."""
+    async def go():
+        cap = await store.create_capture(name="transient-skip", source="upload")
+        scene = await store.create_scene(cap.id)
+        assert scene is not None
+        ply_path = tmp_path / "scene.ply"
+        _write_minimal_ply(ply_path)
+        await store.update_scene(scene.id, ply_path=str(ply_path))
+
+        prior = await store.enqueue_job(scene.id, JobKind.thumbnail, payload={})
+        assert prior is not None
+        await store.update_job(
+            prior.id,
+            status=JobStatus.completed,
+            completed=True,
+            result={"skipped": "no .ply"},
+        )
+
+        # Backfill SHOULD re-enqueue; no permanent_skip marker.
+        needing = await store.list_scenes_needing_thumbnail()
+        assert any(s.id == scene.id for s in needing), (
+            "transient skip must remain eligible for backfill"
+        )
+
+    _run(go())
+
+
+def test_enqueue_thumbnail_backfill_is_dedup_safe(
+    isolated_store, tmp_path: Path
+):
+    """Two backfill passes (or two workers in a real deployment)
+    racing on the same scene must produce only ONE in-flight
+    thumbnail job. The atomic INSERT...WHERE NOT EXISTS shape on
+    ``enqueue_thumbnail_backfill`` is what prevents the duplicate.
+    """
+    async def go():
+        cap = await store.create_capture(name="dedup", source="upload")
+        scene = await store.create_scene(cap.id)
+        assert scene is not None
+        ply_path = tmp_path / "scene.ply"
+        _write_minimal_ply(ply_path)
+        await store.update_scene(scene.id, ply_path=str(ply_path))
+
+        # First call: inserts a queued thumbnail job.
+        first = await store.enqueue_thumbnail_backfill(scene.id)
+        assert first is not None
+        assert first.kind == JobKind.thumbnail
+        assert first.status == JobStatus.queued
+
+        # Second call: should NOT insert a second job because the
+        # first is still queued.
+        second = await store.enqueue_thumbnail_backfill(scene.id)
+        assert second is None, (
+            "atomic backfill enqueue must refuse to insert when an "
+            "in-flight thumbnail already exists for the scene"
+        )
+
+        jobs = await store.list_jobs_for_scene(scene.id)
+        thumb_jobs = [j for j in jobs if j.kind == JobKind.thumbnail]
+        assert len(thumb_jobs) == 1, (
+            f"expected exactly one thumbnail job; got "
+            f"{[j.id for j in thumb_jobs]}"
+        )
+
+    _run(go())
+
+
+def test_enqueue_thumbnail_backfill_after_terminal_job(
+    isolated_store, tmp_path: Path
+):
+    """A prior thumbnail job in a TERMINAL state (completed /
+    canceled / failed) does not block a fresh backfill enqueue —
+    it's only the in-flight states (queued / claimed / running)
+    that should dedup. Otherwise the multi-worker race recovery
+    in test_backfill_recovers_multi_worker_race would silently
+    no-op."""
+    async def go():
+        cap = await store.create_capture(name="dedup-after-terminal", source="upload")
+        scene = await store.create_scene(cap.id)
+        assert scene is not None
+        ply_path = tmp_path / "scene.ply"
+        _write_minimal_ply(ply_path)
+        await store.update_scene(scene.id, ply_path=str(ply_path))
+
+        prior = await store.enqueue_job(scene.id, JobKind.thumbnail, payload={})
+        assert prior is not None
+        await store.update_job(
+            prior.id,
+            status=JobStatus.completed,
+            completed=True,
+            result={"skipped": "no .ply"},
+        )
+
+        # Even though there's a completed thumbnail job, the
+        # in-flight predicate doesn't match, so a new job slots in.
+        retry = await store.enqueue_thumbnail_backfill(scene.id)
+        assert retry is not None
+        assert retry.id != prior.id
 
     _run(go())
 

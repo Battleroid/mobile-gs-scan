@@ -63,23 +63,34 @@ async def run_thumbnail(
 ) -> dict:
     """Produce ``<scene_dir>/thumb.png`` from the trained splat.
 
-    Returns ``{"thumbnail": <path>}`` on success, ``{}`` when the
-    scene is a stub or ``ns-render`` isn't available.
+    Returns one of three result shapes:
+    * ``{"thumbnail": <path>}`` on a successful render.
+    * ``{"permanent_skip": "<reason>"}`` when the scene structurally
+      can't be rendered on this host: stub training, ns-render
+      missing on PATH, or no nerfstudio config under ``train/``.
+      Backfill uses this marker to stop re-queueing the scene
+      every cycle (see store.list_scenes_needing_thumbnail). A
+      future ``POST /api/scenes/{id}/thumbnail`` retry endpoint
+      can override the marker for hosts that just installed
+      nerfstudio.
+    * ``{}`` when the source .ply is missing — treated as a
+      transient skip; backfill will retry on the next cycle once
+      ``ply_path`` is populated.
     """
     train_dir = scene_dir / "train"
     if (train_dir / "synthetic.json").exists():
         log.info("thumbnail: stub scene, skipping render")
         await progress(1.0, "thumbnail: skipped (stub scene)")
-        return {}
+        return {"permanent_skip": "synthetic stub scene"}
     if not shutil.which("ns-render"):
         log.info("thumbnail: ns-render not on PATH, skipping render")
         await progress(1.0, "thumbnail: skipped (ns-render unavailable)")
-        return {}
+        return {"permanent_skip": "ns-render unavailable"}
 
     candidates = sorted(train_dir.rglob("config.yml"))
     if not candidates:
         log.warning("thumbnail: no nerfstudio config.yml under train/")
-        return {}
+        return {"permanent_skip": "no nerfstudio config under train/"}
     config = candidates[-1]
 
     if not src_ply.exists():

@@ -223,9 +223,13 @@ async def _backfill_thumbnails() -> None:
     enqueued = 0
     for scene in scenes:
         try:
-            job = await store.enqueue_job(
-                scene.id, JobKind.thumbnail, payload={}
-            )
+            # Dedup-safe variant: INSERT...WHERE NOT EXISTS on an
+            # in-flight thumbnail job + scene-existence check, all
+            # in one statement. Without this, two workers reading
+            # the same scenes snapshot would both insert and
+            # produce duplicate render work; the regular
+            # ``enqueue_job`` only checks scene existence.
+            job = await store.enqueue_thumbnail_backfill(scene.id)
         except Exception:
             log.exception(
                 "thumbnail backfill: enqueue failed for scene %s",

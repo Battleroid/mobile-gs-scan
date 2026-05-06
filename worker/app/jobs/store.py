@@ -328,17 +328,27 @@ async def get_scene_for_capture(capture_id: str) -> Scene | None:
 
 async def list_scenes_needing_thumbnail() -> list[Scene]:
     """Find scenes that have a trained .ply but no thumbnail PNG
-    yet AND no in-flight thumbnail job.
+    yet AND no in-flight thumbnail job AND no prior thumbnail job
+    that ended with a ``permanent_skip`` marker.
 
-    Used by the worker's boot-time backfill to render thumbnails
-    for captures that completed before PR-D shipped (or whose
-    earlier render failed back when ``ns-render`` wasn't on PATH).
-    Excluding scenes with an active thumbnail job avoids
-    double-enqueuing when the worker restarts mid-pipeline.
-    A previously-failed thumbnail (job in ``failed`` /
-    ``canceled`` / ``completed`` with no ``thumbnail_path``) is
-    re-tried on each boot — cheap, idempotent, and lets a one-time
-    install of ns-render fix every previously-skipped scene.
+    Used by the worker's boot-time + periodic backfill to render
+    thumbnails for captures that completed before PR-D shipped or
+    whose earlier render produced no PNG for transient reasons
+    (multi-worker race where ply landed late, ns-render crash on a
+    bad checkpoint, etc.).
+
+    Three exclusion gates:
+    * ``thumbnail_path IS NOT NULL`` — already has a thumbnail.
+    * In-flight thumbnail job — avoids double-enqueuing across a
+      worker restart or in a multi-worker deployment where one
+      worker is mid-render.
+    * Prior thumbnail job whose ``result`` carries a
+      ``permanent_skip`` marker — these were skipped because the
+      scene structurally can't be rendered on this host (stub
+      scene, ns-render absent, no nerfstudio config). Without
+      this gate, the periodic backfill loop would re-enqueue
+      those scenes every cycle forever. A future retry endpoint
+      can override the marker if the host config changes.
     """
     async with session() as s:
         active = select(Job.scene_id).where(
@@ -347,14 +357,79 @@ async def list_scenes_needing_thumbnail() -> list[Scene]:
                 [JobStatus.queued, JobStatus.claimed, JobStatus.running]
             ),
         )
+        # Scenes whose ANY prior thumbnail job carries a permanent-
+        # skip marker. SQLite's JSON1 ``json_extract`` returns NULL
+        # when the path doesn't exist, so the IS NOT NULL filter
+        # captures every row that explicitly recorded a permanent
+        # skip — and skips rows whose result was {} (older shape) or
+        # {"thumbnail": ...} / {"error": ...} / {"skipped": ...}.
+        permanent_skipped = select(Job.scene_id).where(
+            Job.kind == JobKind.thumbnail,
+            text("json_extract(jobs.result, '$.permanent_skip') IS NOT NULL"),
+        )
         rows = await s.execute(
             select(Scene).where(
                 Scene.ply_path.is_not(None),
                 Scene.thumbnail_path.is_(None),
                 Scene.id.not_in(active),
+                Scene.id.not_in(permanent_skipped),
             )
         )
         return list(rows.scalars())
+
+
+async def enqueue_thumbnail_backfill(scene_id: str) -> Job | None:
+    """Atomic dedup-safe enqueue used by the thumbnail backfill.
+
+    Inserts a ``thumbnail`` job for the scene only if no in-flight
+    (queued / claimed / running) thumbnail already exists. Returns
+    the new Job on success, ``None`` when an active job is already
+    in place or the scene was deleted out from under us. Backfill's
+    ``list -> enqueue`` loop is otherwise non-atomic across workers
+    — two workers reading the same scenes snapshot would otherwise
+    both insert and produce duplicate render work + duplicate
+    terminal events.
+
+    The ``INSERT ... SELECT ... WHERE NOT EXISTS`` pattern matches
+    the parent-existence guard already in ``create_scene`` /
+    ``enqueue_job``: SQLite's single-writer lock serialises the two
+    transactions so the predicate is evaluated against live state
+    at the moment the row is written.
+    """
+    job_id = _make_id()
+    now = _utcnow()
+    payload_json = json.dumps({})
+    async with session() as s:
+        result = await s.execute(
+            text(
+                """
+                INSERT INTO jobs (
+                    id, scene_id, kind, status, progress,
+                    payload, result, created_at, updated_at
+                )
+                SELECT
+                    :jid, :sid, 'thumbnail', 'queued', 0.0,
+                    :payload, '{}', :now, :now
+                WHERE EXISTS (SELECT 1 FROM scenes WHERE id = :sid)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM jobs
+                    WHERE scene_id = :sid
+                      AND kind = 'thumbnail'
+                      AND status IN ('queued', 'claimed', 'running')
+                  )
+                """
+            ),
+            {
+                "jid": job_id,
+                "sid": scene_id,
+                "payload": payload_json,
+                "now": now,
+            },
+        )
+        await s.commit()
+        if result.rowcount == 0:
+            return None
+        return await s.get(Job, job_id)
 
 
 async def update_scene(scene_id: str, **fields) -> None:
