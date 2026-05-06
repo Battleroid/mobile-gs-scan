@@ -63,17 +63,25 @@ export function CaptureCard({ capture }: { capture: Capture }) {
   const { label, tone } = statusLabel(capture);
   const isTraining = capture.status === "processing" || capture.status === "queued";
 
-  // Pull the scene whenever the capture has one — both readers
-  // (progress overlay during training, thumbnail PNG once
-  // training completes) need scene-shaped data the capture row
-  // doesn't carry. The 3-second poll is still gated to active
-  // captures so completed shelves don't keep refetching scene
-  // data that won't change.
+  // Pull the scene whenever the capture has one, but with refetch
+  // policy split by training-vs-completed:
+  //  - training cards need live progress + thumbnail-when-ready, so
+  //    poll every 3 s and refresh on focus/mount.
+  //  - completed (or failed/canceled) cards only need thumb_url
+  //    once, so fetch on first mount and then cache forever
+  //    (staleTime: Infinity + no refetch). Without this, a busy
+  //    shelf would fire an O(N) burst of getScene requests on
+  //    every grid mount + every window-focus event under tanstack's
+  //    default behaviour — exactly the N+1 problem PR #80's earlier
+  //    gate was meant to prevent.
   const { data: scene } = useQuery<Scene | null>({
     queryKey: ["scene", capture.scene_id],
     queryFn: () => api.getScene(capture.scene_id!),
     enabled: !!capture.scene_id,
     refetchInterval: isTraining ? 3_000 : false,
+    refetchOnWindowFocus: isTraining,
+    refetchOnMount: isTraining,
+    staleTime: isTraining ? 0 : Infinity,
   });
 
   const progress = progressOf(scene?.jobs);

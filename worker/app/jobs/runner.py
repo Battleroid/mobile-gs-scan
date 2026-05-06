@@ -609,18 +609,22 @@ async def _run_thumbnail(*, job: Job, scene: Scene, settings: Settings) -> None:
             # Cancel-ack still has to run finalize. Thumbnail is
             # enqueued after export so the export-time finalize
             # call already saw thumbnail as non-terminal and bailed;
-            # without this re-check the scene gets stuck at
-            # ``processing`` forever after a thumbnail cancel. The
-            # ack flips the row to canceled (or removes it for the
-            # capture-delete path), both of which count as
-            # terminal in ``_maybe_finalize_scene``.
+            # without this re-check the scene would stay stuck at
+            # ``processing`` after a thumbnail cancel.
+            # ``_maybe_finalize_scene`` is defensive against the
+            # capture-delete cascade case where the scene row is
+            # already gone, so a delete-ack here just no-ops.
             await _maybe_finalize_scene(scene)
             return
         # Genuine outer-task shutdown — propagate.
         raise
     except Exception as exc:  # noqa: BLE001
         if await _ack_user_cancel(job):
-            # Same finalize guarantee as the CancelledError branch.
+            # Same finalize-on-cancel guarantee as the
+            # CancelledError arm above. ``_maybe_finalize_scene``
+            # short-circuits when the scene row is gone, so a
+            # capture-delete cascade doesn't trip a spurious
+            # ``scene.completed`` event.
             await _maybe_finalize_scene(scene)
             return
         # Render error / ns-render crash / cosmetic failure of any
@@ -714,14 +718,28 @@ async def _heartbeat(job_id: str, dispatch_task: asyncio.Task) -> None:
 
 
 async def _maybe_finalize_scene(scene: Scene) -> None:
-    """Mark scene + capture completed if every job is done."""
-    jobs = await store.list_jobs_for_scene(scene.id)
+    """Mark scene + capture completed if every job is done.
+
+    Re-fetches the scene before running the all-terminal pass.
+    Reason: callers occasionally pass in a snapshot whose row has
+    since been cascaded away (capture-delete during a thumbnail
+    cancel-ack, etc.). Without the re-check, ``list_jobs_for_scene``
+    returns an empty list, the all-terminal `any(...)` predicate
+    returns False, and we'd publish a spurious ``scene.completed``
+    event for a deleted capture — corrupting websocket subscriber
+    state. Costs one extra query per finalize call; negligible vs
+    the correctness win.
+    """
+    refreshed = await store.get_scene(scene.id)
+    if refreshed is None:
+        return
+    jobs = await store.list_jobs_for_scene(refreshed.id)
     if any(j.status not in (JobStatus.completed, JobStatus.canceled) for j in jobs):
         return
     if any(j.status == JobStatus.failed for j in jobs):
         return
-    await store.update_scene(scene.id, status=CaptureStatus.completed)
-    await events.publish_scene(scene.id, "scene.completed")
-    cap = await store.get_capture(scene.capture_id)
+    await store.update_scene(refreshed.id, status=CaptureStatus.completed)
+    await events.publish_scene(refreshed.id, "scene.completed")
+    cap = await store.get_capture(refreshed.capture_id)
     if cap:
         await store.set_capture_status(cap.id, CaptureStatus.completed)

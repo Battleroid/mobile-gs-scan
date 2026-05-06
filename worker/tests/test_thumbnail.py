@@ -307,6 +307,76 @@ def test_run_thumbnail_cancel_finalizes_scene(
     _run(go())
 
 
+def test_run_thumbnail_cancel_skips_finalize_when_scene_deleted(
+    isolated_store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """When the cancel-ack came from a capture-delete cascade
+    (job row gone, scene gone), ``_run_thumbnail`` MUST NOT call
+    ``_maybe_finalize_scene`` against the now-absent scene.
+    Otherwise it sees an empty job list, passes the all-terminal
+    check, and publishes a spurious ``scene.completed`` event for
+    a capture that's already deleted — which corrupts websocket
+    subscriber state.
+
+    Regression for the codex P2 on PR #82.
+    """
+    published: list[tuple[str, str]] = []
+
+    async def fake_publish_scene(scene_id: str, kind: str, **kwargs) -> None:
+        published.append((scene_id, kind))
+
+    async def go():
+        from app.jobs import events
+
+        cap = await store.create_capture(name="delete-ack", source="upload")
+        scene = await store.create_scene(cap.id)
+        assert scene is not None
+        thumb_job = await store.enqueue_job(scene.id, JobKind.thumbnail, payload={})
+        assert thumb_job is not None
+        await store.update_job(thumb_job.id, status=JobStatus.running)
+
+        # Snapshot the live job + scene the way the runner would.
+        live_job = await store.get_job(thumb_job.id)
+        assert live_job is not None
+        live_scene = await store.get_scene(scene.id)
+        assert live_scene is not None
+
+        # Simulate the capture-delete cascade — every row for this
+        # scene is gone (jobs + scene + capture). _ack_user_cancel
+        # now sees the missing row + treats it as cancel-ack.
+        await store.delete_capture(cap.id)
+        assert await store.get_scene(scene.id) is None
+
+        # Stub the render to raise CancelledError so the cancel
+        # branch triggers, and stub publish_scene so we can inspect
+        # what events fire (or don't).
+        async def fake_run(*args, **kwargs):
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(thumbnail_step, "run_thumbnail", fake_run)
+        monkeypatch.setattr(events, "publish_scene", fake_publish_scene)
+
+        settings = Settings(
+            data_dir=tmp_path,
+            db_filename="test_thumbnail.sqlite",
+        )
+        await runner._run_thumbnail(
+            job=live_job, scene=live_scene, settings=settings,
+        )
+
+        # The scene event topic should NOT have seen a completed
+        # event because the scene is gone — the bug Codex flagged.
+        completed_events = [
+            e for e in published if e[1] == "scene.completed"
+        ]
+        assert completed_events == [], (
+            f"scene.completed must NOT publish for a deleted scene "
+            f"(saw: {published})"
+        )
+
+    _run(go())
+
+
 # ─── helpers ───────────────────────────────────────────────
 
 
