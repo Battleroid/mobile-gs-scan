@@ -62,23 +62,29 @@ export function CaptureCard({ capture }: { capture: Capture }) {
   const [from, to] = paletteFor(capture.id);
   const { label, tone } = statusLabel(capture);
   const isTraining = capture.status === "processing" || capture.status === "queued";
+  // ``completed`` is the only state where a thumbnail can still
+  // arrive after the card mounts — every other non-training state
+  // is either pre-pipeline (no scene yet so the query's disabled
+  // anyway) or terminal-without-recovery (failed / canceled). The
+  // 15 s thumb-wait poll below is gated on this so we don't burn
+  // background traffic on a shelf full of failed captures forever.
+  const canStillGainThumbnail = capture.status === "completed";
 
   // Pull the scene whenever the capture has one. Refetch policy
   // is dynamic: we poll while there's something the card needs to
-  // surface, and go silent once we have it.
+  // surface, and go silent once we have it OR once the capture is
+  // in a state that can never produce one.
   //
   // * Training cards poll every 3 s for live splatfacto progress.
-  // * Non-training cards without a thumb_url yet poll every 15 s
-  //   so a thumbnail rendered server-side (initial enqueue, boot
+  // * Completed cards without a thumb_url yet poll every 15 s so
+  //   a thumbnail rendered server-side (initial enqueue, boot
   //   backfill, periodic backfill recovery) appears in the grid
-  //   without a hard refresh — the original "Infinity staleTime"
-  //   I had here meant a card first fetched as thumb_url=null
-  //   stayed gradient forever in that session.
-  // * Non-training cards that already have a thumb_url stop
-  //   refetching entirely. There's nothing on the scene that
-  //   mutates without a user action once we have the thumbnail.
+  //   without a hard refresh.
+  // * Completed cards with thumb_url stop refetching entirely.
+  // * Failed / canceled cards never poll — those states never
+  //   produce a thumbnail, so polling them is pure waste.
   //
-  // ``refetchOnWindowFocus`` stays off for both branches — the
+  // ``refetchOnWindowFocus`` stays off for all branches — the
   // 3 s training poll covers the focus-burst concern Codex
   // flagged earlier, and the 15 s thumb-wait poll is gentle
   // enough to not need focus-driven catch-up.
@@ -88,6 +94,7 @@ export function CaptureCard({ capture }: { capture: Capture }) {
     enabled: !!capture.scene_id,
     refetchInterval: (query) => {
       if (isTraining) return 3_000;
+      if (!canStillGainThumbnail) return false;
       return query.state.data?.thumb_url ? false : 15_000;
     },
     refetchOnWindowFocus: false,
