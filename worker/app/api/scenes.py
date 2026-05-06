@@ -49,6 +49,11 @@ class SceneView(BaseModel):
     mesh_status: str
     mesh_error: str | None
     mesh_params: dict | None
+    # PNG thumbnail of the trained splat, rendered post-export.
+    # Null when the scene hasn't reached the thumbnail step yet,
+    # the render failed, or the scene is a stub. Web ``CaptureCard``
+    # falls back to a chip-tinted gradient placeholder when null.
+    thumb_url: str | None
     jobs: list[JobView]
     created_at: str
     completed_at: str | None
@@ -99,6 +104,11 @@ async def _to_view(scene: Scene) -> SceneView:
         mesh_status=mesh_status,
         mesh_error=scene.mesh_error,
         mesh_params=scene.mesh_params,
+        thumb_url=(
+            f"/api/scenes/{scene.id}/artifacts/thumb"
+            if scene.thumbnail_path
+            else None
+        ),
         jobs=[
             JobView(
                 id=j.id,
@@ -147,6 +157,17 @@ async def download_artifact(scene_id: str, kind: str, edit: bool = False) -> Any
         if not path or not Path(path).exists():
             raise HTTPException(404, f"mesh {kind!r} not yet produced")
         return FileResponse(path, media_type=media_type, filename=filename)
+    # Thumbnail PNG produced by the post-export thumbnail job.
+    # Same shape as mesh — dedicated column, no ?edit variant.
+    # Returns 404 when the render hasn't run / failed; the web
+    # CaptureCard then falls back to a chip-tinted gradient.
+    if kind == "thumb":
+        if edit:
+            raise HTTPException(400, "?edit=true is not valid for the thumbnail")
+        path = scene.thumbnail_path
+        if not path or not Path(path).exists():
+            raise HTTPException(404, "thumbnail not yet produced")
+        return FileResponse(path, media_type="image/png", filename="thumb.png")
     if edit:
         if kind == "ply":
             path = scene.edited_ply_path

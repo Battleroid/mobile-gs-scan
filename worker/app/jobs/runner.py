@@ -40,6 +40,7 @@ from app.pipeline import extract as extract_step
 from app.pipeline import filter as filter_step
 from app.pipeline import mesh as mesh_step
 from app.pipeline import sfm as sfm_step
+from app.pipeline import thumbnail as thumbnail_step
 from app.pipeline import train as train_step
 
 log = logging.getLogger(__name__)
@@ -47,6 +48,15 @@ log = logging.getLogger(__name__)
 POLL_INTERVAL = 1.5
 HEARTBEAT_INTERVAL = 5.0
 REAP_INTERVAL = 30.0
+# How often to scan for completed scenes that lack a thumbnail
+# and re-enqueue a render. Long enough that the cost of the
+# scan is negligible vs everything else the worker is doing
+# (single SELECT with two index hits per cycle), short enough
+# that a thumbnail "stuck" by a multi-worker race or a transient
+# ns-render outage gets picked back up without an operator
+# restart. Backfill is idempotent — see store.list_scenes_-
+# needing_thumbnail for the dedup criteria.
+BACKFILL_INTERVAL = 60.0
 
 
 def _worker_id() -> str:
@@ -66,6 +76,7 @@ async def run_forever(settings: Settings | None = None) -> None:
             JobKind.export,
             JobKind.mesh,
             JobKind.filter,
+            JobKind.thumbnail,
         ],
     }
     kinds = kinds_for_class.get(settings.worker_class)
@@ -73,6 +84,26 @@ async def run_forever(settings: Settings | None = None) -> None:
         raise RuntimeError(f"unknown worker class {settings.worker_class!r}")
 
     reaper = asyncio.create_task(_reap_loop())
+
+    # Boot-time + periodic thumbnail backfill. The boot pass picks
+    # up scenes that completed before JobKind.thumbnail shipped
+    # (PR-D) and scenes whose earlier render was skipped because
+    # ns-render wasn't on the host at the time. The periodic loop
+    # below covers the multi-worker race where a worker can claim
+    # the queued thumbnail job before another worker finishes
+    # export — that thumbnail then takes the no-ply skip branch and
+    # marks itself terminal without producing a PNG. Without a
+    # runtime backfill, the user would have to restart the worker
+    # to recover. Idempotent in both the boot + periodic paths
+    # (``list_scenes_needing_thumbnail`` excludes scenes with an
+    # in-flight thumbnail job and scenes that already carry
+    # ``thumbnail_path``). Gated on the worker-class kinds list so
+    # a future CPU-only worker class doesn't enqueue work it
+    # can't dispatch.
+    backfill_task: asyncio.Task | None = None
+    if JobKind.thumbnail in kinds:
+        await _backfill_thumbnails()
+        backfill_task = asyncio.create_task(_backfill_loop())
 
     try:
         while True:
@@ -105,12 +136,14 @@ async def run_forever(settings: Settings | None = None) -> None:
                     error=f"{exc}\n{tb}",
                 )
                 await events.publish_job(job.id, "job.failed", error=str(exc))
-                # Filter / mesh are post-processing on an already-
-                # completed scene; a failure in either should NOT
-                # demote the scene / capture back to ``failed``.
-                # The respective _run_filter / _run_mesh helpers
-                # have already updated edit_/mesh_status + error.
-                if job.kind in (JobKind.filter, JobKind.mesh):
+                # Filter / mesh / thumbnail are post-processing on
+                # an already-completed scene; a failure in any of
+                # them should NOT demote the scene / capture back to
+                # ``failed``. The filter / mesh helpers have updated
+                # their own dedicated status columns; thumbnail just
+                # leaves Scene.thumbnail_path null and the web UI
+                # falls back to a chip-tinted gradient.
+                if job.kind in (JobKind.filter, JobKind.mesh, JobKind.thumbnail):
                     continue
                 scene = await store.get_scene(job.scene_id)
                 if scene:
@@ -123,6 +156,8 @@ async def run_forever(settings: Settings | None = None) -> None:
                         )
     finally:
         reaper.cancel()
+        if backfill_task is not None:
+            backfill_task.cancel()
 
 
 async def _ack_user_cancel(job: Job) -> bool:
@@ -156,6 +191,81 @@ async def _ack_user_cancel(job: Job) -> bool:
     await store.update_job(job.id, completed=True)
     await events.publish_job(job.id, "job.canceled")
     return True
+
+
+async def _backfill_thumbnails() -> None:
+    """Enqueue thumbnail jobs for completed scenes that don't have
+    a thumbnail yet.
+
+    Picks up two cases on every worker boot:
+      (a) Captures that finished BEFORE ``JobKind.thumbnail`` shipped
+          (PR-D) — they have a .ply but never had a thumbnail step
+          enqueued.
+      (b) Captures that ran the thumbnail step earlier but produced
+          no PNG (e.g., the worker host hadn't installed
+          ``ns-render`` at the time). Re-enqueueing them costs a
+          single extra render once the binary lands.
+
+    The store query already excludes scenes with an in-flight
+    thumbnail job, so a worker restart mid-backfill doesn't
+    double-enqueue, and scenes that already have a
+    ``thumbnail_path`` are never touched. Logged loudly enough that
+    a curious operator can see what happened on startup but quiet
+    when the queue's empty (no spam in the no-op case).
+    """
+    try:
+        scenes = await store.list_scenes_needing_thumbnail()
+    except Exception:
+        log.exception("thumbnail backfill: query failed; skipping")
+        return
+    if not scenes:
+        return
+    enqueued = 0
+    for scene in scenes:
+        try:
+            # Dedup-safe variant: INSERT...WHERE NOT EXISTS on an
+            # in-flight thumbnail job + scene-existence check, all
+            # in one statement. Without this, two workers reading
+            # the same scenes snapshot would both insert and
+            # produce duplicate render work; the regular
+            # ``enqueue_job`` only checks scene existence.
+            job = await store.enqueue_thumbnail_backfill(scene.id)
+        except Exception:
+            log.exception(
+                "thumbnail backfill: enqueue failed for scene %s",
+                scene.id,
+            )
+            continue
+        if job is not None:
+            enqueued += 1
+    log.info(
+        "thumbnail backfill: enqueued %d job(s) for %d scene(s) "
+        "missing thumbnails",
+        enqueued,
+        len(scenes),
+    )
+
+
+async def _backfill_loop() -> None:
+    """Periodic re-scan that complements the boot-time backfill.
+
+    Covers the multi-worker race ``_run_thumbnail`` itself can't
+    detect at the time it claims a job: worker B can claim the
+    queued thumbnail before worker A finishes export, hit the
+    ``no .ply`` skip branch, and mark thumbnail terminal — leaving
+    a scene that completes WITH a .ply (worker A's later success)
+    but no thumbnail. Without this loop the user would have to
+    restart the worker to trigger the boot backfill. Cheap query
+    every BACKFILL_INTERVAL seconds keeps the recovery automatic.
+    """
+    while True:
+        try:
+            await asyncio.sleep(BACKFILL_INTERVAL)
+            await _backfill_thumbnails()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            log.exception("backfill loop error")
 
 
 async def _reap_loop() -> None:
@@ -196,6 +306,15 @@ async def _run_one(job: Job, settings: Settings) -> None:
         # treatment as filter so a failed mesh doesn't demote the
         # scene back to ``failed``.
         await _run_mesh(job=job, scene=scene, settings=settings)
+        return
+
+    if job.kind == JobKind.thumbnail:
+        # Renders a single PNG of the trained splat for the web home
+        # grid. Runs after export but is independent of pipeline
+        # status — a failed thumbnail leaves the scene "completed"
+        # (the UI falls back to a chip-tinted gradient until the
+        # user re-triggers).
+        await _run_thumbnail(job=job, scene=scene, settings=settings)
         return
 
     await store.update_scene(scene.id, status=CaptureStatus.processing)
@@ -540,6 +659,150 @@ async def _run_mesh(*, job: Job, scene: Scene, settings: Settings) -> None:
     await events.publish_scene(scene.id, "scene.meshed", obj=result.get("obj"))
 
 
+async def _run_thumbnail(*, job: Job, scene: Scene, settings: Settings) -> None:
+    """Render a single PNG thumbnail of the trained splat.
+
+    Soft-failure step: if the source .ply is missing, ns-render
+    isn't installed, or rendering errors out, we leave
+    ``Scene.thumbnail_path`` unset and complete the job with an
+    empty result. The web home grid falls back to a chip-tinted
+    gradient when ``thumb_url`` is null, so a missing thumbnail is
+    a visual regression but not a user-facing failure — and
+    crucially, NOT marking the job ``failed`` keeps
+    ``_maybe_finalize_scene`` happy (it bails on any failed sibling
+    job, which would leave the scene stuck at ``processing`` over a
+    cosmetic shortcoming).
+
+    Cancellation semantics mirror ``_run_mesh``: heartbeat watches
+    the row, kills the subprocess if cancel/delete fires, and the
+    outer try treats CancelledError as ack'd cancel. There's no
+    dedicated status column to reset (unlike mesh_status) — the
+    artifact's presence on disk + ``thumbnail_path`` on the row are
+    the only signal.
+    """
+    src_ply = scene.ply_path
+    if not src_ply or not Path(src_ply).exists():
+        log.info("thumbnail %s: scene has no .ply yet; skipping", job.id)
+        await _complete_thumbnail_job(job, scene, result={"skipped": "no .ply"})
+        return
+
+    scene_dir = settings.scenes_dir() / scene.id
+
+    async def progress(pct: float, msg: str) -> None:
+        await store.update_job(
+            job.id, progress=pct, progress_msg=msg, heartbeat=True
+        )
+        await events.publish_job(
+            job.id, "job.progress", progress=pct, message=msg,
+        )
+
+    dispatch_task = asyncio.create_task(
+        thumbnail_step.run_thumbnail(
+            scene_dir=scene_dir,
+            src_ply=Path(src_ply),
+            progress=progress,
+            job_id=job.id,
+        )
+    )
+    hb_task = asyncio.create_task(_heartbeat(job.id, dispatch_task))
+    try:
+        try:
+            result = await dispatch_task
+        finally:
+            hb_task.cancel()
+    except asyncio.CancelledError:
+        if await _ack_user_cancel(job):
+            # Cancel-ack still has to run finalize. Thumbnail is
+            # enqueued after export so the export-time finalize
+            # call already saw thumbnail as non-terminal and bailed;
+            # without this re-check the scene would stay stuck at
+            # ``processing`` after a thumbnail cancel.
+            # ``_maybe_finalize_scene`` is defensive against the
+            # capture-delete cascade case where the scene row is
+            # already gone, so a delete-ack here just no-ops.
+            await _maybe_finalize_scene(scene)
+            return
+        # Genuine outer-task shutdown — propagate.
+        raise
+    except Exception as exc:  # noqa: BLE001
+        if await _ack_user_cancel(job):
+            # Same finalize-on-cancel guarantee as the
+            # CancelledError arm above. ``_maybe_finalize_scene``
+            # short-circuits when the scene row is gone, so a
+            # capture-delete cascade doesn't trip a spurious
+            # ``scene.completed`` event.
+            await _maybe_finalize_scene(scene)
+            return
+        # Render error / ns-render crash / cosmetic failure of any
+        # kind. Log it for triage but mark the job completed with
+        # the error blurb in the result so the pipeline panel still
+        # shows something useful, and the scene can finalize.
+        log.warning("thumbnail %s failed: %s", job.id, exc)
+        await _complete_thumbnail_job(
+            job, scene, result={"error": str(exc)},
+        )
+        return
+
+    # Pre-commit cancel guard. The dispatch_task can complete
+    # successfully in the window between two heartbeat ticks even
+    # after the user's cancel (or capture-delete cascade) has
+    # already flipped / removed the job row. Without this check
+    # we'd happily commit thumbnail_path + emit
+    # scene.thumbnail_ready / job.completed events for a row the
+    # user just removed. Mirrors the same guard in _run_filter /
+    # _run_mesh — the missing-row branch is the capture-delete
+    # path and gets the same cancel-ack treatment.
+    refreshed = await store.get_job(job.id)
+    if refreshed is None or refreshed.status == JobStatus.canceled:
+        log.info(
+            "thumbnail %s finished but DB row is %s; skipping commit",
+            job.id,
+            "deleted" if refreshed is None else "canceled",
+        )
+        if refreshed is not None:
+            await store.update_job(job.id, completed=True)
+        await events.publish_job(job.id, "job.canceled")
+        await _maybe_finalize_scene(scene)
+        return
+
+    rendered = result.get("thumbnail")
+    if rendered:
+        # Match ply_path / mesh_obj_path: store the absolute path
+        # produced by the step so the artifact route can do a
+        # straight FileResponse without re-resolving against
+        # data_dir on read.
+        await store.update_scene(scene.id, thumbnail_path=str(rendered))
+        await events.publish_scene(
+            scene.id, "scene.thumbnail_ready", thumbnail=str(rendered),
+        )
+
+    await _complete_thumbnail_job(job, scene, result=result)
+
+
+async def _complete_thumbnail_job(job: Job, scene: Scene, *, result: dict) -> None:
+    """Mark the thumbnail job completed and re-trigger scene
+    finalization. Pulled out to keep the success / soft-failure /
+    skip branches aligned — all three need the same finalize call
+    so a thumbnail completing AFTER export doesn't leave the scene
+    stuck at ``processing``.
+    """
+    await store.update_job(
+        job.id,
+        status=JobStatus.completed,
+        progress=1.0,
+        progress_msg=result.get("error") or result.get("skipped") or "done",
+        completed=True,
+        result=result,
+    )
+    await events.publish_job(job.id, "job.completed", result=result)
+    # Thumbnail is dispatched after export, so when it lands the
+    # other pipeline jobs are already done; without this, the
+    # earlier _maybe_finalize_scene call (after export) saw the
+    # still-queued thumbnail and skipped, leaving the scene at
+    # ``processing`` indefinitely once thumbnail completes here.
+    await _maybe_finalize_scene(scene)
+
+
 async def _heartbeat(job_id: str, dispatch_task: asyncio.Task) -> None:
     """Heartbeat task: keeps claimed_by fresh AND watches for user
     cancellation. On cancel, kills any registered subprocess for
@@ -583,14 +846,52 @@ async def _heartbeat(job_id: str, dispatch_task: asyncio.Task) -> None:
 
 
 async def _maybe_finalize_scene(scene: Scene) -> None:
-    """Mark scene + capture completed if every job is done."""
-    jobs = await store.list_jobs_for_scene(scene.id)
+    """Mark scene + capture completed if every job is done.
+
+    Re-fetches the scene before running the all-terminal pass.
+    Reason: callers occasionally pass in a snapshot whose row has
+    since been cascaded away (capture-delete during a thumbnail
+    cancel-ack, etc.). Without the re-check, ``list_jobs_for_scene``
+    returns an empty list, the all-terminal `any(...)` predicate
+    returns False, and we'd publish a spurious ``scene.completed``
+    event for a deleted capture — corrupting websocket subscriber
+    state. Costs one extra query per finalize call; negligible vs
+    the correctness win.
+
+    A second guard distinguishes "every job ran cleanly" from
+    "an essential upstream job was canceled and never produced
+    artifacts". Cancellation counts as terminal in the all-jobs
+    pass (so a canceled thumbnail doesn't block finalize over a
+    cosmetic step), but if the scene's ``ply_path`` is null when we
+    reach the finalize point, an essential job (extract / sfm /
+    train / export) was canceled before producing artifacts.
+    Flipping to ``completed`` in that state would leave a broken
+    capture whose viewer 404s on ``/artifacts/ply``; mark the
+    scene + capture ``canceled`` instead so the UI surfaces it
+    accurately. Artifact-presence rather than hardcoding "essential"
+    JobKinds keeps the rule durable as the pipeline evolves.
+    """
+    refreshed = await store.get_scene(scene.id)
+    if refreshed is None:
+        return
+    jobs = await store.list_jobs_for_scene(refreshed.id)
     if any(j.status not in (JobStatus.completed, JobStatus.canceled) for j in jobs):
         return
     if any(j.status == JobStatus.failed for j in jobs):
         return
-    await store.update_scene(scene.id, status=CaptureStatus.completed)
-    await events.publish_scene(scene.id, "scene.completed")
-    cap = await store.get_capture(scene.capture_id)
+
+    if not refreshed.ply_path:
+        # Essential upstream job was canceled mid-pipeline; don't
+        # mislead the user into thinking this capture is ready.
+        await store.update_scene(refreshed.id, status=CaptureStatus.canceled)
+        await events.publish_scene(refreshed.id, "scene.canceled")
+        cap = await store.get_capture(refreshed.capture_id)
+        if cap:
+            await store.set_capture_status(cap.id, CaptureStatus.canceled)
+        return
+
+    await store.update_scene(refreshed.id, status=CaptureStatus.completed)
+    await events.publish_scene(refreshed.id, "scene.completed")
+    cap = await store.get_capture(refreshed.capture_id)
     if cap:
         await store.set_capture_status(cap.id, CaptureStatus.completed)

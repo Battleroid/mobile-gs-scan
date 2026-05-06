@@ -62,39 +62,79 @@ export function CaptureCard({ capture }: { capture: Capture }) {
   const [from, to] = paletteFor(capture.id);
   const { label, tone } = statusLabel(capture);
   const isTraining = capture.status === "processing" || capture.status === "queued";
+  // ``completed`` is the only state where a thumbnail can still
+  // arrive after the card mounts — every other non-training state
+  // is either pre-pipeline (no scene yet so the query's disabled
+  // anyway) or terminal-without-recovery (failed / canceled). The
+  // 15 s thumb-wait poll below is gated on this so we don't burn
+  // background traffic on a shelf full of failed captures forever.
+  const canStillGainThumbnail = capture.status === "completed";
 
-  // Pull the scene ONLY for training rows — the only consumer of
-  // this query is the progress overlay (rendered when isTraining
-  // && progress !== null). Polling completed / failed / uploading
-  // shelves would otherwise fire an N+1 burst of getScene requests
-  // on every grid mount (plus tanstack's default refetch-on-focus
-  // / refetch-on-mount) for data the card never reads. On a busy
-  // shelf this dwarfs the cost of the actual list query.
+  // Pull the scene whenever the capture has one. Refetch policy
+  // is dynamic: we poll while there's something the card needs to
+  // surface, and go silent once we have it OR once the capture is
+  // in a state that can never produce one.
+  //
+  // * Training cards poll every 3 s for live splatfacto progress.
+  // * Completed cards without a thumb_url yet poll every 15 s so
+  //   a thumbnail rendered server-side (initial enqueue, boot
+  //   backfill, periodic backfill recovery) appears in the grid
+  //   without a hard refresh.
+  // * Completed cards with thumb_url stop refetching entirely.
+  // * Failed / canceled cards never poll — those states never
+  //   produce a thumbnail, so polling them is pure waste.
+  //
+  // ``refetchOnWindowFocus`` stays off for all branches — the
+  // 3 s training poll covers the focus-burst concern Codex
+  // flagged earlier, and the 15 s thumb-wait poll is gentle
+  // enough to not need focus-driven catch-up.
   const { data: scene } = useQuery<Scene | null>({
     queryKey: ["scene", capture.scene_id],
     queryFn: () => api.getScene(capture.scene_id!),
-    enabled: !!capture.scene_id && isTraining,
-    refetchInterval: isTraining ? 3_000 : false,
+    enabled: !!capture.scene_id,
+    refetchInterval: (query) => {
+      if (isTraining) return 3_000;
+      if (!canStillGainThumbnail) return false;
+      return query.state.data?.thumb_url ? false : 15_000;
+    },
+    refetchOnWindowFocus: false,
+    refetchOnMount: true,
+    staleTime: 0,
   });
 
   const progress = progressOf(scene?.jobs);
+  const thumbUrl = scene?.thumb_url
+    ? api.base() + scene.thumb_url
+    : null;
 
   return (
     <Link
       href={`/captures/${capture.id}`}
       className="group block overflow-hidden rounded-lg border border-rule bg-surface shadow-[0_1px_0_rgba(0,0,0,0.02)] transition-transform hover:-translate-y-[2px] hover:shadow-md"
     >
-      {/* Thumbnail. Gradient placeholder keyed off id; trained scenes
-       *  with a thumb_url (PR-D) will override the gradient with a
-       *  real PNG. Training cards get a light overlay strip showing
-       *  splatfacto progress + a bottom progress bar. */}
+      {/* Thumbnail. Trained scenes serve a server-rendered PNG via
+       *  the JobKind.thumbnail step — when present, it replaces the
+       *  gradient + sparse-particle placeholder. Training cards
+       *  layer a progress bar + 'splatfacto · NN%' chip on top of
+       *  whichever background is showing. */}
       <div
         className="relative h-[180px] overflow-hidden"
         style={{
           background: `linear-gradient(135deg, ${from} 0%, ${to} 100%)`,
         }}
       >
-        <Particles seed={capture.id} />
+        {thumbUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={thumbUrl}
+            alt=""
+            className="absolute inset-0 h-full w-full object-cover"
+            loading="lazy"
+            decoding="async"
+          />
+        ) : (
+          <Particles seed={capture.id} />
+        )}
         {isTraining && progress !== null && (
           <>
             <div className="absolute left-3 right-3 top-3 flex justify-between font-mono text-[10px] text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.4)]">
