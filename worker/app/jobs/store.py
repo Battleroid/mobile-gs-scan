@@ -100,6 +100,13 @@ async def _apply_lightweight_migrations(conn) -> None:
         "ALTER TABLE scenes ADD COLUMN mesh_status VARCHAR DEFAULT 'none' NOT NULL",
         "ALTER TABLE scenes ADD COLUMN mesh_error TEXT",
         "ALTER TABLE scenes ADD COLUMN mesh_params JSON",
+        # Added with PR-D's JobKind.thumbnail step. Pre-existing
+        # dbs without this column would fail every ORM read of
+        # Scene with `no such column` once the runtime ships
+        # this version, so the migration is required even though
+        # the column itself was technically declared on the
+        # schema before the rendering pipeline arrived.
+        "ALTER TABLE scenes ADD COLUMN thumbnail_path VARCHAR",
         # One-shot post-pairing-removal repair: rows that were stuck
         # in pairing/streaming when the WS endpoint was retired
         # would otherwise fail to decode their status enum on read.
