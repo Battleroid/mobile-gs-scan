@@ -637,6 +637,28 @@ async def _run_thumbnail(*, job: Job, scene: Scene, settings: Settings) -> None:
         )
         return
 
+    # Pre-commit cancel guard. The dispatch_task can complete
+    # successfully in the window between two heartbeat ticks even
+    # after the user's cancel (or capture-delete cascade) has
+    # already flipped / removed the job row. Without this check
+    # we'd happily commit thumbnail_path + emit
+    # scene.thumbnail_ready / job.completed events for a row the
+    # user just removed. Mirrors the same guard in _run_filter /
+    # _run_mesh — the missing-row branch is the capture-delete
+    # path and gets the same cancel-ack treatment.
+    refreshed = await store.get_job(job.id)
+    if refreshed is None or refreshed.status == JobStatus.canceled:
+        log.info(
+            "thumbnail %s finished but DB row is %s; skipping commit",
+            job.id,
+            "deleted" if refreshed is None else "canceled",
+        )
+        if refreshed is not None:
+            await store.update_job(job.id, completed=True)
+        await events.publish_job(job.id, "job.canceled")
+        await _maybe_finalize_scene(scene)
+        return
+
     rendered = result.get("thumbnail")
     if rendered:
         # Match ply_path / mesh_obj_path: store the absolute path

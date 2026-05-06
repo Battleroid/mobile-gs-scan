@@ -377,6 +377,106 @@ def test_run_thumbnail_cancel_skips_finalize_when_scene_deleted(
     _run(go())
 
 
+def test_run_thumbnail_pre_commit_cancel_guard_skips_thumb_url_event(
+    isolated_store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Race window: dispatch_task completes successfully (PNG on
+    disk) in the gap between two heartbeat ticks, but the user has
+    already canceled or deleted in the meantime. The success
+    branch must NOT commit thumbnail_path or emit
+    scene.thumbnail_ready in that window — both would leak terminal
+    events for a row the user just removed.
+
+    Regression for the codex P2 on PR #82 about pre-commit cancel
+    guards. Mirrors the same guard already in _run_filter /
+    _run_mesh.
+    """
+    published_scene: list[tuple[str, str]] = []
+    published_job: list[tuple[str, str]] = []
+
+    async def fake_publish_scene(scene_id: str, kind: str, **kwargs) -> None:
+        published_scene.append((scene_id, kind))
+
+    async def fake_publish_job(job_id: str, kind: str, **kwargs) -> None:
+        published_job.append((job_id, kind))
+
+    async def go():
+        from app.jobs import events
+
+        cap = await store.create_capture(name="precommit", source="upload")
+        scene = await store.create_scene(cap.id)
+        assert scene is not None
+        # Set a ply_path so _run_thumbnail enters the dispatch path
+        # rather than the no-ply skip branch.
+        ply_path = tmp_path / "scene.ply"
+        _write_minimal_ply(ply_path)
+        await store.update_scene(scene.id, ply_path=str(ply_path))
+
+        thumb_job = await store.enqueue_job(scene.id, JobKind.thumbnail, payload={})
+        assert thumb_job is not None
+        await store.update_job(thumb_job.id, status=JobStatus.running)
+
+        # Simulate a successful render but cancel-during-render —
+        # dispatch_task returns a thumbnail path, then we cancel
+        # the job row before _run_thumbnail's post-dispatch path
+        # gets to commit anything.
+        rendered_path = tmp_path / "thumb.png"
+        rendered_path.write_bytes(b"fake png")
+
+        async def fake_run(*args, **kwargs):
+            # Flip the job status to canceled mid-render — same
+            # state the heartbeat would observe a tick later.
+            await store.cancel_job(thumb_job.id)
+            return {"thumbnail": str(rendered_path)}
+
+        monkeypatch.setattr(thumbnail_step, "run_thumbnail", fake_run)
+        monkeypatch.setattr(events, "publish_scene", fake_publish_scene)
+        monkeypatch.setattr(events, "publish_job", fake_publish_job)
+
+        live_job = await store.get_job(thumb_job.id)
+        assert live_job is not None
+        live_scene = await store.get_scene(scene.id)
+        assert live_scene is not None
+
+        settings = Settings(
+            data_dir=tmp_path,
+            db_filename="test_thumbnail.sqlite",
+        )
+        await runner._run_thumbnail(
+            job=live_job, scene=live_scene, settings=settings,
+        )
+
+        # Pre-commit guard must have caught the canceled status:
+        # no thumbnail_ready / job.completed events for this run,
+        # only the cancel-ack job.canceled.
+        ready_events = [e for e in published_scene if e[1] == "scene.thumbnail_ready"]
+        assert ready_events == [], (
+            "scene.thumbnail_ready must NOT publish when the job "
+            "row is already canceled by the time dispatch returns "
+            f"(saw: {published_scene})"
+        )
+        completed_events = [e for e in published_job if e[1] == "job.completed"]
+        assert completed_events == [], (
+            "job.completed must NOT publish on the canceled path "
+            f"(saw: {published_job})"
+        )
+        canceled_events = [e for e in published_job if e[1] == "job.canceled"]
+        assert canceled_events, (
+            "job.canceled must publish so subscribers see the "
+            f"terminal event (saw: {published_job})"
+        )
+
+        # And thumbnail_path must NOT have been written.
+        scene_now = await store.get_scene(scene.id)
+        assert scene_now is not None
+        assert scene_now.thumbnail_path is None, (
+            "thumbnail_path must not be committed when the row is "
+            "canceled at pre-commit time"
+        )
+
+    _run(go())
+
+
 # ─── helpers ───────────────────────────────────────────────
 
 
