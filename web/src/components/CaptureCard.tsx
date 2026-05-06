@@ -63,25 +63,36 @@ export function CaptureCard({ capture }: { capture: Capture }) {
   const { label, tone } = statusLabel(capture);
   const isTraining = capture.status === "processing" || capture.status === "queued";
 
-  // Pull the scene whenever the capture has one, but with refetch
-  // policy split by training-vs-completed:
-  //  - training cards need live progress + thumbnail-when-ready, so
-  //    poll every 3 s and refresh on focus/mount.
-  //  - completed (or failed/canceled) cards only need thumb_url
-  //    once, so fetch on first mount and then cache forever
-  //    (staleTime: Infinity + no refetch). Without this, a busy
-  //    shelf would fire an O(N) burst of getScene requests on
-  //    every grid mount + every window-focus event under tanstack's
-  //    default behaviour — exactly the N+1 problem PR #80's earlier
-  //    gate was meant to prevent.
+  // Pull the scene whenever the capture has one. Refetch policy
+  // is dynamic: we poll while there's something the card needs to
+  // surface, and go silent once we have it.
+  //
+  // * Training cards poll every 3 s for live splatfacto progress.
+  // * Non-training cards without a thumb_url yet poll every 15 s
+  //   so a thumbnail rendered server-side (initial enqueue, boot
+  //   backfill, periodic backfill recovery) appears in the grid
+  //   without a hard refresh — the original "Infinity staleTime"
+  //   I had here meant a card first fetched as thumb_url=null
+  //   stayed gradient forever in that session.
+  // * Non-training cards that already have a thumb_url stop
+  //   refetching entirely. There's nothing on the scene that
+  //   mutates without a user action once we have the thumbnail.
+  //
+  // ``refetchOnWindowFocus`` stays off for both branches — the
+  // 3 s training poll covers the focus-burst concern Codex
+  // flagged earlier, and the 15 s thumb-wait poll is gentle
+  // enough to not need focus-driven catch-up.
   const { data: scene } = useQuery<Scene | null>({
     queryKey: ["scene", capture.scene_id],
     queryFn: () => api.getScene(capture.scene_id!),
     enabled: !!capture.scene_id,
-    refetchInterval: isTraining ? 3_000 : false,
-    refetchOnWindowFocus: isTraining,
-    refetchOnMount: isTraining,
-    staleTime: isTraining ? 0 : Infinity,
+    refetchInterval: (query) => {
+      if (isTraining) return 3_000;
+      return query.state.data?.thumb_url ? false : 15_000;
+    },
+    refetchOnWindowFocus: false,
+    refetchOnMount: true,
+    staleTime: 0,
   });
 
   const progress = progressOf(scene?.jobs);
