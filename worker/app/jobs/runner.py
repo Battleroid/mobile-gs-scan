@@ -48,6 +48,15 @@ log = logging.getLogger(__name__)
 POLL_INTERVAL = 1.5
 HEARTBEAT_INTERVAL = 5.0
 REAP_INTERVAL = 30.0
+# How often to scan for completed scenes that lack a thumbnail
+# and re-enqueue a render. Long enough that the cost of the
+# scan is negligible vs everything else the worker is doing
+# (single SELECT with two index hits per cycle), short enough
+# that a thumbnail "stuck" by a multi-worker race or a transient
+# ns-render outage gets picked back up without an operator
+# restart. Backfill is idempotent — see store.list_scenes_-
+# needing_thumbnail for the dedup criteria.
+BACKFILL_INTERVAL = 60.0
 
 
 def _worker_id() -> str:
@@ -76,18 +85,25 @@ async def run_forever(settings: Settings | None = None) -> None:
 
     reaper = asyncio.create_task(_reap_loop())
 
-    # One-shot backfill of thumbnails for captures that completed
-    # before JobKind.thumbnail shipped (or whose earlier render
-    # was skipped because ns-render wasn't installed on the host
-    # at the time). Idempotent: ``list_scenes_needing_thumbnail``
-    # excludes scenes with an active thumbnail job, so a worker
-    # restart mid-backfill doesn't double-enqueue, and scenes that
-    # already have a ``thumbnail_path`` are never re-touched. Only
-    # runs on workers that handle the thumbnail kind so a future
-    # worker class that doesn't (e.g. CPU-only) doesn't end up
-    # enqueueing work it can't dispatch.
+    # Boot-time + periodic thumbnail backfill. The boot pass picks
+    # up scenes that completed before JobKind.thumbnail shipped
+    # (PR-D) and scenes whose earlier render was skipped because
+    # ns-render wasn't on the host at the time. The periodic loop
+    # below covers the multi-worker race where a worker can claim
+    # the queued thumbnail job before another worker finishes
+    # export — that thumbnail then takes the no-ply skip branch and
+    # marks itself terminal without producing a PNG. Without a
+    # runtime backfill, the user would have to restart the worker
+    # to recover. Idempotent in both the boot + periodic paths
+    # (``list_scenes_needing_thumbnail`` excludes scenes with an
+    # in-flight thumbnail job and scenes that already carry
+    # ``thumbnail_path``). Gated on the worker-class kinds list so
+    # a future CPU-only worker class doesn't enqueue work it
+    # can't dispatch.
+    backfill_task: asyncio.Task | None = None
     if JobKind.thumbnail in kinds:
         await _backfill_thumbnails()
+        backfill_task = asyncio.create_task(_backfill_loop())
 
     try:
         while True:
@@ -140,6 +156,8 @@ async def run_forever(settings: Settings | None = None) -> None:
                         )
     finally:
         reaper.cancel()
+        if backfill_task is not None:
+            backfill_task.cancel()
 
 
 async def _ack_user_cancel(job: Job) -> bool:
@@ -222,6 +240,28 @@ async def _backfill_thumbnails() -> None:
         enqueued,
         len(scenes),
     )
+
+
+async def _backfill_loop() -> None:
+    """Periodic re-scan that complements the boot-time backfill.
+
+    Covers the multi-worker race ``_run_thumbnail`` itself can't
+    detect at the time it claims a job: worker B can claim the
+    queued thumbnail before worker A finishes export, hit the
+    ``no .ply`` skip branch, and mark thumbnail terminal — leaving
+    a scene that completes WITH a .ply (worker A's later success)
+    but no thumbnail. Without this loop the user would have to
+    restart the worker to trigger the boot backfill. Cheap query
+    every BACKFILL_INTERVAL seconds keeps the recovery automatic.
+    """
+    while True:
+        try:
+            await asyncio.sleep(BACKFILL_INTERVAL)
+            await _backfill_thumbnails()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            log.exception("backfill loop error")
 
 
 async def _reap_loop() -> None:

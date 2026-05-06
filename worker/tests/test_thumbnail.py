@@ -680,6 +680,56 @@ def test_backfill_skips_scenes_already_with_thumbnail(
     _run(go())
 
 
+def test_backfill_recovers_multi_worker_race(
+    isolated_store, tmp_path: Path
+):
+    """Multi-worker race: worker B claimed the queued thumbnail
+    before worker A finished export, hit the no-ply skip branch,
+    and marked thumbnail terminal — leaving the scene with a
+    completed thumbnail job but no actual PNG. Worker A then
+    finished export and wrote ply_path.
+
+    The runtime backfill (called periodically from
+    ``_backfill_loop``) must pick this scene up and re-enqueue a
+    fresh thumbnail job, so recovery doesn't require an operator
+    restart. Tests the building block (``_backfill_thumbnails``);
+    the loop is just sleep-and-call so it doesn't add coverage
+    we can pin meaningfully without a real timing test.
+    """
+    async def go():
+        cap = await store.create_capture(name="race-recovery", source="upload")
+        scene = await store.create_scene(cap.id)
+        assert scene is not None
+        # Stage the post-race state: thumbnail job already
+        # terminal (worker B's no-ply skip), but ply_path is set
+        # (worker A's later export success).
+        thumb_job = await store.enqueue_job(scene.id, JobKind.thumbnail, payload={})
+        assert thumb_job is not None
+        await store.update_job(
+            thumb_job.id, status=JobStatus.completed, completed=True,
+        )
+        ply_path = tmp_path / "scene.ply"
+        _write_minimal_ply(ply_path)
+        await store.update_scene(scene.id, ply_path=str(ply_path))
+
+        await runner._backfill_thumbnails()
+
+        # A second thumbnail job is now queued — backfill saw the
+        # ply was finally available and the scene still had no
+        # thumbnail_path, so it scheduled a fresh render.
+        jobs = await store.list_jobs_for_scene(scene.id)
+        thumb_jobs = [j for j in jobs if j.kind == JobKind.thumbnail]
+        queued = [j for j in thumb_jobs if j.status == JobStatus.queued]
+        assert len(queued) == 1, (
+            "backfill must re-enqueue a thumbnail when the prior "
+            "one terminated without producing a PNG and the scene "
+            "now has a ply_path; "
+            f"thumb job statuses: {[j.status.value for j in thumb_jobs]}"
+        )
+
+    _run(go())
+
+
 def test_backfill_skips_scenes_without_ply_path(
     isolated_store, tmp_path: Path
 ):
