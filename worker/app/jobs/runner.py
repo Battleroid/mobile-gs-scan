@@ -25,6 +25,7 @@ from pathlib import Path
 
 from app.config import Settings, get_settings
 from app.jobs import events, store
+from app.jobs.finalize import maybe_finalize_scene as _shared_finalize_scene
 from app.jobs.schema import (
     CaptureStatus,
     EditStatus,
@@ -846,52 +847,12 @@ async def _heartbeat(job_id: str, dispatch_task: asyncio.Task) -> None:
 
 
 async def _maybe_finalize_scene(scene: Scene) -> None:
-    """Mark scene + capture completed if every job is done.
+    """Thin wrapper around ``app.jobs.finalize.maybe_finalize_scene``.
 
-    Re-fetches the scene before running the all-terminal pass.
-    Reason: callers occasionally pass in a snapshot whose row has
-    since been cascaded away (capture-delete during a thumbnail
-    cancel-ack, etc.). Without the re-check, ``list_jobs_for_scene``
-    returns an empty list, the all-terminal `any(...)` predicate
-    returns False, and we'd publish a spurious ``scene.completed``
-    event for a deleted capture — corrupting websocket subscriber
-    state. Costs one extra query per finalize call; negligible vs
-    the correctness win.
-
-    A second guard distinguishes "every job ran cleanly" from
-    "an essential upstream job was canceled and never produced
-    artifacts". Cancellation counts as terminal in the all-jobs
-    pass (so a canceled thumbnail doesn't block finalize over a
-    cosmetic step), but if the scene's ``ply_path`` is null when we
-    reach the finalize point, an essential job (extract / sfm /
-    train / export) was canceled before producing artifacts.
-    Flipping to ``completed`` in that state would leave a broken
-    capture whose viewer 404s on ``/artifacts/ply``; mark the
-    scene + capture ``canceled`` instead so the UI surfaces it
-    accurately. Artifact-presence rather than hardcoding "essential"
-    JobKinds keeps the rule durable as the pipeline evolves.
+    The shared implementation lives in ``finalize.py`` so the API
+    layer (which doesn't have a ``Scene`` in hand when canceling a
+    still-queued thumbnail job) can call it by id. Runner call
+    sites already have the snapshot, so they hop through this
+    wrapper to keep the existing signature.
     """
-    refreshed = await store.get_scene(scene.id)
-    if refreshed is None:
-        return
-    jobs = await store.list_jobs_for_scene(refreshed.id)
-    if any(j.status not in (JobStatus.completed, JobStatus.canceled) for j in jobs):
-        return
-    if any(j.status == JobStatus.failed for j in jobs):
-        return
-
-    if not refreshed.ply_path:
-        # Essential upstream job was canceled mid-pipeline; don't
-        # mislead the user into thinking this capture is ready.
-        await store.update_scene(refreshed.id, status=CaptureStatus.canceled)
-        await events.publish_scene(refreshed.id, "scene.canceled")
-        cap = await store.get_capture(refreshed.capture_id)
-        if cap:
-            await store.set_capture_status(cap.id, CaptureStatus.canceled)
-        return
-
-    await store.update_scene(refreshed.id, status=CaptureStatus.completed)
-    await events.publish_scene(refreshed.id, "scene.completed")
-    cap = await store.get_capture(refreshed.capture_id)
-    if cap:
-        await store.set_capture_status(cap.id, CaptureStatus.completed)
+    await _shared_finalize_scene(scene.id)

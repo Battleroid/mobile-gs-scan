@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from app.config import get_settings
 from app.jobs import events, store
+from app.jobs.finalize import maybe_finalize_scene
 from app.jobs.schema import EditStatus, JobKind, JobStatus, MeshStatus
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
@@ -94,6 +95,17 @@ async def cancel_job_endpoint(job_id: str) -> dict:
     they actually claimed, so a job killed before claim would leave
     ``edit_status``/``mesh_status`` stuck at ``queued`` forever.
     Reset here when the worker won't.
+
+    A queued thumbnail cancel needs a different cleanup: the
+    thumbnail job is the last step in the pipeline, so by the time
+    it's been enqueued every essential upstream job is already
+    terminal. If we don't trigger finalize here, no worker will ever
+    claim that thumbnail row (since it's already canceled), so
+    ``_maybe_finalize_scene`` never fires and the scene + capture
+    stay stuck at ``processing`` forever. Filter / mesh queued
+    cancels don't share the bug because their scene was already
+    ``completed`` before the user triggered them; the finalize call
+    is just defensive there.
     """
     job = await store.get_job(job_id)
     if job is None:
@@ -113,6 +125,8 @@ async def cancel_job_endpoint(job_id: str) -> dict:
             await _reset_scene_status_for_canceled_job(
                 scene_id=job.scene_id, kind=job.kind,
             )
+        if pre_status == JobStatus.queued and job.kind == JobKind.thumbnail:
+            await maybe_finalize_scene(job.scene_id)
     refreshed = await store.get_job(job_id)
     return {
         "ok": True,

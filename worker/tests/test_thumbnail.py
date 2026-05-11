@@ -316,6 +316,63 @@ def test_run_thumbnail_cancel_finalizes_scene(
     _run(go())
 
 
+def test_api_cancel_queued_thumbnail_finalizes_scene(
+    isolated_store, tmp_path: Path
+):
+    """A user can cancel a thumbnail job while it's still ``queued``
+    (the UI cancel button is enabled in every non-terminal state).
+    When that happens, no worker will ever run ``_run_thumbnail`` for
+    that row — so the runner-side finalize call never fires. Without
+    an API-side fallback, the scene + capture stay stuck at
+    ``processing`` forever even though every other job is terminal.
+
+    Regression for the codex P1 on PR #82 (comment 3216305064).
+    """
+    from app.api.jobs import cancel_job_endpoint
+
+    async def go():
+        cap = await store.create_capture(name="api-queue-cancel", source="upload")
+        scene = await store.create_scene(cap.id)
+        assert scene is not None
+
+        # Bring the scene to "everything but thumbnail is done" —
+        # the state the export branch would leave behind right
+        # before the worker claims the still-queued thumbnail row.
+        ply_path = tmp_path / "scene.ply"
+        ply_path.write_bytes(b"fake ply for fixture")
+        await store.update_scene(scene.id, ply_path=str(ply_path))
+        for kind in (JobKind.extract, JobKind.sfm, JobKind.train, JobKind.export):
+            j = await store.enqueue_job(scene.id, kind, payload={})
+            assert j is not None
+            await store.update_job(
+                j.id, status=JobStatus.completed, completed=True,
+            )
+        thumb_job = await store.enqueue_job(scene.id, JobKind.thumbnail, payload={})
+        assert thumb_job is not None
+        # Note: thumbnail stays in JobStatus.queued — never claimed.
+
+        scene_before = await store.get_scene(scene.id)
+        assert scene_before is not None
+        assert scene_before.status != CaptureStatus.completed
+
+        result = await cancel_job_endpoint(thumb_job.id)
+        assert result["canceled"] is True
+
+        # Post-condition: scene + capture finalized to completed
+        # because the API path called maybe_finalize_scene itself.
+        scene_after = await store.get_scene(scene.id)
+        assert scene_after is not None
+        assert scene_after.status == CaptureStatus.completed, (
+            f"scene must finalize on queued-thumbnail cancel via "
+            f"the API; got {scene_after.status.value}"
+        )
+        cap_after = await store.get_capture(cap.id)
+        assert cap_after is not None
+        assert cap_after.status == CaptureStatus.completed
+
+    _run(go())
+
+
 def test_run_thumbnail_cancel_skips_finalize_when_scene_deleted(
     isolated_store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
