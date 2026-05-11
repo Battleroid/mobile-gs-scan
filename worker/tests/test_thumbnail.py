@@ -945,6 +945,69 @@ def test_enqueue_thumbnail_backfill_after_terminal_job(
     _run(go())
 
 
+def test_backfill_excludes_scenes_with_canceled_thumbnail(
+    isolated_store, tmp_path: Path
+):
+    """A user-canceled thumbnail must NOT be re-enqueued by the
+    periodic backfill loop. The existing backfill query already
+    skipped in-flight and permanent_skip rows, but canceled rows
+    fell through the gates — so a user cancel was effectively
+    undone every 60s. Same retry escape hatch as permanent_skip:
+    a future explicit retry endpoint can override.
+
+    Regression for the codex P2 on PR #82 (8c3bf6f review).
+    """
+    async def go():
+        cap = await store.create_capture(name="canceled-thumb", source="upload")
+        scene = await store.create_scene(cap.id)
+        assert scene is not None
+        ply_path = tmp_path / "scene.ply"
+        _write_minimal_ply(ply_path)
+        await store.update_scene(scene.id, ply_path=str(ply_path))
+
+        prior = await store.enqueue_job(scene.id, JobKind.thumbnail, payload={})
+        assert prior is not None
+        await store.cancel_job(prior.id)
+
+        # list_scenes_needing_thumbnail must not return this scene.
+        needing = await store.list_scenes_needing_thumbnail()
+        assert all(s.id != scene.id for s in needing), (
+            "scenes whose latest thumbnail was canceled must not be "
+            "re-queued by the backfill scan; user-cancel intent has "
+            "to survive across the 60 s backfill cycle"
+        )
+
+        # And the runner-level pass must not enqueue.
+        await runner._backfill_thumbnails()
+        jobs = await store.list_jobs_for_scene(scene.id)
+        thumb_jobs = [j for j in jobs if j.kind == JobKind.thumbnail]
+        assert len(thumb_jobs) == 1, (
+            f"backfill must not undo a user cancel; thumb job "
+            f"statuses: {[j.status.value for j in thumb_jobs]}"
+        )
+        assert thumb_jobs[0].status == JobStatus.canceled
+
+    _run(go())
+
+
+def test_log_path_for_thumbnail_kind(tmp_path: Path):
+    """``GET /api/jobs/{id}/log`` resolves the log path via
+    ``_log_path_for_kind``; without a ``JobKind.thumbnail`` branch
+    the route would report ``available: false`` for thumbnail jobs
+    even though ``pipeline/thumbnail.py`` writes
+    ``scene_dir/thumbnail.log``. Regression for the codex P2 on
+    PR #82 (8c3bf6f review).
+    """
+    from app.api.jobs import _log_path_for_kind
+
+    scene_dir = tmp_path / "scene123"
+    resolved = _log_path_for_kind(JobKind.thumbnail, scene_dir)
+    assert resolved == scene_dir / "thumbnail.log", (
+        f"thumbnail log path must resolve to scene_dir/thumbnail.log; "
+        f"got {resolved}"
+    )
+
+
 def test_backfill_skips_scenes_without_ply_path(
     isolated_store, tmp_path: Path
 ):

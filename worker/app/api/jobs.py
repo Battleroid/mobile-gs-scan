@@ -206,4 +206,14 @@ def _log_path_for_kind(kind: JobKind, scene_dir: Path) -> Path | None:
         return scene_dir / "edit" / "spz_pack.log"
     if kind == JobKind.mesh:
         return scene_dir / "mesh" / "mesh.log"
+    if kind == JobKind.thumbnail:
+        # ``pipeline/thumbnail.py`` writes scene_dir / thumbnail.log
+        # (top-level, not nested under a subdir — the step doesn't
+        # produce its own artifact dir, just an output PNG next to
+        # the rest of the scene's outputs). Without this branch,
+        # render failures have no diagnostic path from the UI's
+        # JobLogPanel; the user only sees the row flip to
+        # completed-with-empty-result and the failure mode is
+        # invisible.
+        return scene_dir / "thumbnail.log"
     return None

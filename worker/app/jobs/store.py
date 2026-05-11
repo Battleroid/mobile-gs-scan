@@ -329,7 +329,7 @@ async def get_scene_for_capture(capture_id: str) -> Scene | None:
 async def list_scenes_needing_thumbnail() -> list[Scene]:
     """Find scenes that have a trained .ply but no thumbnail PNG
     yet AND no in-flight thumbnail job AND no prior thumbnail job
-    that ended with a ``permanent_skip`` marker.
+    that ended terminally for a reason backfill shouldn't override.
 
     Used by the worker's boot-time + periodic backfill to render
     thumbnails for captures that completed before PR-D shipped or
@@ -337,7 +337,7 @@ async def list_scenes_needing_thumbnail() -> list[Scene]:
     (multi-worker race where ply landed late, ns-render crash on a
     bad checkpoint, etc.).
 
-    Three exclusion gates:
+    Four exclusion gates:
     * ``thumbnail_path IS NOT NULL`` — already has a thumbnail.
     * In-flight thumbnail job — avoids double-enqueuing across a
       worker restart or in a multi-worker deployment where one
@@ -349,6 +349,12 @@ async def list_scenes_needing_thumbnail() -> list[Scene]:
       this gate, the periodic backfill loop would re-enqueue
       those scenes every cycle forever. A future retry endpoint
       can override the marker if the host config changes.
+    * Prior thumbnail job with ``status=canceled`` — the user
+      explicitly canceled rendering (or its capture was deleted
+      mid-render). Backfill re-enqueuing on the next 60 s tick
+      would silently undo the cancel intent. Same future-retry
+      override applies. Failed thumbnails stay eligible — those
+      are transient and the whole point of the periodic loop.
     """
     async with session() as s:
         active = select(Job.scene_id).where(
@@ -367,12 +373,17 @@ async def list_scenes_needing_thumbnail() -> list[Scene]:
             Job.kind == JobKind.thumbnail,
             text("json_extract(jobs.result, '$.permanent_skip') IS NOT NULL"),
         )
+        canceled = select(Job.scene_id).where(
+            Job.kind == JobKind.thumbnail,
+            Job.status == JobStatus.canceled,
+        )
         rows = await s.execute(
             select(Scene).where(
                 Scene.ply_path.is_not(None),
                 Scene.thumbnail_path.is_(None),
                 Scene.id.not_in(active),
                 Scene.id.not_in(permanent_skipped),
+                Scene.id.not_in(canceled),
             )
         )
         return list(rows.scalars())
