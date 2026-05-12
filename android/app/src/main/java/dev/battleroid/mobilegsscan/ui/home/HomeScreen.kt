@@ -22,8 +22,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -55,9 +57,12 @@ import dev.battleroid.mobilegsscan.ui.theme.pebble
  * tokens (peach-tinted draft rows, white surface capture rows with
  * the chip-palette gradient thumbnail, tomato pill primary button).
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
     state: HomeUiState,
+    isRefreshing: Boolean,
+    onRefresh: () -> Unit,
     onSettingsClick: () -> Unit,
     onNewCaptureClick: () -> Unit,
     onCaptureClick: (StudioClient.Capture) -> Unit,
@@ -80,47 +85,63 @@ fun HomeScreen(
             onSettingsClick = onSettingsClick,
         )
 
-        LazyColumn(
+        // PullToRefreshBox wraps only the list region — the header
+        // and bottom New-scan button stay anchored. Swipe pulls the
+        // (cosmetic) indicator down inside this Box; the parent
+        // activity owns isRefreshing and toggles it off after
+        // pollOnce() + refreshDrafts() return.
+        //
+        // ``ExperimentalMaterial3Api`` opt-in is the standard
+        // requirement for PullToRefreshBox in material3 1.3.x; the
+        // composable itself is stable but lives behind the same
+        // gate the rest of the M3 pull-to-refresh surface uses.
+        PullToRefreshBox(
+            isRefreshing = isRefreshing,
+            onRefresh = onRefresh,
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth(),
-            contentPadding = PaddingValues(horizontal = 20.dp),
         ) {
-            if (state.drafts.isNotEmpty()) {
-                item("drafts-header") {
-                    SectionHeader(
-                        label = "drafts",
-                        count = state.drafts.size,
-                    )
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(horizontal = 20.dp),
+            ) {
+                if (state.drafts.isNotEmpty()) {
+                    item("drafts-header") {
+                        SectionHeader(
+                            label = "drafts",
+                            count = state.drafts.size,
+                        )
+                    }
+                    items(state.drafts, key = { "draft-${it.id}" }) { draft ->
+                        DraftRow(draft = draft, onClick = { onDraftClick(draft) })
+                        Spacer(Modifier.height(10.dp))
+                    }
                 }
-                items(state.drafts, key = { "draft-${it.id}" }) { draft ->
-                    DraftRow(draft = draft, onClick = { onDraftClick(draft) })
-                    Spacer(Modifier.height(10.dp))
-                }
-            }
 
-            if (state.captures.isNotEmpty()) {
-                item("captures-header") {
-                    SectionHeader(
-                        label = "captures",
-                        count = state.captures.size,
-                    )
+                if (state.captures.isNotEmpty()) {
+                    item("captures-header") {
+                        SectionHeader(
+                            label = "captures",
+                            count = state.captures.size,
+                        )
+                    }
+                    items(state.captures, key = { "cap-${it.id}" }) { capture ->
+                        CaptureRow(capture = capture, onClick = { onCaptureClick(capture) })
+                        Spacer(Modifier.height(10.dp))
+                    }
                 }
-                items(state.captures, key = { "cap-${it.id}" }) { capture ->
-                    CaptureRow(capture = capture, onClick = { onCaptureClick(capture) })
-                    Spacer(Modifier.height(10.dp))
-                }
-            }
 
-            if (state.drafts.isEmpty() && state.captures.isEmpty()) {
-                item("empty") {
-                    EmptyState(state = state)
+                if (state.drafts.isEmpty() && state.captures.isEmpty()) {
+                    item("empty") {
+                        EmptyState(state = state)
+                    }
                 }
-            }
 
-            // Bottom breathing room so the last row isn't crowded
-            // against the New scan button.
-            item("tail-spacer") { Spacer(Modifier.height(12.dp)) }
+                // Bottom breathing room so the last row isn't crowded
+                // against the New scan button.
+                item("tail-spacer") { Spacer(Modifier.height(12.dp)) }
+            }
         }
 
         NewScanButton(
@@ -496,6 +517,8 @@ private fun HomeScreenPreview() {
                 captures = emptyList(),
                 canCreateNewCapture = true,
             ),
+            isRefreshing = false,
+            onRefresh = {},
             onSettingsClick = {},
             onNewCaptureClick = {},
             onCaptureClick = {},

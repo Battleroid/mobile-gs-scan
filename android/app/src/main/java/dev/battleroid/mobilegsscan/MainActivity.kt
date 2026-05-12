@@ -51,6 +51,7 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
     private val state: MutableStateFlow<HomeUiState> = MutableStateFlow(initialState())
     private val uiState: StateFlow<HomeUiState> = state.asStateFlow()
+    private val isRefreshing: MutableStateFlow<Boolean> = MutableStateFlow(false)
     private var pollJob: Job? = null
     private var client: StudioClient? = null
 
@@ -68,13 +69,43 @@ class MainActivity : ComponentActivity() {
         setContent {
             PebbleTheme {
                 val current by uiState.collectAsState()
+                val refreshing by isRefreshing.collectAsState()
                 HomeScreen(
                     state = current,
+                    isRefreshing = refreshing,
+                    onRefresh = ::onSwipeRefresh,
                     onSettingsClick = ::openSettings,
                     onNewCaptureClick = ::createNewCapture,
                     onCaptureClick = ::openCaptureDetail,
                     onDraftClick = ::openDraftDetail,
                 )
+            }
+        }
+    }
+
+    /**
+     * Manual swipe-to-refresh path — what the legacy
+     * `SwipeRefreshLayout.setOnRefreshListener` used to drive.
+     * Forces an immediate `/api/health` + `/api/captures` probe plus
+     * a drafts re-read, bypassing the 5 s poll cadence. The flag
+     * stays true for the duration of the network call so the
+     * spinner spins; failures (offline / probe error) still clear
+     * the flag because the state update happens unconditionally.
+     *
+     * Guard against overlapping refreshes: the second swipe while
+     * we're still mid-request is dropped (the user's first one
+     * will resolve soon enough; queueing two would just double the
+     * network traffic without adding signal).
+     */
+    private fun onSwipeRefresh() {
+        if (isRefreshing.value) return
+        lifecycleScope.launch {
+            isRefreshing.value = true
+            try {
+                pollOnce()
+                refreshDrafts()
+            } finally {
+                isRefreshing.value = false
             }
         }
     }
