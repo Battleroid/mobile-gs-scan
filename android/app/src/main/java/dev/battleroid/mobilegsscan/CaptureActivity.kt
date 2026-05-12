@@ -7,75 +7,108 @@ import android.net.Uri
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.os.Bundle
-import android.view.View
-import android.view.ViewGroup
+import android.os.Handler
+import android.os.Looper
 import android.widget.Toast
-import androidx.appcompat.app.AlertDialog
-import androidx.appcompat.app.AppCompatActivity
-import androidx.core.app.ActivityCompat
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.core.content.ContextCompat
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
 import com.google.ar.core.ArCoreApk
-import dev.battleroid.mobilegsscan.databinding.ActivityCaptureBinding
+import dev.battleroid.mobilegsscan.ui.capture.ArUnsupportedDialog
+import dev.battleroid.mobilegsscan.ui.capture.CaptureDialogs
+import dev.battleroid.mobilegsscan.ui.capture.CaptureScreen
+import dev.battleroid.mobilegsscan.ui.capture.CaptureUiState
+import dev.battleroid.mobilegsscan.ui.capture.Coverage
+import dev.battleroid.mobilegsscan.ui.capture.FinishPrompt
+import dev.battleroid.mobilegsscan.ui.theme.PebbleTheme
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 
 /**
  * The capture screen.
  *
- * As of the local-record-then-upload pivot, this activity is no
- * longer responsible for any network I/O. It records frames + poses
- * to a [Draft] directory on local storage during capture. The user
- * decides what to do with the draft on Finish — upload now, save
- * for later, or discard — none of which require the studio to be
- * reachable from the phone's current network.
+ * Compose port of the prior XML-driven capture activity. The
+ * ARCore + camera + frame writer machinery (ARCaptureSession,
+ * BackgroundRenderer, CoverageRenderer, the GL renderer, draft
+ * persistence, capture-gate state machine, three-way Finish flow)
+ * is preserved verbatim — only the HUD chrome is rebuilt in
+ * Compose. The GLSurfaceView is created here and handed to
+ * [CaptureScreen] via an `AndroidView` factory; the HUD lives
+ * above it in the same Box.
  *
- * Lifecycle:
+ * Lifecycle (unchanged from the legacy implementation):
  *   1. Validate ARCore availability + Google Play Services for AR.
  *   2. Request camera permission.
- *   3. Open the [Draft] passed in via [EXTRA_DRAFT_ID] (created by
- *      [MainActivity] before launching us). Bail with a toast if it
- *      no longer exists on disk.
+ *   3. Open the [Draft] passed in via [EXTRA_DRAFT_ID]. Bail with
+ *      a toast if it no longer exists on disk.
  *   4. Render: every frame, advance ARCore, paint the camera quad
  *      via BackgroundRenderer, then draw the [CoverageRenderer]
  *      overlay so the user sees Scaniverse-style colored dots on
  *      the actual surfaces showing how thoroughly each region has
  *      been captured.
  *   5. Recording gate: frame writes are OFF until the user taps
- *      "Start capture". Until then the preview runs, the coverage
- *      overlay accumulates points (so the user can see ARCore
- *      tracking the scene), but we don't commit anything to disk.
+ *      Start. Until then the preview runs, the coverage overlay
+ *      accumulates points, but we don't commit anything to disk.
  *      Tapping Start flips the captureGateActive flag.
- *   6. On Finish: show a three-way dialog —
- *        - Upload now → finalize draft, route to [DraftDetailActivity]
- *          with auto-upload, which performs the WS replay and on
- *          success deletes the local copy + routes to the
- *          server-side capture detail.
- *        - Save for later → finalize draft, route home; the draft
- *          shows up in the home-screen drafts list.
- *        - Discard → delete the draft directory, route home.
+ *   6. On Finish: show the three-way prompt (upload now / save
+ *      for later / discard) and route accordingly.
  *
- * Capture rate, JPEG quality, and overlay-alpha settings are read
- * once at activity start from ServerConfig, same as before.
+ * Notable Compose-vs-XML choices:
+ *  - `ComponentActivity` instead of `AppCompatActivity`. The two
+ *    AlertDialogs (ARCore unsupported, Finish prompt) are now
+ *    Compose `AlertDialog`s driven by [CaptureDialogs] state;
+ *    no AppCompat dependency needed.
+ *  - GL renderer pushes HUD updates directly to the
+ *    [MutableStateFlow] from the GL thread — StateFlow writes are
+ *    thread-safe, so no `runOnUiThread` hop. Compose recomposes
+ *    on the main thread when the flow emits.
+ *  - GLSurfaceView is held as an activity property (not Compose
+ *    state) because its lifecycle is tied to onResume/onPause and
+ *    we don't want recomposition to recreate it.
  */
-class CaptureActivity : AppCompatActivity() {
+class CaptureActivity : ComponentActivity() {
     companion object {
         const val EXTRA_BASE_URL = "base_url"
         const val EXTRA_DRAFT_ID = "draft_id"
-        private const val PERM_REQ = 0xC4
         private const val PLAY_SERVICES_FOR_AR_PKG = "com.google.ar.core"
-        // Baseline top margin for the three top-aligned HUD
-        // TextViews. Mirrors the layout_marginTop / layout_margin
-        // 20dp value in activity_capture.xml; we add the systemBars
-        // top inset on top so they don't slide under the status bar.
-        private const val HUD_BASE_TOP_DP = 20
     }
 
-    private lateinit var binding: ActivityCaptureBinding
+    // Modern permission-result API. ComponentActivity doesn't expose
+    // `onRequestPermissionsResult` as overridable (that path lives on
+    // AppCompatActivity); registerForActivityResult is the post-Compose
+    // replacement and runs on the same callback thread the legacy
+    // override did. Registered at activity-construction time so the
+    // result handler survives configuration changes.
+    private val cameraPermLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            bootstrapAr()
+        } else {
+            Toast.makeText(this, "camera denied", Toast.LENGTH_SHORT).show()
+            finish()
+        }
+    }
+
+    private val state: MutableStateFlow<CaptureUiState> =
+        MutableStateFlow(CaptureUiState.Initial)
+    private val uiState: StateFlow<CaptureUiState> = state.asStateFlow()
+    private val dialogs: MutableStateFlow<CaptureDialogs> =
+        MutableStateFlow(CaptureDialogs.None)
+    private val dialogState: StateFlow<CaptureDialogs> = dialogs.asStateFlow()
+
     private var arSession: ARCaptureSession? = null
     private val background = BackgroundRenderer()
     private val coverage = CoverageRenderer()
+    private var glSurface: GLSurfaceView? = null
 
     private var baseUrl: String = ""
     private var draftId: String = ""
@@ -90,8 +123,7 @@ class CaptureActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        binding = ActivityCaptureBinding.inflate(layoutInflater)
-        setContentView(binding.root)
+        enableEdgeToEdge()
 
         baseUrl = intent.getStringExtra(EXTRA_BASE_URL).orEmpty()
         draftId = intent.getStringExtra(EXTRA_DRAFT_ID).orEmpty()
@@ -110,44 +142,48 @@ class CaptureActivity : AppCompatActivity() {
         overlayAlpha = ServerConfig.coverageOverlayAlphaFloat(this)
         coverage.setAlpha(overlayAlpha)
 
-        binding.btnFinish.setOnClickListener { onFinishTapped() }
-        binding.btnStart.setOnClickListener { onStartCaptureTapped() }
-        // Local-record means we no longer need the server to be up
-        // before the user can record. Enable Start as soon as the
-        // ARCore session is wired up.
-        binding.btnStart.isEnabled = true
-        binding.frameCounter.text = getString(R.string.capture_idle)
-        binding.coverageHud.text = getString(R.string.coverage_initial)
-        binding.sessionLabel.text = draft?.meta?.name ?: ""
+        state.update {
+            it.copy(sessionName = draft?.meta?.name.orEmpty())
+        }
 
-        binding.glSurface.setEGLContextClientVersion(2)
-        binding.glSurface.setRenderer(Renderer())
-        binding.glSurface.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
-
-        applyHudInsets()
+        setContent {
+            PebbleTheme {
+                val current by uiState.collectAsState()
+                val live by dialogState.collectAsState()
+                CaptureScreen(
+                    state = current,
+                    dialogs = live,
+                    onStartClick = ::onStartCaptureTapped,
+                    onFinishClick = ::onFinishTapped,
+                    onArUnsupportedConfirm = ::onArUnsupportedConfirm,
+                    onArUnsupportedDismiss = ::onArUnsupportedDismiss,
+                    onFinishUploadNow = ::onFinishUploadNow,
+                    onFinishSaveLater = ::onFinishSaveLater,
+                    onFinishDiscard = ::onFinishDiscard,
+                    glSurfaceFactory = ::createGlSurface,
+                )
+            }
+        }
 
         ensurePermissionsThenConnect()
     }
 
-    private fun applyHudInsets() {
-        val baseTopPx = (HUD_BASE_TOP_DP * resources.displayMetrics.density).toInt()
-        val topAnchored = listOf(
-            binding.sessionLabel,
-            binding.frameCounter,
-            binding.coverageHud,
-        )
-        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->
-            val sys = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            val cutout = insets.getInsets(WindowInsetsCompat.Type.displayCutout())
-            val topInset = maxOf(sys.top, cutout.top)
-            topAnchored.forEach { v ->
-                val lp = v.layoutParams as? ViewGroup.MarginLayoutParams
-                    ?: return@forEach
-                lp.topMargin = baseTopPx + topInset
-                v.layoutParams = lp
-            }
-            insets
+    /**
+     * One-shot factory for [AndroidView]. Caches the constructed
+     * [GLSurfaceView] on the activity so onResume/onPause can drive
+     * its lifecycle directly without going through Compose state.
+     * Compose only calls this once per `AndroidView` mount; the
+     * cached check is defensive against any future re-mount.
+     */
+    private fun createGlSurface(context: android.content.Context): GLSurfaceView {
+        glSurface?.let { return it }
+        val view = GLSurfaceView(context).apply {
+            setEGLContextClientVersion(2)
+            setRenderer(Renderer())
+            renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
         }
+        glSurface = view
+        return view
     }
 
     override fun onResume() {
@@ -159,15 +195,19 @@ class CaptureActivity : AppCompatActivity() {
         try {
             arSession?.resume()
         } catch (e: Exception) {
-            Toast.makeText(this, "ARCore resume failed: ${e.message}", Toast.LENGTH_LONG).show()
+            Toast.makeText(
+                this,
+                "ARCore resume failed: ${e.message}",
+                Toast.LENGTH_LONG,
+            ).show()
             finish()
             return
         }
-        binding.glSurface.onResume()
+        glSurface?.onResume()
     }
 
     override fun onPause() {
-        binding.glSurface.onPause()
+        glSurface?.onPause()
         arSession?.pause()
         super.onPause()
     }
@@ -177,30 +217,12 @@ class CaptureActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray,
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == PERM_REQ) {
-            if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
-                bootstrapAr()
-            } else {
-                Toast.makeText(this, "camera denied", Toast.LENGTH_SHORT).show()
-                finish()
-            }
-        }
-    }
-
     private fun ensurePermissionsThenConnect() {
         val granted = ContextCompat.checkSelfPermission(
             this, Manifest.permission.CAMERA,
         ) == PackageManager.PERMISSION_GRANTED
         if (!granted) {
-            ActivityCompat.requestPermissions(
-                this, arrayOf(Manifest.permission.CAMERA), PERM_REQ,
-            )
+            cameraPermLauncher.launch(Manifest.permission.CAMERA)
         } else {
             bootstrapAr()
         }
@@ -209,7 +231,10 @@ class CaptureActivity : AppCompatActivity() {
     private fun bootstrapAr() {
         val avail = ArCoreApk.getInstance().checkAvailability(this)
         if (avail.isTransient) {
-            binding.glSurface.postDelayed({ bootstrapAr() }, 200)
+            // Was previously `binding.glSurface.postDelayed`; the
+            // view may not yet be inflated under Compose's lazy
+            // mount, so use the main-thread Handler directly.
+            Handler(Looper.getMainLooper()).postDelayed({ bootstrapAr() }, 200)
             return
         }
         when (avail) {
@@ -248,24 +273,18 @@ class CaptureActivity : AppCompatActivity() {
     }
 
     private fun showArUnsupportedDialog(extra: String?) {
-        val msg = buildString {
-            append(getString(R.string.arcore_unsupported_body))
-            if (!extra.isNullOrBlank()) {
-                append("\n\n(")
-                append(extra)
-                append(")")
-            }
-        }
-        AlertDialog.Builder(this)
-            .setTitle(R.string.arcore_unsupported_title)
-            .setMessage(msg)
-            .setCancelable(false)
-            .setPositiveButton(R.string.action_open_play_store) { _, _ ->
-                openPlayServicesForArInPlayStore()
-                finish()
-            }
-            .setNegativeButton(R.string.action_cancel) { _, _ -> finish() }
-            .show()
+        dialogs.update { it.copy(arUnsupported = ArUnsupportedDialog(extra = extra)) }
+    }
+
+    private fun onArUnsupportedConfirm() {
+        dialogs.update { it.copy(arUnsupported = null) }
+        openPlayServicesForArInPlayStore()
+        finish()
+    }
+
+    private fun onArUnsupportedDismiss() {
+        dialogs.update { it.copy(arUnsupported = null) }
+        finish()
     }
 
     private fun openPlayServicesForArInPlayStore() {
@@ -295,7 +314,11 @@ class CaptureActivity : AppCompatActivity() {
                 jpegQuality = ServerConfig.captureJpegQuality(this),
             )
         } catch (e: Exception) {
-            Toast.makeText(this, "ARCore session failed: ${e.message}", Toast.LENGTH_LONG).show()
+            Toast.makeText(
+                this,
+                "ARCore session failed: ${e.message}",
+                Toast.LENGTH_LONG,
+            ).show()
             finish()
             return
         }
@@ -307,10 +330,7 @@ class CaptureActivity : AppCompatActivity() {
     private fun onStartCaptureTapped() {
         if (captureGateActive) return
         captureGateActive = true
-        binding.startHint.visibility = View.GONE
-        binding.btnStart.visibility = View.GONE
-        binding.btnFinish.visibility = View.VISIBLE
-        binding.frameCounter.text = "0 frames"
+        state.update { it.copy(captureActive = true, frameCount = 0) }
     }
 
     private fun onFinishTapped() {
@@ -320,36 +340,33 @@ class CaptureActivity : AppCompatActivity() {
             finish()
             return
         }
+        // Surface the three-way prompt; Finish is committed when
+        // the user picks one of the three handlers.
         captureGateActive = false
-        val d = draft ?: run {
-            finish()
-            return
+        state.update { it.copy(captureActive = false) }
+        dialogs.update {
+            it.copy(finishPrompt = FinishPrompt(frameCount = draft?.meta?.frame_count ?: 0))
         }
-        // Show three-way decision: upload now / save for later /
-        // discard. We finalize-then-route in upload-now and
-        // save-for-later; discard deletes the directory outright.
-        AlertDialog.Builder(this)
-            .setTitle(R.string.finish_dialog_title)
-            .setMessage(
-                getString(
-                    R.string.finish_dialog_body_fmt,
-                    d.meta.frame_count,
-                ),
-            )
-            .setCancelable(false)
-            .setPositiveButton(R.string.finish_action_upload_now) { _, _ ->
-                d.finalize()
-                routeToDraftDetail(d, autoUpload = true)
-            }
-            .setNeutralButton(R.string.finish_action_save_later) { _, _ ->
-                d.finalize()
-                routeHome()
-            }
-            .setNegativeButton(R.string.finish_action_discard) { _, _ ->
-                d.delete()
-                routeHome()
-            }
-            .show()
+    }
+
+    private fun onFinishUploadNow() {
+        dialogs.update { it.copy(finishPrompt = null) }
+        val d = draft ?: run { finish(); return }
+        d.finalize()
+        routeToDraftDetail(d, autoUpload = true)
+    }
+
+    private fun onFinishSaveLater() {
+        dialogs.update { it.copy(finishPrompt = null) }
+        val d = draft ?: run { finish(); return }
+        d.finalize()
+        routeHome()
+    }
+
+    private fun onFinishDiscard() {
+        dialogs.update { it.copy(finishPrompt = null) }
+        draft?.delete()
+        routeHome()
     }
 
     private fun routeHome() {
@@ -377,20 +394,22 @@ class CaptureActivity : AppCompatActivity() {
         coverageHudCounter++
         if (coverageHudCounter % 4 != 0) return
         val stats = coverage.coverageStats()
-        runOnUiThread {
-            binding.coverageHud.text = getString(
-                R.string.coverage_status_fmt,
-                stats.wellCoveredPct,
-                stats.totalPoints,
+        // StateFlow.value is thread-safe — push from the GL thread
+        // directly. Compose's snapshot system handles the main-thread
+        // recomposition.
+        state.update {
+            it.copy(
+                coverage = Coverage(
+                    wellCoveredPct = stats.wellCoveredPct,
+                    totalPoints = stats.totalPoints,
+                ),
             )
         }
     }
 
     private fun maybeUpdateFrameCounter() {
         val count = draft?.meta?.frame_count ?: return
-        runOnUiThread {
-            binding.frameCounter.text = "$count frames"
-        }
+        state.update { it.copy(frameCount = count) }
     }
 
     private inner class Renderer : GLSurfaceView.Renderer {
@@ -404,7 +423,11 @@ class CaptureActivity : AppCompatActivity() {
 
         override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
             GLES20.glViewport(0, 0, width, height)
-            arSession?.setDisplayGeometry(windowManager.defaultDisplay.rotation, width, height)
+            arSession?.setDisplayGeometry(
+                windowManager.defaultDisplay.rotation,
+                width,
+                height,
+            )
         }
 
         override fun onDrawFrame(gl: GL10?) {
