@@ -10,14 +10,18 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -77,6 +81,27 @@ fun HomeScreen(
         modifier = modifier
             .fillMaxSize()
             .background(pebble.bg)
+            // Apply left + right safeDrawing insets at the root so
+            // landscape navigation bars, display cutouts, and
+            // foldables don't tuck rows / the bottom CTA under
+            // system UI. The legacy XML home padded all four sides
+            // via setOnApplyWindowInsetsListener; the Compose port
+            // initially applied only the top inset, which regressed
+            // edge-to-edge safety on phones held landscape and on
+            // any device with a side cutout. safeDrawing is the
+            // union of system bars + display cutout — the standard
+            // "don't draw me where the user can't see / tap" inset.
+            //
+            // Top + bottom stay handled explicitly:
+            //   * top via the calculateTopPadding() read below so
+            //     the header sits below the status bar.
+            //   * bottom is owned by NewScanButton's modifier.padding
+            //     so the CTA clears the gesture bar.
+            // Splitting horizontal vs vertical here keeps that
+            // explicit handling intact.
+            .windowInsetsPadding(
+                WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal)
+            )
             .padding(top = statusBarPadding.calculateTopPadding()),
     ) {
         HomeHeader(
