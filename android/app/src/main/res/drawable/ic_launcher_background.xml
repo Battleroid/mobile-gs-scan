@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    Cream-paper launcher background. Matches Pebble's `bg` token
+    (`#FBF6EC`, tokens.jsx:11), kept in sync with the web side's
+    `bg` CSS variable so the launcher tile reads as the same
+    surface as the app's first screen.
+-->
 <shape xmlns:android="http://schemas.android.com/apk/res/android"
     android:shape="rectangle">
-    <solid android:color="#0B0B0D" />
+    <solid android:color="#FBF6EC" />
 </shape>

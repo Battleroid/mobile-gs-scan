@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">gs-scan</string>
+    <!-- User-facing launcher label. The `applicationId` and Gradle
+         namespace stay as `dev.battleroid.mobilegsscan` for now
+         (renaming would invalidate every dev install + push token);
+         only the display name flips to the Pebble brand. -->
+    <string name="app_name">Pebble</string>
     <string name="action_settings">Settings</string>
     <string name="action_save">Save</string>
     <string name="action_start_capture">Start capture</string>
