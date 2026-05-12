@@ -1,115 +1,141 @@
 package dev.battleroid.mobilegsscan
 
-import android.app.AlertDialog
 import android.content.Intent
 import android.os.Bundle
-import android.view.LayoutInflater
-import android.view.View
-import android.view.ViewGroup
-import androidx.appcompat.app.AppCompatActivity
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.updatePadding
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.lifecycle.lifecycleScope
-import androidx.recyclerview.widget.LinearLayoutManager
-import androidx.recyclerview.widget.RecyclerView
-import dev.battleroid.mobilegsscan.databinding.ActivityMainBinding
-import dev.battleroid.mobilegsscan.databinding.ItemCaptureBinding
+import dev.battleroid.mobilegsscan.ui.home.HomeScreen
+import dev.battleroid.mobilegsscan.ui.home.HomeStatus
+import dev.battleroid.mobilegsscan.ui.home.HomeUiState
+import dev.battleroid.mobilegsscan.ui.theme.PebbleTheme
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /**
- * Home screen.
+ * Home screen — Compose port of the prior XML-driven MainActivity.
  *
- * Three responsibilities:
- *   1. Status indicator — polls /api/health every 5s, flips a green
- *      dot / "online" label or a red dot / "offline" label.
- *   2. Local drafts list — capture sessions recorded but not yet
- *      uploaded. Sourced from [DraftStore.listDrafts] and refreshed
- *      every poll tick alongside the captures list. Tapping a row
- *      opens [DraftDetailActivity] for upload / discard.
- *   3. Server captures list — polls /api/captures every 5s, renders
- *      rows via [CaptureAdapter]. Pull-to-refresh forces an
- *      immediate reload. Tapping a row opens
- *      [CaptureDetailActivity] for status / jobs / artifacts.
- *   4. New capture — creates a local [Draft] (no server call yet)
- *      and hands off to [CaptureActivity]. The capture activity
- *      records frames to the draft; what happens to the draft on
- *      Finish is the user's choice (upload now / save for later /
- *      discard). This means a fresh capture works fully offline —
- *      the studio doesn't need to be reachable on the recording
- *      device's current network.
+ * Same four responsibilities the legacy implementation had:
+ *   1. **Status indicator** — polls `/api/health` every 5 s; the
+ *      header pill flips between online (green), offline (red), and
+ *      not-configured (dust) tones.
+ *   2. **Local drafts list** — sourced from [DraftStore.listDrafts].
+ *      Refreshed on every poll tick alongside the captures list and
+ *      whenever the screen returns to foreground.
+ *   3. **Server captures list** — polls `/api/captures` every 5 s;
+ *      rows tap-through to [CaptureDetailActivity].
+ *   4. **New capture** — spawns a local [Draft] and hands off to
+ *      [CaptureActivity]. Works fully offline; the studio doesn't
+ *      need to be reachable at recording time.
  *
- * Falls back to a "configure your studio" empty state when
- * [ServerConfig.studioUrl] is unset, but only for the captures
- * list and health indicator — drafts work without a studio URL.
- * Drafts are filesDir-local so they survive process death and
- * reboots.
+ * Compose-vs-XML choices:
+ *  - `ComponentActivity` instead of `AppCompatActivity` — the
+ *    Compose surface doesn't need AppCompat's view-system bridge
+ *    and dropping it saves a layer of inset / theme indirection.
+ *  - State holder is a [MutableStateFlow] owned by the activity,
+ *    not a ViewModel. Polling already restarts on every onResume
+ *    so there's nothing to survive rotation; a ViewModel can be
+ *    retrofitted later if that changes.
+ *  - Window insets are driven via [enableEdgeToEdge] + per-element
+ *    `WindowInsets.statusBars.asPaddingValues()` reads, replacing
+ *    the XML's `setOnApplyWindowInsetsListener(...).updatePadding`.
  */
-class MainActivity : AppCompatActivity() {
-    private lateinit var binding: ActivityMainBinding
-    private val captureAdapter = CaptureAdapter(::onCaptureClicked)
-    private val draftAdapter = DraftAdapter(::onDraftClicked)
+class MainActivity : ComponentActivity() {
+    private val state: MutableStateFlow<HomeUiState> = MutableStateFlow(initialState())
+    private val uiState: StateFlow<HomeUiState> = state.asStateFlow()
+    private val isRefreshing: MutableStateFlow<Boolean> = MutableStateFlow(false)
     private var pollJob: Job? = null
     private var client: StudioClient? = null
-    private var lastHealthOk: Boolean = false
+
+    private fun initialState(): HomeUiState = HomeUiState(
+        status = HomeStatus.Resolving,
+        studioHost = null,
+        drafts = emptyList(),
+        captures = emptyList(),
+        canCreateNewCapture = true,
+    )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        binding = ActivityMainBinding.inflate(layoutInflater)
-        setContentView(binding.root)
-
-        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { v, insets ->
-            val sys = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            v.updatePadding(
-                left = sys.left,
-                top = sys.top,
-                right = sys.right,
-                bottom = sys.bottom,
-            )
-            insets
-        }
-
-        binding.captures.layoutManager = LinearLayoutManager(this)
-        binding.captures.adapter = captureAdapter
-        binding.drafts.layoutManager = LinearLayoutManager(this)
-        binding.drafts.adapter = draftAdapter
-
-        binding.btnSettings.setOnClickListener {
-            startActivity(Intent(this, ServerConfigActivity::class.java))
-        }
-
-        binding.btnNewCapture.setOnClickListener { createNewCapture() }
-
-        binding.refresh.setOnRefreshListener {
-            lifecycleScope.launch {
-                pollOnce()
-                renderDrafts(DraftStore.listDrafts(this@MainActivity))
-                binding.refresh.isRefreshing = false
+        enableEdgeToEdge()
+        setContent {
+            PebbleTheme {
+                val current by uiState.collectAsState()
+                val refreshing by isRefreshing.collectAsState()
+                HomeScreen(
+                    state = current,
+                    isRefreshing = refreshing,
+                    onRefresh = ::onSwipeRefresh,
+                    onSettingsClick = ::openSettings,
+                    onNewCaptureClick = ::createNewCapture,
+                    onCaptureClick = ::openCaptureDetail,
+                    onDraftClick = ::openDraftDetail,
+                )
             }
         }
+    }
 
+    /**
+     * Manual swipe-to-refresh path — what the legacy
+     * `SwipeRefreshLayout.setOnRefreshListener` used to drive.
+     * Forces an immediate `/api/health` + `/api/captures` probe plus
+     * a drafts re-read, bypassing the 5 s poll cadence. The flag
+     * stays true for the duration of the network call so the
+     * spinner spins; failures (offline / probe error) still clear
+     * the flag because the state update happens unconditionally.
+     *
+     * Guard against overlapping refreshes: the second swipe while
+     * we're still mid-request is dropped (the user's first one
+     * will resolve soon enough; queueing two would just double the
+     * network traffic without adding signal).
+     */
+    private fun onSwipeRefresh() {
+        if (isRefreshing.value) return
+        lifecycleScope.launch {
+            isRefreshing.value = true
+            try {
+                pollOnce()
+                refreshDrafts()
+            } finally {
+                isRefreshing.value = false
+            }
+        }
     }
 
     override fun onResume() {
         super.onResume()
-        renderDrafts(DraftStore.listDrafts(this))
+        // Drafts can change while we were paused (a successful
+        // upload deletes a draft from DraftStore, etc.). Refresh
+        // once before the poll loop hits its first delay.
+        refreshDrafts()
+
         val studioUrl = ServerConfig.studioUrl(this)
         if (studioUrl == null) {
-            renderNoUrl()
+            state.update {
+                it.copy(
+                    status = HomeStatus.NotConfigured,
+                    studioHost = null,
+                    captures = emptyList(),
+                )
+            }
             client = null
             return
         }
-        binding.statusUrl.text = studioUrl
+        state.update {
+            it.copy(
+                status = HomeStatus.Resolving,
+                studioHost = studioHost(studioUrl),
+            )
+        }
         client = StudioClient(studioUrl)
-        // New-capture is always enabled when we have either a
-        // studio URL OR no studio URL — recording is local. We
-        // only disable it when the user hasn't set a studio AND
-        // hasn't set up ARCore yet (handled by the deep-link
-        // path); for simplicity keep enabled here whenever the
-        // url is set.
-        binding.btnNewCapture.isEnabled = true
         startPolling()
     }
 
@@ -119,65 +145,12 @@ class MainActivity : AppCompatActivity() {
         pollJob = null
     }
 
-    private fun renderNoUrl() {
-        binding.statusText.text = getString(R.string.status_no_url)
-        binding.statusUrl.text = ""
-        binding.statusDot.setBackgroundResource(R.drawable.dot_offline)
-        // Captures list empty — but drafts can still exist.
-        binding.captures.visibility = View.GONE
-        binding.capturesHeader.visibility = View.GONE
-        // New capture stays enabled even without a studio URL: the
-        // user can record locally and configure / upload later.
-        binding.btnNewCapture.isEnabled = true
-        captureAdapter.submit(emptyList())
-        // Show the no-url empty state only when there are no
-        // drafts; otherwise the drafts list speaks for itself.
-        if (draftAdapter.itemCount == 0) {
-            binding.empty.visibility = View.VISIBLE
-            binding.empty.text = getString(R.string.empty_no_url)
-        } else {
-            binding.empty.visibility = View.GONE
-        }
-    }
-
-    private fun renderHealth(ok: Boolean) {
-        lastHealthOk = ok
-        binding.statusText.text = getString(
-            if (ok) R.string.status_online else R.string.status_offline
-        )
-        binding.statusDot.setBackgroundResource(
-            if (ok) R.drawable.dot_online else R.drawable.dot_offline
-        )
-    }
-
-    private fun renderCaptures(list: List<StudioClient.Capture>) {
-        captureAdapter.submit(list)
-        val anyDrafts = draftAdapter.itemCount > 0
-        if (list.isEmpty() && !anyDrafts) {
-            binding.empty.visibility = View.VISIBLE
-            binding.empty.text = getString(R.string.empty_no_captures)
-            binding.captures.visibility = View.GONE
-            binding.capturesHeader.visibility = View.GONE
-        } else {
-            binding.empty.visibility = View.GONE
-            binding.captures.visibility = if (list.isEmpty()) View.GONE else View.VISIBLE
-            binding.capturesHeader.visibility =
-                if (list.isEmpty()) View.GONE else View.VISIBLE
-        }
-    }
-
-    private fun renderDrafts(list: List<Draft>) {
-        draftAdapter.submit(list)
-        binding.drafts.visibility = if (list.isEmpty()) View.GONE else View.VISIBLE
-        binding.draftsHeader.visibility = if (list.isEmpty()) View.GONE else View.VISIBLE
-    }
-
     private fun startPolling() {
         pollJob?.cancel()
         pollJob = lifecycleScope.launch {
             while (true) {
                 pollOnce()
-                renderDrafts(DraftStore.listDrafts(this@MainActivity))
+                refreshDrafts()
                 delay(5_000)
             }
         }
@@ -185,15 +158,27 @@ class MainActivity : AppCompatActivity() {
 
     private suspend fun pollOnce() {
         val c = client ?: return
-        val ok = c.health()
-        renderHealth(ok)
-        if (!ok) return
-        try {
-            renderCaptures(c.listCaptures())
-        } catch (e: Exception) {
-            binding.statusText.text = "${getString(R.string.status_offline)}: ${e.message}"
-            binding.statusDot.setBackgroundResource(R.drawable.dot_offline)
+        val ok = try {
+            c.health()
+        } catch (_: Exception) {
+            false
         }
+        if (!ok) {
+            state.update { it.copy(status = HomeStatus.Offline, captures = emptyList()) }
+            return
+        }
+        val captures = try {
+            c.listCaptures()
+        } catch (_: Exception) {
+            state.update { it.copy(status = HomeStatus.Offline) }
+            return
+        }
+        state.update { it.copy(status = HomeStatus.Online, captures = captures) }
+    }
+
+    private fun refreshDrafts() {
+        val drafts = DraftStore.listDrafts(this)
+        state.update { it.copy(drafts = drafts) }
     }
 
     /**
@@ -214,7 +199,11 @@ class MainActivity : AppCompatActivity() {
         startActivity(intent)
     }
 
-    private fun onCaptureClicked(c: StudioClient.Capture) {
+    private fun openSettings() {
+        startActivity(Intent(this, ServerConfigActivity::class.java))
+    }
+
+    private fun openCaptureDetail(c: StudioClient.Capture) {
         val baseUrl = ServerConfig.studioUrl(this) ?: return
         startActivity(
             Intent(this, CaptureDetailActivity::class.java).apply {
@@ -225,7 +214,7 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun onDraftClicked(d: Draft) {
+    private fun openDraftDetail(d: Draft) {
         val baseUrl = ServerConfig.studioUrl(this).orEmpty()
         startActivity(
             Intent(this, DraftDetailActivity::class.java).apply {
@@ -236,103 +225,12 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    @Suppress("unused")
-    private fun showError(msg: String) {
-        AlertDialog.Builder(this)
-            .setMessage(msg)
-            .setPositiveButton("ok", null)
-            .show()
-    }
-
-}
-
-/** RecyclerView adapter for the captures list. */
-class CaptureAdapter(
-    private val onClick: (StudioClient.Capture) -> Unit,
-) : RecyclerView.Adapter<CaptureAdapter.VH>() {
-
-    private var items: List<StudioClient.Capture> = emptyList()
-
-    fun submit(list: List<StudioClient.Capture>) {
-        items = list
-        notifyDataSetChanged()
-    }
-
-    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
-        val binding = ItemCaptureBinding.inflate(
-            LayoutInflater.from(parent.context),
-            parent,
-            false,
-        )
-        return VH(binding)
-    }
-
-    override fun onBindViewHolder(holder: VH, position: Int) {
-        holder.bind(items[position], onClick)
-    }
-
-    override fun getItemCount(): Int = items.size
-
-    class VH(private val binding: ItemCaptureBinding) :
-        RecyclerView.ViewHolder(binding.root) {
-        fun bind(c: StudioClient.Capture, onClick: (StudioClient.Capture) -> Unit) {
-            binding.name.text = c.name
-            binding.subtitle.text = buildString {
-                append(c.source)
-                append(" · ${c.frame_count} frames")
-                if (c.dropped_count > 0) append(" (${c.dropped_count} dropped)")
-                append(" · ${c.status}")
-            }
-            binding.root.setOnClickListener { onClick(c) }
-        }
-    }
-}
-
-/**
- * RecyclerView adapter for the drafts list. Reuses
- * [ItemCaptureBinding] for visual parity — drafts and uploaded
- * captures share the "name + subtitle" row shape on the home
- * screen, just with different subtitle copy.
- */
-class DraftAdapter(
-    private val onClick: (Draft) -> Unit,
-) : RecyclerView.Adapter<DraftAdapter.VH>() {
-
-    private var items: List<Draft> = emptyList()
-
-    fun submit(list: List<Draft>) {
-        items = list
-        notifyDataSetChanged()
-    }
-
-    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
-        val binding = ItemCaptureBinding.inflate(
-            LayoutInflater.from(parent.context),
-            parent,
-            false,
-        )
-        return VH(binding)
-    }
-
-    override fun onBindViewHolder(holder: VH, position: Int) {
-        holder.bind(items[position], onClick)
-    }
-
-    override fun getItemCount(): Int = items.size
-
-    class VH(private val binding: ItemCaptureBinding) :
-        RecyclerView.ViewHolder(binding.root) {
-        fun bind(d: Draft, onClick: (Draft) -> Unit) {
-            val ctx = binding.root.context
-            val m = d.meta
-            binding.name.text = m.name ?: ctx.getString(R.string.draft_unnamed)
-            val subtitleFmt = if (m.finalized) {
-                R.string.draft_subtitle_finalized_fmt
-            } else {
-                R.string.draft_subtitle_incomplete_fmt
-            }
-            binding.subtitle.text = ctx.getString(subtitleFmt, m.frame_count, m.created_at)
-            binding.root.setOnClickListener { onClick(d) }
-        }
-    }
+    /**
+     * Pretty-print the studio URL's authority section for the
+     * header pill. ServerConfig stores `https://host[:port]/...`
+     * after normalisation; the pill is too narrow for the full
+     * URL, so we strip the scheme and trailing slash.
+     */
+    private fun studioHost(url: String): String =
+        url.removePrefix("https://").removePrefix("http://").removeSuffix("/")
 }
