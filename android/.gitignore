@@ -16,3 +16,12 @@
 # own. Override the install location with ANDROID_SDK_ROOT in env
 # if you'd rather use a system-wide one.
 /.android-sdk/
+
+# Gradle wrapper artifacts. Generated per-clone by
+# `make android-bootstrap` (which runs `gradle wrapper`) rather
+# than committed, matching the SDK-bootstrap pattern above. Keeps
+# the wrapper jar's binary blob out of the repo and lets each
+# clone pick its preferred system gradle.
+/gradlew
+/gradlew.bat
+/gradle/wrapper/
