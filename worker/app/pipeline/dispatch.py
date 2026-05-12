@@ -1,7 +1,7 @@
 """Decide which jobs to enqueue when a capture is finalized.
 
-The pipeline shape today is: extract → sfm → train → export. The
-front of the pipeline branches on input shape:
+The pipeline shape today is: extract → sfm → train → export →
+thumbnail. The front of the pipeline branches on input shape:
 
   * Image-set upload — ``capture_dir/frames/`` is already populated
     by the api ``/upload`` route. ``extract`` enqueues but is a
@@ -108,6 +108,22 @@ async def enqueue_pipeline(
         log.info("scene %s vanished mid-pipeline (export); bailing", scene_id)
         return None
     job_ids.append(export.id)
+
+    # Thumbnail is the last step. Soft-failure: ``runner._run_thumbnail``
+    # always marks the job completed (even on render error) so a
+    # cosmetic miss never blocks scene finalization. Enqueued in
+    # the same atomic-or-nothing dance as the other steps so a
+    # mid-flight delete still surfaces as a clean race loss.
+    thumbnail = await store.enqueue_job(
+        scene_id, JobKind.thumbnail, payload={}
+    )
+    if thumbnail is None:
+        log.info(
+            "scene %s vanished mid-pipeline (thumbnail); bailing",
+            scene_id,
+        )
+        return None
+    job_ids.append(thumbnail.id)
 
     return job_ids
 

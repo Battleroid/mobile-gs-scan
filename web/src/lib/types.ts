@@ -30,7 +30,18 @@ export interface Capture {
   updated_at: string;
 }
 
-export type JobKind = "extract" | "sfm" | "train" | "export" | "mesh" | "filter";
+export type JobKind =
+  | "extract"
+  | "sfm"
+  | "train"
+  | "export"
+  | "mesh"
+  | "filter"
+  // PR-D: server-rendered PNG thumbnail. Soft-failure step that
+  // runs after export. Kept in sync with worker/app/jobs/schema.py
+  // — exhaustive switches over JobKind would otherwise treat valid
+  // thumbnail rows from /api/scenes as impossible and fall through.
+  | "thumbnail";
 
 export type EditStatus =
   | "none"
@@ -116,6 +127,11 @@ export interface Scene {
   mesh_status: MeshStatus;
   mesh_error: string | null;
   mesh_params: MeshParams | null;
+  // PNG thumbnail rendered post-export by the worker's
+  // JobKind.thumbnail step. Null when the render hasn't run, the
+  // scene is a stub, or ns-render failed. CaptureCard falls back
+  // to a chip-tinted gradient placeholder when null.
+  thumb_url: string | null;
   jobs: Job[];
   created_at: string;
   completed_at: string | null;
