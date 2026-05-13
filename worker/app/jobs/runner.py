@@ -145,8 +145,19 @@ async def run_forever(settings: Settings | None = None) -> None:
                 # ``failed``. The filter / mesh helpers have updated
                 # their own dedicated status columns; thumbnail just
                 # leaves Scene.thumbnail_path null and the web UI
-                # falls back to a chip-tinted gradient.
-                if job.kind in (JobKind.filter, JobKind.mesh, JobKind.thumbnail):
+                # falls back to a chip-tinted gradient. Orbit is the
+                # same shape as thumbnail — leaves Scene.orbit_path
+                # null on crash, the home grid falls back to the
+                # still PNG; demoting an already-completed scene to
+                # ``failed`` over an optional motion-thumbnail
+                # crash would be a far worse user experience than
+                # the visual regression.
+                if job.kind in (
+                    JobKind.filter,
+                    JobKind.mesh,
+                    JobKind.thumbnail,
+                    JobKind.orbit,
+                ):
                     continue
                 scene = await store.get_scene(job.scene_id)
                 if scene:
