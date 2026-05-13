@@ -1,81 +1,76 @@
 package dev.battleroid.mobilegsscan
 
 import android.os.Bundle
-import android.text.method.ScrollingMovementMethod
-import android.view.View
-import androidx.appcompat.app.AppCompatActivity
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.updatePadding
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.lifecycle.lifecycleScope
-import dev.battleroid.mobilegsscan.databinding.ActivityJobDetailBinding
+import dev.battleroid.mobilegsscan.ui.detail.JobDetailScreen
+import dev.battleroid.mobilegsscan.ui.detail.JobDetailUiState
+import dev.battleroid.mobilegsscan.ui.detail.LogPanelState
+import dev.battleroid.mobilegsscan.ui.theme.PebbleTheme
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonElement
 
 /**
- * Native single-job detail screen. Polls /api/jobs/{id} every few
- * seconds and renders progress, message, error, and the worker's
- * result blob (when present).
+ * Single-job detail screen — Compose port of the legacy XML-driven
+ * JobDetailActivity. Polls `/api/jobs/{id}` every 3 s and renders
+ * progress, message, error, claimed_by, timestamps, and the
+ * worker's result blob (when present).
  *
- * Subprocess log section: collapsible block at the bottom of the
- * card. Auto-opens for jobs that are currently running so the user
- * gets a live tail without interaction; closes itself when the job
- * lands but stays openable for postmortem inspection. Mirrors the
- * web's JobLogPanel behavior (live tail, manual re-open) with one
- * deliberate difference: on a phone there's no easy way to detect
- * "user is reading older output, don't scroll-jack me", so we
- * unconditionally pin to the latest log line on every poll.
+ * Subprocess log panel:
+ *  - Auto-opens the first time the job is observed running /
+ *    claimed so the user gets the live tail without interaction.
+ *  - Manual toggle via the show/hide pill afterwards.
+ *  - When open, fetched on every 3 s job-poll tick + immediately
+ *    when the panel is opened.
+ *  - Auto-pins to the latest line on every content change (the
+ *    Compose port runs this from a LaunchedEffect inside the log
+ *    body composable; legacy used TextView.post + scrollTo).
  *
- * The TextView is height-capped at 280dp in the layout and given
- * its own [ScrollingMovementMethod] here, so the auto-scroll-to-
- * bottom only moves the log's own content. The outer activity
- * NestedScrollView stays put — the user can scroll the rest of
- * the page (status, progress, result blob, etc.) freely while the
- * live tail keeps updating in its bounded panel.
- *
- * The result blob is intentionally rendered as pretty-printed JSON
- * — it's worker-specific (sfm output, train metrics, export paths)
- * and baking each shape into the client UI is more work than it's
- * worth right now. Folks reading the screen are usually trying to
- * debug a failed job, so the raw payload is what they want to see
- * anyway.
+ * Result is pretty-printed JSON — worker output is freeform
+ * (sfm metrics, train stats, export paths) and the rendering
+ * audience is debugging a failed job, so the raw payload is the
+ * useful thing to show.
  */
-class JobDetailActivity : AppCompatActivity() {
+class JobDetailActivity : ComponentActivity() {
     companion object {
         const val EXTRA_BASE_URL = "base_url"
         const val EXTRA_JOB_ID = "job_id"
         const val EXTRA_JOB_KIND = "job_kind"
-        // En-dash placeholder for not-yet-set timestamps. Pulled out
-        // as a const so the literal stays under our control — inline
-        // "—" elsewhere in this file would risk getting smart-quoted
-        // again by an editor / paste roundtrip.
-        private const val UNSET = "—"
     }
 
-    private lateinit var binding: ActivityJobDetailBinding
+    private val state: MutableStateFlow<JobDetailUiState> =
+        MutableStateFlow(
+            JobDetailUiState(
+                kind = "",
+                job = null,
+                networkError = null,
+                log = LogPanelState.Initial,
+            ),
+        )
+    private val uiState: StateFlow<JobDetailUiState> = state.asStateFlow()
     private var pollJob: Job? = null
     private var client: StudioClient? = null
     private var jobId: String = ""
 
-    // Log panel state. Default-open for running / claimed jobs so
-    // the live tail shows immediately; default-closed otherwise.
-    // Whether to actually fetch/show is then gated on this flag.
-    private var logOpen: Boolean = false
-    // Latest known job status, used by both the renderer (which job
-    // detail data populates) and the log poller (which decides
-    // whether to keep ticking). Kept here so the log fetch path
-    // doesn't have to refetch the job just to know if it's running.
+    // Tracks whether we've already auto-opened the log this session.
+    // The legacy implementation auto-opened once on the first
+    // running/claimed observation; subsequent transitions back
+    // through running do NOT re-open if the user has explicitly
+    // closed the panel.
     private var lastStatus: String = ""
-
-    private val prettyJson = Json { prettyPrint = true; encodeDefaults = false }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        binding = ActivityJobDetailBinding.inflate(layoutInflater)
-        setContentView(binding.root)
+        enableEdgeToEdge()
 
         val baseUrl = intent.getStringExtra(EXTRA_BASE_URL).orEmpty()
         jobId = intent.getStringExtra(EXTRA_JOB_ID).orEmpty()
@@ -85,29 +80,19 @@ class JobDetailActivity : AppCompatActivity() {
             return
         }
 
-        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { v, insets ->
-            val sys = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            v.updatePadding(
-                left = sys.left,
-                top = sys.top,
-                right = sys.right,
-                bottom = sys.bottom,
-            )
-            insets
-        }
-
-        binding.btnBack.setOnClickListener { finish() }
-        binding.btnLogToggle.setOnClickListener { toggleLog() }
-        binding.kind.text = seedKind.ifBlank { getString(R.string.detail_loading) }
-        binding.statusValue.text = getString(R.string.detail_loading)
-
-        // Make the log TextView scroll its own content. Combined
-        // with the layout-side maxHeight=280dp this turns the log
-        // into a self-contained scroll panel that doesn't push the
-        // activity's NestedScrollView around when content updates.
-        binding.logValue.movementMethod = ScrollingMovementMethod.getInstance()
-
+        state.update { it.copy(kind = seedKind) }
         client = StudioClient(baseUrl)
+
+        setContent {
+            PebbleTheme {
+                val current by uiState.collectAsState()
+                JobDetailScreen(
+                    state = current,
+                    onBackClick = { finish() },
+                    onToggleLog = ::toggleLog,
+                )
+            }
+        }
     }
 
     override fun onResume() {
@@ -132,42 +117,40 @@ class JobDetailActivity : AppCompatActivity() {
         val detail = try {
             c.getJob(jobId)
         } catch (e: Exception) {
-            binding.statusValue.text = getString(R.string.status_offline)
-            binding.statusValue.append(": ${e.message ?: "unknown"}")
+            state.update { it.copy(networkError = e.message ?: "unknown") }
             return
         }
 
-        // First time we see a running job, auto-open the log so the
-        // user gets the live tail. After that the user is in
-        // control via the toggle button.
+        // Auto-open the log panel the first time we see the job
+        // running / claimed. After that the user is in control.
         val running = detail.status == "running" || detail.status == "claimed"
-        if (running && lastStatus != "running" && lastStatus != "claimed" && !logOpen) {
-            logOpen = true
-            applyLogVisibility()
+        val wasRunning = lastStatus == "running" || lastStatus == "claimed"
+        if (running && !wasRunning && !state.value.log.open) {
+            state.update { it.copy(log = it.log.copy(open = true)) }
         }
         lastStatus = detail.status
 
-        renderJob(detail)
-        if (logOpen) {
+        state.update {
+            it.copy(
+                kind = detail.kind,
+                job = detail,
+                networkError = null,
+            )
+        }
+
+        if (state.value.log.open) {
             fetchAndRenderLog()
         }
     }
 
     private fun toggleLog() {
-        logOpen = !logOpen
-        applyLogVisibility()
-        if (logOpen) {
-            // Fetch immediately when opened so the user doesn't have
-            // to wait for the next 3s tick.
+        val nowOpen = !state.value.log.open
+        state.update { it.copy(log = it.log.copy(open = nowOpen)) }
+        if (nowOpen) {
+            // Fetch immediately so the user doesn't have to wait for
+            // the next 3 s poll tick.
             lifecycleScope.launch { fetchAndRenderLog() }
         }
-    }
-
-    private fun applyLogVisibility() {
-        binding.btnLogToggle.text = getString(
-            if (logOpen) R.string.detail_log_hide else R.string.detail_log_show,
-        )
-        binding.logValue.visibility = if (logOpen) View.VISIBLE else View.GONE
     }
 
     private suspend fun fetchAndRenderLog() {
@@ -175,75 +158,18 @@ class JobDetailActivity : AppCompatActivity() {
         val res = try {
             c.getJobLog(jobId)
         } catch (e: Exception) {
-            binding.logValue.text = getString(
-                R.string.detail_log_fetch_failed_fmt, e.message ?: "unknown",
-            )
+            state.update {
+                it.copy(log = it.log.copy(fetchError = e.message ?: "unknown"))
+            }
             return
         }
-        if (!res.available) {
-            binding.logValue.text = getString(R.string.detail_log_unavailable)
-            return
-        }
-        binding.logValue.text = res.log.ifBlank { getString(R.string.detail_log_empty) }
-        scrollLogToBottom()
-    }
-
-    /**
-     * Pin the log TextView's *internal* scroll position to its
-     * latest line. Posted so the scroll runs after the layout pass
-     * that sized the updated content — calling scrollTo
-     * synchronously would use the pre-update line count and miss
-     * the new tail.
-     *
-     * Note: this only moves [binding.logValue]'s own scroll, not
-     * the outer NestedScrollView. That is the whole point of this
-     * fix — the user keeps control of the activity-level scroll
-     * position even while the live tail keeps updating below.
-     */
-    private fun scrollLogToBottom() {
-        val tv = binding.logValue
-        tv.post {
-            val layout = tv.layout ?: return@post
-            val lineCount = tv.lineCount
-            if (lineCount <= 0) return@post
-            val bottom = layout.getLineBottom(lineCount - 1)
-            val visible = tv.height - tv.totalPaddingTop - tv.totalPaddingBottom
-            val target = (bottom - visible).coerceAtLeast(0)
-            tv.scrollTo(0, target)
-        }
-    }
-
-    private fun renderJob(j: StudioClient.JobDetail) {
-        binding.kind.text = j.kind
-        binding.statusValue.text = j.status
-        binding.progressBar.progress = (j.progress * 100f).toInt()
-        binding.progressPercent.text = getString(
-            R.string.detail_progress_pct_fmt,
-            (j.progress * 100f).toInt(),
-        )
-        binding.progressMsg.text = j.progress_msg ?: ""
-        binding.progressMsg.visibility =
-            if (j.progress_msg.isNullOrBlank()) View.GONE else View.VISIBLE
-
-        binding.claimedByValue.text = j.claimed_by ?: getString(R.string.detail_unclaimed)
-        binding.startedValue.text = j.started_at ?: UNSET
-        binding.completedValue.text = j.completed_at ?: UNSET
-
-        if (j.error.isNullOrBlank()) {
-            binding.errorRow.visibility = View.GONE
-        } else {
-            binding.errorRow.visibility = View.VISIBLE
-            binding.errorValue.text = j.error
-        }
-
-        val result: JsonElement? = j.result
-        if (result == null) {
-            binding.resultRow.visibility = View.GONE
-        } else {
-            binding.resultRow.visibility = View.VISIBLE
-            binding.resultValue.text = prettyJson.encodeToString(
-                JsonElement.serializer(),
-                result,
+        state.update {
+            it.copy(
+                log = it.log.copy(
+                    content = res.log,
+                    available = res.available,
+                    fetchError = null,
+                ),
             )
         }
     }
