@@ -54,6 +54,12 @@ class SceneView(BaseModel):
     # the render failed, or the scene is a stub. Web ``CaptureCard``
     # falls back to a chip-tinted gradient placeholder when null.
     thumb_url: str | None
+    # 24-frame MP4 orbit of the trained splat, rendered after the
+    # still PNG above lands. Two-stage thumbnail: ``thumb_url``
+    # comes back first (~10 s after export), ``orbit_url`` backfills
+    # 1-3 min later. CaptureCard prefers ``orbit_url`` when present
+    # and falls back to ``thumb_url`` otherwise.
+    orbit_url: str | None
     jobs: list[JobView]
     created_at: str
     completed_at: str | None
@@ -107,6 +113,11 @@ async def _to_view(scene: Scene) -> SceneView:
         thumb_url=(
             f"/api/scenes/{scene.id}/artifacts/thumb"
             if scene.thumbnail_path
+            else None
+        ),
+        orbit_url=(
+            f"/api/scenes/{scene.id}/artifacts/orbit"
+            if scene.orbit_path
             else None
         ),
         jobs=[
@@ -168,6 +179,17 @@ async def download_artifact(scene_id: str, kind: str, edit: bool = False) -> Any
         if not path or not Path(path).exists():
             raise HTTPException(404, "thumbnail not yet produced")
         return FileResponse(path, media_type="image/png", filename="thumb.png")
+    # MP4 orbit produced by the post-thumbnail orbit job. Same
+    # 404-when-absent shape as the still PNG — the CaptureCard
+    # falls back to the still thumb when the orbit isn't ready,
+    # and to the chip-tinted gradient if neither is.
+    if kind == "orbit":
+        if edit:
+            raise HTTPException(400, "?edit=true is not valid for the orbit")
+        path = scene.orbit_path
+        if not path or not Path(path).exists():
+            raise HTTPException(404, "orbit not yet produced")
+        return FileResponse(path, media_type="video/mp4", filename="orbit.mp4")
     if edit:
         if kind == "ply":
             path = scene.edited_ply_path

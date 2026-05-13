@@ -86,6 +86,13 @@ class JobKind(str, enum.Enum):
     # the scene stays "completed" without a thumbnail and the
     # web CaptureCard falls back to a chip-tinted gradient.
     thumbnail = "thumbnail"
+    # 24-frame MP4 orbit of the trained splat. Two-stage thumbnail:
+    # the still PNG (above) renders cheap and flips the scene to
+    # `completed` immediately; orbit backfills the richer motion
+    # variant in the background. Same soft-failure semantics as
+    # `thumbnail` — the card just falls back to the PNG if the
+    # MP4 isn't ready or rendering failed.
+    orbit = "orbit"
 
 
 class EditStatus(str, enum.Enum):
@@ -156,6 +163,12 @@ class Scene(Base):
     ply_path: Mapped[str | None] = mapped_column(String, nullable=True)
     spz_path: Mapped[str | None] = mapped_column(String, nullable=True)
     thumbnail_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 24-frame MP4 orbit produced by JobKind.orbit. Two-stage with
+    # the still PNG above: thumbnail lands first (cheap render,
+    # flips capture to completed), orbit backfills the motion
+    # variant. CaptureCard prefers orbit when both exist, falls
+    # back to thumbnail_path, then to the gradient placeholder.
+    orbit_path: Mapped[str | None] = mapped_column(String, nullable=True)
 
     # Edited artifacts written by the filter job (single replaceable
     # edit per scene; re-apply overwrites). The original ply_path /

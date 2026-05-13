@@ -107,6 +107,11 @@ async def _apply_lightweight_migrations(conn) -> None:
         # the column itself was technically declared on the
         # schema before the rendering pipeline arrived.
         "ALTER TABLE scenes ADD COLUMN thumbnail_path VARCHAR",
+        # Added with Phase 3's JobKind.orbit step. Same shape as
+        # thumbnail_path above — the column has to land on existing
+        # dbs before any Scene read against this binary, since
+        # SQLAlchemy selects every mapped column on a Scene fetch.
+        "ALTER TABLE scenes ADD COLUMN orbit_path VARCHAR",
         # One-shot post-pairing-removal repair: rows that were stuck
         # in pairing/streaming when the WS endpoint was retired
         # would otherwise fail to decode their status enum on read.

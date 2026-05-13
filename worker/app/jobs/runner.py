@@ -41,6 +41,7 @@ from app.pipeline import extract as extract_step
 from app.pipeline import filter as filter_step
 from app.pipeline import mesh as mesh_step
 from app.pipeline import sfm as sfm_step
+from app.pipeline import orbit as orbit_step
 from app.pipeline import thumbnail as thumbnail_step
 from app.pipeline import train as train_step
 
@@ -69,20 +70,41 @@ async def run_forever(settings: Settings | None = None) -> None:
     worker = _worker_id()
     log.info("worker %s starting (class=%s)", worker, settings.worker_class)
 
-    kinds_for_class: dict[str, list[JobKind]] = {
-        "gs": [
-            JobKind.extract,
-            JobKind.sfm,
-            JobKind.train,
-            JobKind.export,
-            JobKind.mesh,
-            JobKind.filter,
-            JobKind.thumbnail,
-        ],
+    # Job kinds are split into two priority bands so a long orbit
+    # render can't starve newer pipeline work:
+    #   * `primary` covers every job that affects scene status
+    #     (extract → sfm → train → export → thumbnail) plus the
+    #     on-demand sibling jobs (mesh / filter).
+    #   * `secondary` is the orbit MP4 — a non-blocking,
+    #     1-3-minute step that backfills the richer motion variant
+    #     of the thumbnail. Always claimed strictly after a primary
+    #     scan returns nothing, so a worker mid-orbit when a new
+    #     capture is dropped will pick up the new pipeline's
+    #     extract / sfm / train as soon as it frees up, instead of
+    #     grabbing the older queued orbit (which would be the
+    #     natural created_at winner).
+    kinds_for_class: dict[str, tuple[list[JobKind], list[JobKind]]] = {
+        "gs": (
+            [
+                JobKind.extract,
+                JobKind.sfm,
+                JobKind.train,
+                JobKind.export,
+                JobKind.mesh,
+                JobKind.filter,
+                JobKind.thumbnail,
+            ],
+            [JobKind.orbit],
+        ),
     }
-    kinds = kinds_for_class.get(settings.worker_class)
-    if not kinds:
+    bands = kinds_for_class.get(settings.worker_class)
+    if not bands:
         raise RuntimeError(f"unknown worker class {settings.worker_class!r}")
+    primary, secondary = bands
+    # Union used for set-membership checks (backfill gating, the
+    # outer-task scene-demotion guard, etc.) — the priority split
+    # only matters for the claim path.
+    kinds = primary + secondary
 
     reaper = asyncio.create_task(_reap_loop())
 
@@ -108,7 +130,17 @@ async def run_forever(settings: Settings | None = None) -> None:
 
     try:
         while True:
-            job = await store.claim_next_job(worker_id=worker, kinds=kinds)
+            # Two-pass claim: primary kinds first (everything that
+            # affects scene status), orbit only when nothing else is
+            # ready. Without the split, a worker that just finished
+            # thumbnail_A would claim orbit_A over a newer queued
+            # extract_B (since orbit_A's created_at is earlier),
+            # making the user wait minutes for B to start training.
+            job = await store.claim_next_job(worker_id=worker, kinds=primary)
+            if job is None and secondary:
+                job = await store.claim_next_job(
+                    worker_id=worker, kinds=secondary,
+                )
             if job is None:
                 await asyncio.sleep(POLL_INTERVAL)
                 continue
@@ -143,8 +175,19 @@ async def run_forever(settings: Settings | None = None) -> None:
                 # ``failed``. The filter / mesh helpers have updated
                 # their own dedicated status columns; thumbnail just
                 # leaves Scene.thumbnail_path null and the web UI
-                # falls back to a chip-tinted gradient.
-                if job.kind in (JobKind.filter, JobKind.mesh, JobKind.thumbnail):
+                # falls back to a chip-tinted gradient. Orbit is the
+                # same shape as thumbnail — leaves Scene.orbit_path
+                # null on crash, the home grid falls back to the
+                # still PNG; demoting an already-completed scene to
+                # ``failed`` over an optional motion-thumbnail
+                # crash would be a far worse user experience than
+                # the visual regression.
+                if job.kind in (
+                    JobKind.filter,
+                    JobKind.mesh,
+                    JobKind.thumbnail,
+                    JobKind.orbit,
+                ):
                     continue
                 scene = await store.get_scene(job.scene_id)
                 if scene:
@@ -316,6 +359,16 @@ async def _run_one(job: Job, settings: Settings) -> None:
         # (the UI falls back to a chip-tinted gradient until the
         # user re-triggers).
         await _run_thumbnail(job=job, scene=scene, settings=settings)
+        return
+
+    if job.kind == JobKind.orbit:
+        # Renders a 24-frame MP4 orbit of the trained splat. Two-
+        # stage thumbnail backfill: enqueued by _run_thumbnail on
+        # its success path so the still PNG can finalize the scene
+        # without waiting for the heavier orbit render. Soft-failure
+        # same as thumbnail — a failed orbit leaves the still PNG
+        # as the home-grid thumbnail.
+        await _run_orbit(job=job, scene=scene, settings=settings)
         return
 
     await store.update_scene(scene.id, status=CaptureStatus.processing)
@@ -776,6 +829,26 @@ async def _run_thumbnail(*, job: Job, scene: Scene, settings: Settings) -> None:
         await events.publish_scene(
             scene.id, "scene.thumbnail_ready", thumbnail=str(rendered),
         )
+        # Two-stage thumbnail: the PNG above lands and the scene
+        # can finalize immediately. The MP4 orbit backfills the
+        # richer motion variant on a follow-up job that's allowed
+        # to take the extra minutes — maybe_finalize_scene skips
+        # JobKind.orbit in its terminal pass, so the user sees a
+        # "ready" chip on the home grid while the orbit is still
+        # rendering. Orbit failure is non-fatal: the CaptureCard
+        # falls back to the still PNG.
+        try:
+            await store.enqueue_job(scene.id, JobKind.orbit, payload={})
+        except Exception:
+            # Same defensive shape as the rest of the post-success
+            # bookkeeping: don't let an orbit-enqueue failure
+            # propagate as a thumbnail failure. The orbit backfill
+            # loop (when added) or a future re-enqueue endpoint
+            # can recover.
+            log.exception(
+                "thumbnail %s: failed to enqueue follow-up orbit job",
+                job.id,
+            )
 
     await _complete_thumbnail_job(job, scene, result=result)
 
@@ -801,6 +874,116 @@ async def _complete_thumbnail_job(job: Job, scene: Scene, *, result: dict) -> No
     # earlier _maybe_finalize_scene call (after export) saw the
     # still-queued thumbnail and skipped, leaving the scene at
     # ``processing`` indefinitely once thumbnail completes here.
+    await _maybe_finalize_scene(scene)
+
+
+async def _run_orbit(*, job: Job, scene: Scene, settings: Settings) -> None:
+    """Render a 24-frame MP4 orbit of the trained splat.
+
+    Two-stage thumbnail companion: the still PNG (``_run_thumbnail``)
+    is the canonical home-grid thumbnail and lands first; this step
+    backfills the richer motion variant on a follow-up job enqueued
+    by the thumbnail's success path. Soft-failure throughout — a
+    failed / canceled orbit leaves the scene at ``completed`` and
+    the CaptureCard falls back to the still PNG.
+
+    Shape mirrors ``_run_thumbnail``: dispatch the pipeline call,
+    heartbeat watches the row + kills the subprocess on cancel,
+    catch CancelledError + Exception arms ack user-cancel cleanly,
+    pre-commit guard before persisting the artifact path. The only
+    differences vs thumbnail are the result field name (``orbit``
+    vs ``thumbnail``) and the published event name.
+    """
+    src_ply = scene.ply_path
+    if not src_ply or not Path(src_ply).exists():
+        log.info("orbit %s: scene has no .ply yet; skipping", job.id)
+        await _complete_orbit_job(job, scene, result={"skipped": "no .ply"})
+        return
+
+    scene_dir = settings.scenes_dir() / scene.id
+
+    async def progress(pct: float, msg: str) -> None:
+        await store.update_job(
+            job.id, progress=pct, progress_msg=msg, heartbeat=True
+        )
+        await events.publish_job(
+            job.id, "job.progress", progress=pct, message=msg,
+        )
+
+    dispatch_task = asyncio.create_task(
+        orbit_step.run_orbit(
+            scene_dir=scene_dir,
+            src_ply=Path(src_ply),
+            progress=progress,
+            job_id=job.id,
+        )
+    )
+    hb_task = asyncio.create_task(_heartbeat(job.id, dispatch_task))
+    try:
+        try:
+            result = await dispatch_task
+        finally:
+            hb_task.cancel()
+    except asyncio.CancelledError:
+        if await _ack_user_cancel(job):
+            # Orbit doesn't block finalize (maybe_finalize_scene
+            # skips JobKind.orbit), so a cancel here doesn't need to
+            # re-trigger finalize the way thumbnail cancels do. But
+            # call it anyway — idempotent, and if the scene happens
+            # to still be at ``processing`` (somehow), this is the
+            # consistent recovery path.
+            await _maybe_finalize_scene(scene)
+            return
+        raise
+    except Exception as exc:  # noqa: BLE001
+        if await _ack_user_cancel(job):
+            await _maybe_finalize_scene(scene)
+            return
+        log.warning("orbit %s failed: %s", job.id, exc)
+        await _complete_orbit_job(
+            job, scene, result={"error": str(exc)},
+        )
+        return
+
+    refreshed = await store.get_job(job.id)
+    if refreshed is None or refreshed.status == JobStatus.canceled:
+        log.info(
+            "orbit %s finished but DB row is %s; skipping commit",
+            job.id,
+            "deleted" if refreshed is None else "canceled",
+        )
+        if refreshed is not None:
+            await store.update_job(job.id, completed=True)
+        await events.publish_job(job.id, "job.canceled")
+        await _maybe_finalize_scene(scene)
+        return
+
+    rendered = result.get("orbit")
+    if rendered:
+        await store.update_scene(scene.id, orbit_path=str(rendered))
+        await events.publish_scene(
+            scene.id, "scene.orbit_ready", orbit=str(rendered),
+        )
+
+    await _complete_orbit_job(job, scene, result=result)
+
+
+async def _complete_orbit_job(job: Job, scene: Scene, *, result: dict) -> None:
+    """Mark the orbit job completed + re-trigger finalize. The
+    re-trigger is idempotent in the common case (scene already
+    completed from thumbnail's finalize), but covers the edge case
+    where finalize was previously held up by some other job that
+    completed in the meantime.
+    """
+    await store.update_job(
+        job.id,
+        status=JobStatus.completed,
+        progress=1.0,
+        progress_msg=result.get("error") or result.get("skipped") or "done",
+        completed=True,
+        result=result,
+    )
+    await events.publish_job(job.id, "job.completed", result=result)
     await _maybe_finalize_scene(scene)
 
 

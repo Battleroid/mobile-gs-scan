@@ -41,7 +41,11 @@ export type JobKind =
   // runs after export. Kept in sync with worker/app/jobs/schema.py
   // — exhaustive switches over JobKind would otherwise treat valid
   // thumbnail rows from /api/scenes as impossible and fall through.
-  | "thumbnail";
+  | "thumbnail"
+  // Phase 3: 24-frame MP4 orbit rendered after thumbnail. Same
+  // sync requirement — exhaustive switches over JobKind would
+  // otherwise fall through on valid orbit rows from /api/scenes.
+  | "orbit";
 
 export type EditStatus =
   | "none"
@@ -132,6 +136,13 @@ export interface Scene {
   // scene is a stub, or ns-render failed. CaptureCard falls back
   // to a chip-tinted gradient placeholder when null.
   thumb_url: string | null;
+  // 24-frame MP4 orbit rendered post-thumbnail by JobKind.orbit.
+  // Two-stage thumbnail: thumb_url lands ~10 s after export so
+  // the scene can flip to "completed" immediately; orbit_url
+  // backfills 1-3 min later. CaptureCard prefers the orbit (motion)
+  // when present and falls back to the still PNG (and then to
+  // the gradient) when null.
+  orbit_url: string | null;
   jobs: Job[];
   created_at: string;
   completed_at: string | null;
