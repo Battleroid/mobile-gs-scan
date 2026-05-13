@@ -89,7 +89,26 @@ class ProfileActivity : ComponentActivity() {
     }
 
     private fun openSettings() {
-        startActivity(Intent(this, ServerConfigActivity::class.java))
+        // REORDER_TO_FRONT brings the existing Settings activity to
+        // the top of the task if one's already underneath (the
+        // common case — Profile is currently only reachable from
+        // the Settings header). Without this flag every tap pushes
+        // a fresh Settings on top of Profile, growing the back
+        // stack and making Back behave weirdly (Profile reappears,
+        // then a second Settings, etc.). If Settings isn't in the
+        // stack (a future direct-entry flow), this just behaves
+        // like a normal start.
+        startActivity(
+            Intent(this, ServerConfigActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+            },
+        )
+        // Close Profile too — the user wanted to be on Settings,
+        // not "Settings stacked on Profile". On return from
+        // Settings the user lands on Home directly, which matches
+        // the shape of every other Settings exit (Save / Back both
+        // finish() and drop to Home).
+        finish()
     }
 
     private fun onSignOut() {
