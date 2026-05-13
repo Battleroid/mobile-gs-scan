@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { wsUrl } from "@/lib/api";
 import type { Capture, ServerEvent } from "@/lib/types";
 
@@ -9,12 +9,28 @@ import type { Capture, ServerEvent } from "@/lib/types";
 // seconds, and the page sits visibly frozen until we reconnect.
 const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
 
+// Close-codes the server uses to signal a TERMINAL rejection — the
+// subscription is structurally invalid and retrying is pointless.
+// The capture/scene WS endpoints close with 4404 when the resource
+// doesn't exist (deleted out from under the tab, or a bad URL). The
+// 1008/1011 codes are the WS-protocol-level "policy violation" /
+// "internal error" markers we leave alone the same way — both are
+// fail-permanent, not "wait and retry". Anything else (1006 abnormal,
+// 1001 going away, etc.) keeps the backoff loop alive.
+const TERMINAL_CLOSE_CODES: ReadonlySet<number> = new Set([4404, 1008, 1011]);
+
 export function useCaptureEvents(captureId: string | null): {
   capture: Capture | null;
   lastEvent: ServerEvent | null;
 } {
   const [capture, setCapture] = useState<Capture | null>(null);
   const [lastEvent, setLastEvent] = useState<ServerEvent | null>(null);
+  // Monotonic counter so the snapshot-refetch fired from each
+  // (re)connect's onopen only commits when it's still the latest
+  // one in flight. Mirrors useSceneEvents — without it two close-
+  // together reconnects can resolve out of order and let the
+  // earlier snapshot stomp newer state.
+  const refreshGen = useRef(0);
 
   useEffect(() => {
     if (!captureId) return;
@@ -33,11 +49,12 @@ export function useCaptureEvents(captureId: string | null): {
         // sends one on connect, but if it raced our onmessage
         // attachment (vanishingly rare but possible) the page would
         // stay on pre-disconnect state. Idempotent on the happy path.
+        const gen = ++refreshGen.current;
         void (async () => {
           try {
             const { api } = await import("@/lib/api");
             const fresh = await api.getCapture(captureId);
-            if (!cancelled) setCapture(fresh);
+            if (!cancelled && gen === refreshGen.current) setCapture(fresh);
           } catch {
             // ignore — the snapshot event will populate us if it arrives.
           }
@@ -65,8 +82,12 @@ export function useCaptureEvents(captureId: string | null): {
           // ignore malformed payloads
         }
       };
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         if (cancelled) return;
+        // Terminal codes mean the server explicitly told us not to
+        // come back — don't reschedule. Anything else is treated as
+        // a transient drop and the backoff loop runs.
+        if (TERMINAL_CLOSE_CODES.has(event.code)) return;
         const delay =
           RECONNECT_DELAYS_MS[
             Math.min(attempt, RECONNECT_DELAYS_MS.length - 1)

@@ -9,6 +9,12 @@ import type { Scene, ServerEvent } from "@/lib/types";
 // with no client-side reconnect; both hooks need the same recovery.
 const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
 
+// Terminal close-codes — see the matching list in useCaptureEvents.
+// 4404 is the server's "this scene/capture does not exist" signal;
+// 1008/1011 are protocol-level policy/error. None of these are worth
+// retrying; the backoff loop only runs for transient drops.
+const TERMINAL_CLOSE_CODES: ReadonlySet<number> = new Set([4404, 1008, 1011]);
+
 export interface EditResult {
   kept: number;
   total: number;
@@ -247,8 +253,9 @@ export function useSceneEvents(sceneId: string | null): {
         // ignore
       }
       };
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         if (cancelled) return;
+        if (TERMINAL_CLOSE_CODES.has(event.code)) return;
         const delay =
           RECONNECT_DELAYS_MS[
             Math.min(attempt, RECONNECT_DELAYS_MS.length - 1)
