@@ -2,6 +2,7 @@ package dev.battleroid.mobilegsscan.ui.detail
 
 import coil.compose.AsyncImage
 import androidx.compose.ui.layout.ContentScale
+import dev.battleroid.mobilegsscan.ui.draft.formatHumanBytes
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -122,6 +123,11 @@ fun CaptureDetailScreen(
                 kicker = capture?.let { c ->
                     buildString {
                         append("${c.frame_count} frames")
+                        val bytes = c.total_bytes ?: 0L
+                        if (bytes > 0) {
+                            append(" · ")
+                            append(formatHumanBytes(bytes))
+                        }
                         if (c.dropped_count > 0) append(" (${c.dropped_count} dropped)")
                         append(" · ${c.source}")
                         if (c.created_at.isNotBlank()) {

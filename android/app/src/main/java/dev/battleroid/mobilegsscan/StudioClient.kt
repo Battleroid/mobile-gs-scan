@@ -63,6 +63,12 @@ class StudioClient(private val baseUrl: String) {
         // compatible with older servers.
         val thumb_url: String? = null,
         val orbit_url: String? = null,
+        // Bytes on the studio's disk for the capture's frames.
+        // Computed server-side on the single-capture endpoints;
+        // nullable here so older servers (pre-PR-B) that don't emit
+        // the field still deserialise cleanly, and so the home list
+        // path (which omits the field for cost reasons) round-trips.
+        val total_bytes: Long? = null,
         val has_pose: Boolean = false,
         val scene_id: String? = null,
         val error: String? = null,

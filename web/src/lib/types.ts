@@ -22,6 +22,10 @@ export interface Capture {
   source: CaptureSource;
   frame_count: number;
   dropped_count: number;
+  // Bytes on disk for the capture's frames/ directory. Server walks
+  // the dir on every GET — no schema column, no migration. 0 before
+  // any frames have been uploaded.
+  total_bytes: number;
   has_pose: boolean;
   meta: Record<string, unknown>;
   error: string | null;
