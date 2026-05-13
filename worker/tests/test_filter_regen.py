@@ -373,6 +373,56 @@ def test_edit_clear_regens_thumbnail_against_original_splat(
     _run(go())
 
 
+def test_enqueue_regen_clears_orbit_path(isolated_store, tmp_path: Path):
+    """The web CaptureCard prefers orbit_url over thumb_url; if we
+    enqueue a regen without clearing Scene.orbit_path the card
+    will keep playing the stale (pre-action) MP4 for the entire
+    regen window — and if the follow-up orbit job fails or
+    permanently skips, indefinitely. enqueue_regen must null
+    orbit_path so the card falls back to the freshly-regenerated
+    PNG until the new MP4 lands.
+
+    Regression for the Codex P1 on PR #94 (3236260810).
+    """
+    from app.jobs import thumb_regen
+
+    async def go():
+        cap = await store.create_capture(name="clear-orbit", source="upload")
+        scene = await store.create_scene(cap.id)
+        assert scene is not None
+
+        thumb_file = tmp_path / "thumb.png"
+        orbit_file = tmp_path / "orbit.mp4"
+        thumb_file.write_bytes(b"fake")
+        orbit_file.write_bytes(b"fake")
+        await store.update_scene(
+            scene.id,
+            thumbnail_path=str(thumb_file),
+            orbit_path=str(orbit_file),
+        )
+
+        await thumb_regen.enqueue_regen(scene.id, use_edited_ply=False)
+
+        refreshed = await store.get_scene(scene.id)
+        assert refreshed is not None
+        assert refreshed.orbit_path is None, (
+            "regen must clear orbit_path so the home grid falls "
+            "back to the thumbnail until the regen MP4 lands; "
+            f"got {refreshed.orbit_path!r}"
+        )
+        # thumbnail_path stays so the card has SOMETHING to show
+        # during the regen window — flashing to the gradient
+        # placeholder for ~10 s is a worse visual than a brief
+        # "still version" of the prior frame.
+        assert refreshed.thumbnail_path == str(thumb_file), (
+            "regen must NOT clear thumbnail_path — keeps the card "
+            "from flashing to the gradient placeholder while the "
+            "fresh PNG renders"
+        )
+
+    _run(go())
+
+
 def test_regen_thumbnail_reads_edited_ply_path(
     isolated_store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ):

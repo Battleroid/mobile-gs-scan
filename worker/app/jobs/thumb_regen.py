@@ -50,10 +50,23 @@ async def cancel_in_flight_thumb_orbit(scene_id: str) -> None:
 
 
 async def enqueue_regen(scene_id: str, *, use_edited_ply: bool) -> None:
-    """Cancel in-flight thumbnail / orbit jobs, then enqueue a
-    fresh thumbnail with the given payload. The thumbnail's
-    success path enqueues the matching orbit so we only have to
-    queue one job here.
+    """Cancel in-flight thumbnail / orbit jobs, clear the stale
+    orbit pointer, then enqueue a fresh thumbnail with the given
+    payload. The thumbnail's success path enqueues the matching
+    orbit so we only have to queue one job here.
+
+    Why clear ``Scene.orbit_path`` and NOT ``Scene.thumbnail_path``:
+    web ``CaptureCard`` prefers ``orbit_url`` over ``thumb_url``
+    when both are present. With the stale orbit still pointed at
+    the pre-action MP4, the card would keep playing the wrong
+    motion variant for the entire regen window — and if the
+    follow-up orbit fails / permanently skips (e.g. ffmpeg
+    unavailable on the host that filter ran on), the UI would
+    stay stuck on pre-filter / pre-discard media indefinitely.
+    Clearing orbit_path drops the card to its thumbnail fallback
+    while the regen runs; the still PNG isn't cleared (the brief
+    "still version" while orbit catches up is far less jarring
+    than a gradient placeholder).
 
     ``use_edited_ply``:
       * True (filter apply) — route through the gsplat PLY path
@@ -64,6 +77,7 @@ async def enqueue_regen(scene_id: str, *, use_edited_ply: bool) -> None:
         first post-export thumbnail used.
     """
     await cancel_in_flight_thumb_orbit(scene_id)
+    await store.update_scene(scene_id, orbit_path=None)
     payload: dict = {}
     if use_edited_ply:
         payload["use_edited_ply"] = True
