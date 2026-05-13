@@ -1,5 +1,7 @@
 package dev.battleroid.mobilegsscan.ui.detail
 
+import coil.compose.AsyncImage
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -109,6 +111,23 @@ fun JobDetailScreen(
                 ),
                 color = pebble.ink,
             )
+
+            // Scene thumbnail strip. Renders only when the activity
+            // has populated state.thumbAbsoluteUrl (one scene fetch
+            // on first poll). Soft-fail: a missing or pending
+            // thumbnail just hides the strip rather than dropping
+            // a placeholder into a tight metrics-focused layout.
+            if (state.thumbAbsoluteUrl != null) {
+                AsyncImage(
+                    model = state.thumbAbsoluteUrl,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(140.dp)
+                        .clip(RoundedCornerShape(12.dp)),
+                )
+            }
 
             if (job != null) {
                 ProgressCard(

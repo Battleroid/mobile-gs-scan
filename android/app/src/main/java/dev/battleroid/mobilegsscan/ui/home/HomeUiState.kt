@@ -24,6 +24,12 @@ data class HomeUiState(
     val drafts: List<Draft>,
     val captures: List<StudioClient.Capture>,
     val canCreateNewCapture: Boolean,
+    /** Absolute base URL for the studio (e.g. ``https://studio.local``),
+     *  used to resolve relative artifact URLs (``thumb_url`` /
+     *  ``orbit_url``) when rendering thumbnails. Null when the studio
+     *  URL hasn't been configured yet; CaptureRow falls back to the
+     *  chip-tinted gradient in that case. */
+    val baseUrl: String? = null,
 )
 
 enum class HomeStatus {

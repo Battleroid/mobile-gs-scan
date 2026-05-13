@@ -35,6 +35,10 @@ data class CaptureDetailUiState(
      *  spinner if we add one (currently unused, kept on the state
      *  for parity with the legacy implementation's tracking). */
     val renaming: Boolean,
+    /** Absolute studio base URL — used to resolve scene.thumb_url /
+     *  orbit_url for the hero preview. Null until the activity reads
+     *  it from intent extras. */
+    val baseUrl: String? = null,
 ) {
     companion object {
         val Initial: CaptureDetailUiState = CaptureDetailUiState(
@@ -44,6 +48,7 @@ data class CaptureDetailUiState(
             sceneMissing = false,
             networkError = null,
             renaming = false,
+            baseUrl = null,
         )
     }
 }

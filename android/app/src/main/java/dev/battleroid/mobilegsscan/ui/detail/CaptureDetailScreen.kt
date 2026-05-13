@@ -1,5 +1,7 @@
 package dev.battleroid.mobilegsscan.ui.detail
 
+import coil.compose.AsyncImage
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -136,11 +138,16 @@ fun CaptureDetailScreen(
             )
             Spacer(Modifier.height(16.dp))
 
-            // Hero gradient placeholder. The chip-palette gradient
-            // matches the home grid's thumbnail style.
+            // Hero. Server-rendered PNG when available, falling back
+            // to a chip-palette gradient matching the home grid's
+            // thumbnail style. orbit_url playback is deferred — the
+            // still PNG is the canonical thumbnail and lands first.
             HeroBlock(
                 paletteSeed = capture?.id ?: "loading",
                 frameCount = capture?.frame_count ?: 0,
+                thumbUrl = dev.battleroid.mobilegsscan.ui.home.absoluteUrl(
+                    state.baseUrl, scene?.thumb_url,
+                ),
             )
 
             if (!capture?.error.isNullOrBlank()) {
@@ -322,7 +329,7 @@ private fun TitleBlock(
 }
 
 @Composable
-private fun HeroBlock(paletteSeed: String, frameCount: Int) {
+private fun HeroBlock(paletteSeed: String, frameCount: Int, thumbUrl: String?) {
     val pebble = MaterialTheme.pebble
     val palette = paletteFor(paletteSeed, pebble)
     Box(
@@ -332,6 +339,14 @@ private fun HeroBlock(paletteSeed: String, frameCount: Int) {
             .clip(RoundedCornerShape(18.dp))
             .background(Brush.linearGradient(palette)),
     ) {
+        if (thumbUrl != null) {
+            AsyncImage(
+                model = thumbUrl,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
         // Top-left frame-count chip
         Row(
             modifier = Modifier

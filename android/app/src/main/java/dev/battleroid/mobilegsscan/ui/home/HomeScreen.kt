@@ -32,6 +32,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -39,6 +40,10 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import dev.battleroid.mobilegsscan.Draft
 import dev.battleroid.mobilegsscan.StudioClient
 import dev.battleroid.mobilegsscan.ui.theme.PebbleTheme
@@ -152,7 +157,11 @@ fun HomeScreen(
                         )
                     }
                     items(state.captures, key = { "cap-${it.id}" }) { capture ->
-                        CaptureRow(capture = capture, onClick = { onCaptureClick(capture) })
+                        CaptureRow(
+                            capture = capture,
+                            baseUrl = state.baseUrl,
+                            onClick = { onCaptureClick(capture) },
+                        )
                         Spacer(Modifier.height(10.dp))
                     }
                 }
@@ -312,6 +321,12 @@ private fun DraftRow(draft: Draft, onClick: () -> Unit) {
     val pebble = MaterialTheme.pebble
     val meta = draft.meta
     val ready = meta.finalized
+    // First captured frame on disk, if any. Loaded via Coil so the
+    // row shows what the user actually scanned rather than a generic
+    // emoji glyph. ``thumbnailFile()`` returns the first JPEG under
+    // the draft's frames/ dir (null for drafts created but never
+    // captured into).
+    val thumbFile = remember(draft.id, meta.frame_count) { draft.thumbnailFile() }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -331,10 +346,16 @@ private fun DraftRow(draft: Draft, onClick: () -> Unit) {
                 .background(pebble.chip1),
             contentAlignment = Alignment.Center,
         ) {
-            // Package glyph stand-in. The full Pebble icon set
-            // lands in PR-D; this keeps the row recognisable in
-            // PR-B without a new dep.
-            Text("📦", style = MaterialTheme.typography.bodyLarge)
+            if (thumbFile != null) {
+                AsyncImage(
+                    model = thumbFile,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                Text("📦", style = MaterialTheme.typography.bodyLarge)
+            }
         }
         Spacer(Modifier.size(12.dp))
         Column(modifier = Modifier.weight(1f)) {
@@ -366,9 +387,16 @@ private fun DraftRow(draft: Draft, onClick: () -> Unit) {
 }
 
 @Composable
-private fun CaptureRow(capture: StudioClient.Capture, onClick: () -> Unit) {
+private fun CaptureRow(
+    capture: StudioClient.Capture,
+    baseUrl: String?,
+    onClick: () -> Unit,
+) {
     val pebble = MaterialTheme.pebble
     val palette = paletteFor(capture.id, pebble)
+    val thumbAbsUrl = remember(capture.thumb_url, baseUrl) {
+        absoluteUrl(baseUrl, capture.thumb_url)
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -383,20 +411,28 @@ private fun CaptureRow(capture: StudioClient.Capture, onClick: () -> Unit) {
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Palette-gradient thumbnail placeholder. The server-rendered
-        // PNG thumbnail (PR #82 Phase 1 PR-D) is a web-side feature
-        // for now — surfacing it on Android needs an image loader
-        // (Coil) which is deferred to a later PR. The chip-tinted
-        // gradient keeps the row visually rich until then and
-        // matches the web side's own pre-thumbnail placeholder.
+        // Server-rendered PNG when present; falls back to a chip-
+        // tinted gradient placeholder so the row stays visually
+        // rich while the pipeline's thumbnail step is mid-render
+        // (or skipped — stub captures, ns-render unavailable, etc.).
         Box(
             modifier = Modifier
                 .size(52.dp)
                 .clip(RoundedCornerShape(8.dp))
-                .background(
-                    brush = Brush.linearGradient(palette),
-                ),
-        )
+                .background(brush = Brush.linearGradient(palette)),
+        ) {
+            if (thumbAbsUrl != null) {
+                AsyncImage(
+                    model = ImageRequest.Builder(LocalContext.current)
+                        .data(thumbAbsUrl)
+                        .crossfade(true)
+                        .build(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
         Spacer(Modifier.size(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
@@ -518,6 +554,17 @@ private fun paletteFor(
     var h = 0
     for (c in id) h = (h * 31 + c.code)
     return palettes[(h.toUInt() % palettes.size.toUInt()).toInt()]
+}
+
+/** Resolve a server-relative path (``/api/scenes/…``) against an
+ *  optional base URL. Returns null when either side is missing so
+ *  callers (Coil) skip the load and fall back to the placeholder
+ *  rather than asking for a malformed URL. */
+internal fun absoluteUrl(baseUrl: String?, relative: String?): String? {
+    val b = baseUrl?.trimEnd('/') ?: return null
+    val r = relative ?: return null
+    return if (r.startsWith("http://") || r.startsWith("https://")) r
+    else b + (if (r.startsWith("/")) r else "/$r")
 }
 
 /**

@@ -1,5 +1,8 @@
 package dev.battleroid.mobilegsscan.ui.draft
 
+import coil.compose.AsyncImage
+import androidx.compose.ui.layout.ContentScale
+import java.io.File
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -133,11 +136,11 @@ fun DraftDetailScreen(
 
             Spacer(Modifier.height(16.dp))
 
-            // Hero gradient block. The legacy activity didn't have
-            // one; Pebble's design source does. Static placeholder
-            // (chip-palette) consistent with the home grid and
-            // CaptureDetail.
-            HeroBlock(seed = meta?.id ?: "loading")
+            // Hero block. Shows the first captured frame when one
+            // exists (so the user sees the actual scan), otherwise
+            // a chip-palette gradient consistent with the home grid
+            // and CaptureDetail placeholders.
+            HeroBlock(seed = meta?.id ?: "loading", thumbnail = state.thumbnailFile)
 
             Spacer(Modifier.height(20.dp))
 
@@ -239,7 +242,7 @@ private fun Header(onBackClick: () -> Unit) {
 }
 
 @Composable
-private fun HeroBlock(seed: String) {
+private fun HeroBlock(seed: String, thumbnail: File?) {
     val pebble = MaterialTheme.pebble
     val palette = paletteFor(seed, pebble)
     Box(
@@ -249,6 +252,14 @@ private fun HeroBlock(seed: String) {
             .clip(RoundedCornerShape(18.dp))
             .background(Brush.linearGradient(palette)),
     ) {
+        if (thumbnail != null) {
+            AsyncImage(
+                model = thumbnail,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
         Row(
             modifier = Modifier
                 .padding(12.dp)

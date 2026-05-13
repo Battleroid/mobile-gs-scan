@@ -123,6 +123,7 @@ class MainActivity : ComponentActivity() {
                 it.copy(
                     status = HomeStatus.NotConfigured,
                     studioHost = null,
+                    baseUrl = null,
                     captures = emptyList(),
                 )
             }
@@ -133,6 +134,7 @@ class MainActivity : ComponentActivity() {
             it.copy(
                 status = HomeStatus.Resolving,
                 studioHost = studioHost(studioUrl),
+                baseUrl = studioUrl,
             )
         }
         client = StudioClient(studioUrl)

@@ -20,6 +20,12 @@ kotlinxSerializationJson = "1.7.3"
 preference = "1.2.1"
 recyclerview = "1.3.2"
 swiperefreshlayout = "1.1.0"
+# Coil — Compose-friendly image loader. Used for static thumbnails
+# everywhere (home capture rows, draft list, draft detail hero,
+# capture/job detail hero). Includes coil-network-okhttp so it
+# reuses the project's existing OkHttp dep for cache/timeout
+# behavior instead of pulling in a second HTTP client.
+coil = "2.7.0"
 
 [libraries]
 core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -49,6 +55,7 @@ androidx-compose-ui-graphics = { group = "androidx.compose.ui", name = "ui-graph
 androidx-compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
 androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
 androidx-navigation-compose = { group = "androidx.navigation", name = "navigation-compose", version.ref = "navigationCompose" }
+coil-compose = { group = "io.coil-kt", name = "coil-compose", version.ref = "coil" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

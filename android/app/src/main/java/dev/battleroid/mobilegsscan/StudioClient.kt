@@ -56,6 +56,13 @@ class StudioClient(private val baseUrl: String) {
         val source: String,
         val frame_count: Int = 0,
         val dropped_count: Int = 0,
+        // Server-inlined from the capture's scene (server PR-C).
+        // Relative URLs (``/api/scenes/{id}/artifacts/thumb`` etc.) —
+        // callers prepend baseUrl. Null until the corresponding job
+        // produces the asset. Defaulted so the field is forward-
+        // compatible with older servers.
+        val thumb_url: String? = null,
+        val orbit_url: String? = null,
         val has_pose: Boolean = false,
         val scene_id: String? = null,
         val error: String? = null,
@@ -81,6 +88,11 @@ class StudioClient(private val baseUrl: String) {
         val error: String? = null,
         val ply_url: String? = null,
         val spz_url: String? = null,
+        // Same relative-URL shape the server exposes on the scene
+        // endpoint. The Android capture/job detail hero loads these
+        // via Coil after resolving against baseUrl.
+        val thumb_url: String? = null,
+        val orbit_url: String? = null,
         val jobs: List<JobView> = emptyList(),
         val created_at: String,
         val completed_at: String? = null,

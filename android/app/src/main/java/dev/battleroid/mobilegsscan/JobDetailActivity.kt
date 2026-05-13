@@ -67,12 +67,14 @@ class JobDetailActivity : ComponentActivity() {
     // through running do NOT re-open if the user has explicitly
     // closed the panel.
     private var lastStatus: String = ""
+    private var baseUrl: String = ""
+    private var thumbFetched: Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        val baseUrl = intent.getStringExtra(EXTRA_BASE_URL).orEmpty()
+        baseUrl = intent.getStringExtra(EXTRA_BASE_URL).orEmpty()
         jobId = intent.getStringExtra(EXTRA_JOB_ID).orEmpty()
         val seedKind = intent.getStringExtra(EXTRA_JOB_KIND).orEmpty()
         if (baseUrl.isEmpty() || jobId.isEmpty()) {
@@ -136,6 +138,29 @@ class JobDetailActivity : ComponentActivity() {
                 job = detail,
                 networkError = null,
             )
+        }
+
+        // Fetch the parent scene once to populate the thumbnail
+        // strip in the header. Skips when scene_id isn't known yet
+        // (early poll cycles), when a previous fetch already
+        // succeeded, or when the scene has no thumb yet. Failures
+        // are silent — the strip just stays hidden.
+        if (!thumbFetched) {
+            val sceneId = detail.scene_id
+            if (sceneId.isNotBlank()) {
+                val thumbRel = try {
+                    c.getScene(sceneId).thumb_url
+                } catch (_: Exception) {
+                    null
+                }
+                if (thumbRel != null) {
+                    val abs = dev.battleroid.mobilegsscan.ui.home.absoluteUrl(
+                        baseUrl, thumbRel,
+                    )
+                    state.update { it.copy(thumbAbsoluteUrl = abs) }
+                    thumbFetched = true
+                }
+            }
         }
 
         if (state.value.log.open) {

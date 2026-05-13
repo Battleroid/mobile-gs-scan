@@ -59,11 +59,27 @@ class CaptureView(BaseModel):
     meta: dict[str, Any]
     error: str | None
     scene_id: str | None
+    # Thumbnail / orbit URLs inlined from the capture's scene (if
+    # any) so list endpoints don't force every client to do an
+    # N+1 scene fetch to render a home grid. Same shape the
+    # SceneView exposes (``/api/scenes/{id}/artifacts/...``); null
+    # when the scene doesn't exist yet OR the corresponding artifact
+    # hasn't been rendered. Android home rows consume these directly;
+    # web home renders from the scene WS snapshot so the duplication
+    # is null-safe on that side.
+    thumb_url: str | None
+    orbit_url: str | None
     created_at: str
     updated_at: str
 
 
-def _to_view(cap: Capture, scene_id: str | None = None) -> CaptureView:
+def _to_view(
+    cap: Capture,
+    scene_id: str | None = None,
+    *,
+    thumb_url: str | None = None,
+    orbit_url: str | None = None,
+) -> CaptureView:
     return CaptureView(
         id=cap.id,
         name=cap.name,
@@ -75,9 +91,27 @@ def _to_view(cap: Capture, scene_id: str | None = None) -> CaptureView:
         meta=cap.meta,
         error=cap.error,
         scene_id=scene_id,
+        thumb_url=thumb_url,
+        orbit_url=orbit_url,
         created_at=cap.created_at.isoformat(),
         updated_at=cap.updated_at.isoformat(),
     )
+
+
+def _scene_thumb_orbit_urls(scene) -> tuple[str | None, str | None]:
+    if scene is None:
+        return None, None
+    thumb = (
+        f"/api/scenes/{scene.id}/artifacts/thumb"
+        if scene.thumbnail_path
+        else None
+    )
+    orbit = (
+        f"/api/scenes/{scene.id}/artifacts/orbit"
+        if scene.orbit_path
+        else None
+    )
+    return thumb, orbit
 
 
 # ─── HTTP ───────────────────────────────────────────
@@ -89,7 +123,15 @@ async def list_captures() -> list[CaptureView]:
     out: list[CaptureView] = []
     for cap in rows:
         scene = await store.get_scene_for_capture(cap.id)
-        out.append(_to_view(cap, scene_id=scene.id if scene else None))
+        thumb_url, orbit_url = _scene_thumb_orbit_urls(scene)
+        out.append(
+            _to_view(
+                cap,
+                scene_id=scene.id if scene else None,
+                thumb_url=thumb_url,
+                orbit_url=orbit_url,
+            )
+        )
     return out
 
 
@@ -116,7 +158,13 @@ async def get_capture(capture_id: str) -> CaptureView:
     if cap is None:
         raise HTTPException(404, "capture not found")
     scene = await store.get_scene_for_capture(cap.id)
-    return _to_view(cap, scene_id=scene.id if scene else None)
+    thumb_url, orbit_url = _scene_thumb_orbit_urls(scene)
+    return _to_view(
+        cap,
+        scene_id=scene.id if scene else None,
+        thumb_url=thumb_url,
+        orbit_url=orbit_url,
+    )
 
 
 @router.patch("/{capture_id}")
@@ -134,8 +182,14 @@ async def rename_capture(capture_id: str, body: CaptureRename) -> CaptureView:
     cap = await store.get_capture(capture_id)
     assert cap is not None  # re-read; row exists per the check above
     scene = await store.get_scene_for_capture(cap.id)
+    thumb_url, orbit_url = _scene_thumb_orbit_urls(scene)
     await events.publish_capture(cap.id, "capture.renamed", name=new_name)
-    return _to_view(cap, scene_id=scene.id if scene else None)
+    return _to_view(
+        cap,
+        scene_id=scene.id if scene else None,
+        thumb_url=thumb_url,
+        orbit_url=orbit_url,
+    )
 
 
 class FinalizeBody(BaseModel):
@@ -378,12 +432,18 @@ async def capture_events_endpoint(ws: WebSocket, capture_id: str) -> None:
     queue = await events.subscribe(topic)
     try:
         scene = await store.get_scene_for_capture(cap.id)
+        thumb_url, orbit_url = _scene_thumb_orbit_urls(scene)
         await ws.send_text(
             json.dumps(
                 {
                     "topic": topic,
                     "kind": "snapshot",
-                    "data": _to_view(cap, scene_id=scene.id if scene else None).model_dump(),
+                    "data": _to_view(
+                        cap,
+                        scene_id=scene.id if scene else None,
+                        thumb_url=thumb_url,
+                        orbit_url=orbit_url,
+                    ).model_dump(),
                 }
             )
         )

@@ -61,7 +61,7 @@ class CaptureDetailActivity : ComponentActivity() {
             return
         }
 
-        state.update { it.copy(captureName = seedName) }
+        state.update { it.copy(captureName = seedName, baseUrl = baseUrl) }
         client = StudioClient(baseUrl)
 
         setContent {
@@ -163,8 +163,10 @@ class CaptureDetailActivity : ComponentActivity() {
     }
 
     private fun openSceneInBrowser() {
-        val sceneId = state.value.scene?.id ?: return
-        val url = "$baseUrl/scenes/$sceneId"
+        // The web side has no /scenes/{id} route; the splat viewer
+        // lives on /captures/{captureId}. The legacy URL was a
+        // leftover from an earlier route shape and 404'd every time.
+        val url = "$baseUrl/captures/$captureId"
         startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
     }
 }
