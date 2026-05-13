@@ -70,21 +70,41 @@ async def run_forever(settings: Settings | None = None) -> None:
     worker = _worker_id()
     log.info("worker %s starting (class=%s)", worker, settings.worker_class)
 
-    kinds_for_class: dict[str, list[JobKind]] = {
-        "gs": [
-            JobKind.extract,
-            JobKind.sfm,
-            JobKind.train,
-            JobKind.export,
-            JobKind.mesh,
-            JobKind.filter,
-            JobKind.thumbnail,
-            JobKind.orbit,
-        ],
+    # Job kinds are split into two priority bands so a long orbit
+    # render can't starve newer pipeline work:
+    #   * `primary` covers every job that affects scene status
+    #     (extract → sfm → train → export → thumbnail) plus the
+    #     on-demand sibling jobs (mesh / filter).
+    #   * `secondary` is the orbit MP4 — a non-blocking,
+    #     1-3-minute step that backfills the richer motion variant
+    #     of the thumbnail. Always claimed strictly after a primary
+    #     scan returns nothing, so a worker mid-orbit when a new
+    #     capture is dropped will pick up the new pipeline's
+    #     extract / sfm / train as soon as it frees up, instead of
+    #     grabbing the older queued orbit (which would be the
+    #     natural created_at winner).
+    kinds_for_class: dict[str, tuple[list[JobKind], list[JobKind]]] = {
+        "gs": (
+            [
+                JobKind.extract,
+                JobKind.sfm,
+                JobKind.train,
+                JobKind.export,
+                JobKind.mesh,
+                JobKind.filter,
+                JobKind.thumbnail,
+            ],
+            [JobKind.orbit],
+        ),
     }
-    kinds = kinds_for_class.get(settings.worker_class)
-    if not kinds:
+    bands = kinds_for_class.get(settings.worker_class)
+    if not bands:
         raise RuntimeError(f"unknown worker class {settings.worker_class!r}")
+    primary, secondary = bands
+    # Union used for set-membership checks (backfill gating, the
+    # outer-task scene-demotion guard, etc.) — the priority split
+    # only matters for the claim path.
+    kinds = primary + secondary
 
     reaper = asyncio.create_task(_reap_loop())
 
@@ -110,7 +130,17 @@ async def run_forever(settings: Settings | None = None) -> None:
 
     try:
         while True:
-            job = await store.claim_next_job(worker_id=worker, kinds=kinds)
+            # Two-pass claim: primary kinds first (everything that
+            # affects scene status), orbit only when nothing else is
+            # ready. Without the split, a worker that just finished
+            # thumbnail_A would claim orbit_A over a newer queued
+            # extract_B (since orbit_A's created_at is earlier),
+            # making the user wait minutes for B to start training.
+            job = await store.claim_next_job(worker_id=worker, kinds=primary)
+            if job is None and secondary:
+                job = await store.claim_next_job(
+                    worker_id=worker, kinds=secondary,
+                )
             if job is None:
                 await asyncio.sleep(POLL_INTERVAL)
                 continue

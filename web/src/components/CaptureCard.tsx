@@ -95,36 +95,30 @@ export function CaptureCard({ capture }: { capture: Capture }) {
     refetchInterval: (query) => {
       if (isTraining) return 3_000;
       if (!canStillGainThumbnail) return false;
-      // Keep polling while EITHER the still PNG or the MP4 orbit
-      // is still pending. Two-stage thumbnail: thumb_url lands
-      // ~10 s post-export, orbit_url backfills 1-3 min later.
-      //
-      // Stop polling when:
-      //  * orbit_url has arrived (richer asset, card flips to
-      //    <video>), OR
-      //  * the orbit JOB is in a terminal state — completed
-      //    (with a soft-failure / skip blurb), canceled, or
-      //    failed. The job sticks around on the scene so we can
-      //    inspect status; orbit_url stays null. Without this
-      //    branch, pre-existing scenes (no orbit job ever) and
-      //    scenes whose orbit step hit a permanent_skip / error
-      //    would poll forever.
       const data = query.state.data;
-      if (data?.orbit_url) return false;
-      const orbitJob = data?.jobs?.find((j) => j.kind === "orbit");
-      // No orbit job at all → scene predates the orbit pipeline
-      // OR thumbnail's post-success enqueue dropped (defensive
-      // catch in runner.py). Either way, orbit will never arrive
-      // for this scene without operator action; stop polling.
-      if (!orbitJob) return false;
-      if (
-        orbitJob.status === "completed" ||
-        orbitJob.status === "canceled" ||
-        orbitJob.status === "failed"
-      ) {
-        return false;
-      }
-      return 15_000;
+      if (!data) return 15_000;
+      // Two-stage thumbnail polling. thumb_url lands ~10 s post-
+      // export, orbit_url backfills 1-3 min later. Stop polling
+      // only when there's nothing more to gain — either we have
+      // the richer asset, or we've settled for the PNG and orbit
+      // can no longer arrive.
+      if (data.orbit_url) return false;
+      const orbitJob = data.jobs?.find((j) => j.kind === "orbit");
+      const orbitInFlight =
+        orbitJob !== undefined &&
+        (orbitJob.status === "queued" ||
+          orbitJob.status === "claimed" ||
+          orbitJob.status === "running");
+      // Orbit still in flight → keep polling so the card flips
+      // from img → video once it lands.
+      if (orbitInFlight) return 15_000;
+      // Orbit is terminal (or never enqueued — pre-orbit-pipeline
+      // backfill, dropped post-success enqueue, etc). Fall back to
+      // the thumb_url contract from before this PR: poll until the
+      // still PNG arrives, then stop. Without this, pre-PR-D
+      // scenes whose thumbnail backfill is still catching up
+      // would stop polling and never gain a thumb.
+      return data.thumb_url ? false : 15_000;
     },
     refetchOnWindowFocus: false,
     refetchOnMount: true,
