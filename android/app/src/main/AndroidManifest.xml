@@ -63,6 +63,15 @@
             android:exported="false" />
 
         <activity
+            android:name=".ProfileActivity"
+            android:exported="false"
+            android:parentActivityName=".MainActivity" />
+
+        <activity
+            android:name=".SignInActivity"
+            android:exported="false" />
+
+        <activity
             android:name=".CaptureDetailActivity"
             android:exported="false"
             android:parentActivityName=".MainActivity" />

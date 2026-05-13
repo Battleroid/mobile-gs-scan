@@ -120,8 +120,14 @@ fun CaptureScreen(
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .fillMaxWidth()
+                    // safeDrawing.Top = max(statusBars, displayCutout)
+                    // so the HUD pills clear notches / hole-punch
+                    // cameras, not just the status bar height. The
+                    // camera feed is full-bleed so a notch on a Pixel
+                    // / iPhone-style cutout would otherwise punch
+                    // straight through the top pill chips.
                     .windowInsetsPadding(
-                        WindowInsets.statusBars.only(WindowInsetsSides.Top)
+                        WindowInsets.safeDrawing.only(WindowInsetsSides.Top)
                     )
                     .padding(horizontal = 16.dp, vertical = 12.dp),
             )
@@ -132,11 +138,11 @@ fun CaptureScreen(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .windowInsetsPadding(
-                            WindowInsets.statusBars.only(WindowInsetsSides.Top)
+                            WindowInsets.safeDrawing.only(WindowInsetsSides.Top)
                         )
                         // ~64 dp under the top bar so the two pills
                         // don't crowd each other on devices with a
-                        // tall status bar.
+                        // tall status bar / display cutout.
                         .padding(top = 64.dp),
                 )
             }
