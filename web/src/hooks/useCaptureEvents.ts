@@ -41,6 +41,11 @@ export function useCaptureEvents(captureId: string | null): {
   useEffect(() => {
     if (!captureId) return;
     let cancelled = false;
+    // Permanent stop signal set when the HTTP existence probe returns
+    // 404. Separate from ``cancelled`` (which is owned by the effect
+    // cleanup) so a 404 mid-session doesn't have to pretend the
+    // component unmounted — it just stops scheduling reconnects.
+    let permanentlyStopped = false;
     let ws: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
@@ -52,7 +57,7 @@ export function useCaptureEvents(captureId: string | null): {
     let streakProbed = false;
 
     const scheduleReconnect = () => {
-      if (cancelled) return;
+      if (cancelled || permanentlyStopped) return;
       const delay =
         RECONNECT_DELAYS_MS[
           Math.min(attempt, RECONNECT_DELAYS_MS.length - 1)
@@ -62,7 +67,7 @@ export function useCaptureEvents(captureId: string | null): {
     };
 
     const connect = () => {
-      if (cancelled) return;
+      if (cancelled || permanentlyStopped) return;
       const url = wsUrl(`/api/captures/${captureId}/events`);
       ws = new WebSocket(url);
       ws.onopen = () => {
@@ -99,25 +104,28 @@ export function useCaptureEvents(captureId: string | null): {
         }
       };
       ws.onclose = () => {
-        if (cancelled) return;
-        // First failure of THIS disconnect streak: do an HTTP
-        // existence probe so a deleted capture stops the retry loop
-        // even if we previously had a successful session (server
-        // doesn't emit a terminal capture.deleted event the client
-        // can observe before the WS drops). Anything other than a
-        // 404 keeps the backoff loop running so transient outages
-        // recover on their own. ``streakProbed`` re-arms on every
-        // successful onopen so each disconnect streak gets one probe.
+        if (cancelled || permanentlyStopped) return;
+        // Schedule the reconnect FIRST so a slow / hung probe doesn't
+        // delay recovery. The probe runs concurrently and, if it
+        // returns 404, sets ``permanentlyStopped`` + clears the
+        // pending timer so the retry doesn't fire.
+        //
+        // ``streakProbed`` re-arms on every successful onopen so a
+        // capture deleted mid-session still gets probed (and stops)
+        // on the next reconnect streak instead of looping forever.
+        scheduleReconnect();
         if (!streakProbed) {
           streakProbed = true;
           void probeCaptureExists(captureId).then((exists) => {
-            if (cancelled) return;
-            if (exists === false) return; // 404 → permanent stop
-            scheduleReconnect();
+            if (cancelled || permanentlyStopped) return;
+            if (exists !== false) return; // 2xx / 5xx / err → keep retrying
+            permanentlyStopped = true;
+            if (reconnectTimer) {
+              clearTimeout(reconnectTimer);
+              reconnectTimer = null;
+            }
           });
-          return;
         }
-        scheduleReconnect();
       };
       // onerror just precedes onclose for our purposes — let onclose
       // own the reconnect schedule so we don't double-fire.
