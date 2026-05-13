@@ -1,10 +1,10 @@
 # Pebble
 
-[![ci](https://github.com/Battleroid/mobile-gs-scan/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/Battleroid/mobile-gs-scan/actions/workflows/ci.yml)
+[![ci](https://github.com/Battleroid/mobile-gs-scan/actions/workflows/ci.yml/badge.svg)](https://github.com/Battleroid/mobile-gs-scan/actions/workflows/ci.yml)
 [![release](https://github.com/Battleroid/mobile-gs-scan/actions/workflows/release.yml/badge.svg)](https://github.com/Battleroid/mobile-gs-scan/actions/workflows/release.yml)
 [![build-images](https://github.com/Battleroid/mobile-gs-scan/actions/workflows/build-images.yml/badge.svg)](https://github.com/Battleroid/mobile-gs-scan/actions/workflows/build-images.yml)
 [![latest release](https://img.shields.io/github/v/release/Battleroid/mobile-gs-scan?label=release&sort=semver)](https://github.com/Battleroid/mobile-gs-scan/releases/latest)
-[![last commit](https://img.shields.io/github/last-commit/Battleroid/mobile-gs-scan/master?label=commit)](https://github.com/Battleroid/mobile-gs-scan/commits/master)
+[![last commit](https://img.shields.io/github/last-commit/Battleroid/mobile-gs-scan?label=commit)](https://github.com/Battleroid/mobile-gs-scan/commits/)
 
 A small studio for 3D scans. Drop a folder of images or a video at
 the web UI and a single GPU worker on your LAN runs it through SfM →
@@ -59,7 +59,8 @@ is the user-facing identity.
   origin makes development tidy; HTTPS isn't required for any
   current flow).
 - **GitHub Actions** for CI (lint + build of web / worker /
-  android on every PR), GHCR image publish on `main` + `v*` tags,
+  android on every PR), GHCR image publish on the default branch
+  + `v*` tags,
   draft Release on tag, and a branch-name validator that
   enforces the `feature/` / `fix/` / `chore/` / `docs/` /
   `refactor/` / `release/` / `claude/` / `codex/` prefix from
