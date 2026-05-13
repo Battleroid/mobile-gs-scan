@@ -14,6 +14,13 @@ and commits the new section here. Until that first release PR is
 merged, the **Unreleased** section below is a hand-authored
 roll-up so a reader landing here today still has signal.
 
+## [1.0.1](https://github.com/Battleroid/mobile-gs-scan/compare/v1.0.0...v1.0.1) (2026-05-13)
+
+
+### Bug Fixes
+
+* move android version chip to Settings + plumb web build label ([88f425c](https://github.com/Battleroid/mobile-gs-scan/commit/88f425c31553c9cf9ca723b1749216b8d625dd96))
+
 ## 1.0.0 (2026-05-13)
 
 
