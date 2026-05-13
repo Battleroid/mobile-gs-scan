@@ -288,6 +288,7 @@ function MetaRow({
     <div className="mt-2 flex flex-wrap gap-[14px] font-mono text-[12px] text-inkSoft">
       <span>{capture.source}</span>
       <span>{capture.frame_count} frames</span>
+      {capture.total_bytes > 0 && <span>{formatBytes(capture.total_bytes)}</span>}
       {capture.dropped_count > 0 && (
         <span className="text-danger">{capture.dropped_count} dropped</span>
       )}
@@ -621,4 +622,16 @@ function relTime(iso: string): string {
   if (diff < 3_600_000) return `${Math.round(diff / 60_000)} min ago`;
   if (diff < 86_400_000) return `${Math.round(diff / 3_600_000)}h ago`;
   return `${Math.round(diff / 86_400_000)}d ago`;
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let v = n / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${v >= 100 ? v.toFixed(0) : v.toFixed(1)} ${units[i]}`;
 }

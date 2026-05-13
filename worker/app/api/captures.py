@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,12 @@ class CaptureView(BaseModel):
     source: CaptureSource
     frame_count: int
     dropped_count: int
+    # Total bytes of the on-disk frames directory. Recomputed on
+    # every GET via a dirent walk — see _capture_total_bytes for the
+    # rationale (no schema column, no write-path bookkeeping). 0 for
+    # captures whose frames dir hasn't materialised yet (created but
+    # never uploaded) and for video uploads pre-extract.
+    total_bytes: int
     has_pose: bool
     meta: dict[str, Any]
     error: str | None
@@ -73,12 +80,48 @@ class CaptureView(BaseModel):
     updated_at: str
 
 
+def _capture_total_bytes(capture_id: str) -> int:
+    """Sum the on-disk frames directory for a capture.
+
+    Walked on every GET rather than persisted because a dirent scan
+    is cheap (~10 ms for 1000 entries on SSD; OS dirent cache makes
+    repeat reads near-free) and the alternative — a ``total_bytes``
+    column plus update-on-upload bookkeeping — adds a schema
+    migration, a write path in every ingest route, and a drift risk
+    if any path forgets to update it.
+
+    Only the ``frames/`` directory is summed. Source videos (for
+    video uploads pre-extract) and poses.jsonl live elsewhere; once
+    extract has run they get reflected here via the JPEG frames it
+    writes. Matches what the user-facing "frame count" line measures.
+    """
+    settings = get_settings()
+    d = settings.captures_dir() / capture_id / "frames"
+    if not d.exists():
+        return 0
+    total = 0
+    try:
+        with os.scandir(d) as it:
+            for entry in it:
+                # ``entry.is_file()`` consults the cached dirent type
+                # and avoids an extra stat in the common case.
+                if entry.is_file():
+                    total += entry.stat().st_size
+    except OSError:
+        # Directory disappeared between exists() and scandir() — racy
+        # with a concurrent delete_capture, which is allowed to win.
+        # Treat as zero.
+        return 0
+    return total
+
+
 def _to_view(
     cap: Capture,
     scene_id: str | None = None,
     *,
     thumb_url: str | None = None,
     orbit_url: str | None = None,
+    total_bytes: int = 0,
 ) -> CaptureView:
     return CaptureView(
         id=cap.id,
@@ -87,6 +130,14 @@ def _to_view(
         source=cap.source,
         frame_count=cap.frame_count,
         dropped_count=cap.dropped_count,
+        # 0 in list / create responses; populated in single-capture
+        # paths (detail GET, rename, WS snapshot) where the extra
+        # dirent walk is amortised over a single request. Computing
+        # it in the list response would turn ``GET /api/captures``
+        # into O(captures × frames) synchronous I/O on the event
+        # loop, which dominates list latency on shelves with hundreds
+        # of frames per capture.
+        total_bytes=total_bytes,
         has_pose=cap.has_pose,
         meta=cap.meta,
         error=cap.error,
@@ -159,11 +210,17 @@ async def get_capture(capture_id: str) -> CaptureView:
         raise HTTPException(404, "capture not found")
     scene = await store.get_scene_for_capture(cap.id)
     thumb_url, orbit_url = _scene_thumb_orbit_urls(scene)
+    # Offload the dirent walk to a thread so even a capture with
+    # thousands of frames doesn't block the event loop. Single
+    # capture per request — the per-request cost is bounded and
+    # the home grid's list path stays free of this work entirely.
+    total_bytes = await asyncio.to_thread(_capture_total_bytes, cap.id)
     return _to_view(
         cap,
         scene_id=scene.id if scene else None,
         thumb_url=thumb_url,
         orbit_url=orbit_url,
+        total_bytes=total_bytes,
     )
 
 
@@ -183,12 +240,14 @@ async def rename_capture(capture_id: str, body: CaptureRename) -> CaptureView:
     assert cap is not None  # re-read; row exists per the check above
     scene = await store.get_scene_for_capture(cap.id)
     thumb_url, orbit_url = _scene_thumb_orbit_urls(scene)
+    total_bytes = await asyncio.to_thread(_capture_total_bytes, cap.id)
     await events.publish_capture(cap.id, "capture.renamed", name=new_name)
     return _to_view(
         cap,
         scene_id=scene.id if scene else None,
         thumb_url=thumb_url,
         orbit_url=orbit_url,
+        total_bytes=total_bytes,
     )
 
 
@@ -433,6 +492,7 @@ async def capture_events_endpoint(ws: WebSocket, capture_id: str) -> None:
     try:
         scene = await store.get_scene_for_capture(cap.id)
         thumb_url, orbit_url = _scene_thumb_orbit_urls(scene)
+        total_bytes = await asyncio.to_thread(_capture_total_bytes, cap.id)
         await ws.send_text(
             json.dumps(
                 {
@@ -443,6 +503,7 @@ async def capture_events_endpoint(ws: WebSocket, capture_id: str) -> None:
                         scene_id=scene.id if scene else None,
                         thumb_url=thumb_url,
                         orbit_url=orbit_url,
+                        total_bytes=total_bytes,
                     ).model_dump(),
                 }
             )
