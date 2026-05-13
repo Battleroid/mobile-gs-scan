@@ -65,3 +65,21 @@ body > * {
   position: relative;
   z-index: 1;
 }
+
+/* Pulse halo for running pipeline status dots. The shadow swells from
+ * 0 → 6 px and fades from 55 % → 0 % opacity, giving a soft "this is
+ * actively chewing on something" beat. Used by PipelineJobRow when a
+ * job is in the running state. */
+@keyframes pulse-dot {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 90, 54, 0.55);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(255, 90, 54, 0);
+  }
+}
+
+.pulse-dot {
+  animation: pulse-dot 1.6s ease-in-out infinite;
+}

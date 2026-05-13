@@ -1,7 +1,33 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { wsUrl } from "@/lib/api";
+import { api, wsUrl } from "@/lib/api";
 import type { Scene, ServerEvent } from "@/lib/types";
+
+// Capped exponential backoff for WS reconnects (1s → 2s → 4s → 8s
+// → 15s). Mirrored in useCaptureEvents — the symptom we're fixing is
+// "had to refresh to see progress", which is a silent WS disconnect
+// with no client-side reconnect; both hooks need the same recovery.
+const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
+
+// Probe cooldown — see useCaptureEvents for the rationale.
+const PROBE_COOLDOWN_MS = 30_000;
+
+// HTTP existence probe — see useCaptureEvents for the full rationale.
+// Returns false on 404 (resource deleted, stop retrying), true on a
+// 2xx (resource exists, keep retrying), null on 5xx / network error
+// (couldn't tell, keep retrying).
+async function probeSceneExists(sceneId: string): Promise<boolean | null> {
+  try {
+    const res = await fetch(`${api.base()}/api/scenes/${sceneId}`, {
+      method: "GET",
+    });
+    if (res.status === 404) return false;
+    if (res.ok) return true;
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 export interface EditResult {
   kept: number;
@@ -51,9 +77,44 @@ export function useSceneEvents(sceneId: string | null): {
 
   useEffect(() => {
     if (!sceneId) return;
-    const url = wsUrl(`/api/scenes/${sceneId}/events`);
-    const ws = new WebSocket(url);
-    ws.onmessage = (e) => {
+    let cancelled = false;
+    // Permanent stop signal set when the HTTP existence probe returns
+    // 404 — see useCaptureEvents for the full rationale.
+    let permanentlyStopped = false;
+    let ws: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let attempt = 0;
+    // Cooldown timestamp for the existence probe — see
+    // useCaptureEvents for the full rationale. Probe fires at most
+    // once per PROBE_COOLDOWN_MS so long outages still get periodic
+    // re-checks if the resource gets deleted mid-outage.
+    let lastProbeAt = 0;
+
+    const scheduleReconnect = () => {
+      if (cancelled || permanentlyStopped) return;
+      const delay =
+        RECONNECT_DELAYS_MS[
+          Math.min(attempt, RECONNECT_DELAYS_MS.length - 1)
+        ];
+      attempt += 1;
+      reconnectTimer = setTimeout(connect, delay);
+    };
+
+    const connect = () => {
+      if (cancelled || permanentlyStopped) return;
+      const url = wsUrl(`/api/scenes/${sceneId}/events`);
+      ws = new WebSocket(url);
+      ws.onopen = () => {
+        attempt = 0;
+        // No REST snapshot refetch on reconnect. The server sends a
+        // ``snapshot`` event on every ``ws.accept()``; ``onmessage``
+        // is attached synchronously before any frame can arrive, so
+        // the snapshot WS event is guaranteed to reach the client.
+        // A concurrent REST fetch would race the in-flight WS
+        // ``job.progress`` / ``scene.*`` events on the socket and
+        // could roll back recently-applied incremental updates.
+      };
+      ws.onmessage = (e) => {
       try {
         const evt = JSON.parse(e.data) as ServerEvent;
         setLastEvent(evt);
@@ -221,8 +282,37 @@ export function useSceneEvents(sceneId: string | null): {
       } catch {
         // ignore
       }
+      };
+      ws.onclose = () => {
+        if (cancelled || permanentlyStopped) return;
+        // Schedule reconnect FIRST so a slow probe doesn't delay
+        // recovery. Probe runs concurrently with PROBE_COOLDOWN_MS
+        // throttling so long outages still get periodic re-checks
+        // — see useCaptureEvents for the full rationale.
+        scheduleReconnect();
+        const now = Date.now();
+        if (now - lastProbeAt >= PROBE_COOLDOWN_MS) {
+          lastProbeAt = now;
+          void probeSceneExists(sceneId).then((exists) => {
+            if (cancelled || permanentlyStopped) return;
+            if (exists !== false) return; // 2xx / 5xx / err → keep retrying
+            permanentlyStopped = true;
+            if (reconnectTimer) {
+              clearTimeout(reconnectTimer);
+              reconnectTimer = null;
+            }
+          });
+        }
+      };
     };
-    return () => ws.close();
+
+    connect();
+
+    return () => {
+      cancelled = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (ws) ws.close();
+    };
   }, [sceneId]);
 
   return { scene, lastEvent, editProgress, lastEditResult, meshProgress };
