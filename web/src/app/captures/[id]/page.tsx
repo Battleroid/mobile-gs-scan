@@ -436,8 +436,7 @@ function PipelineJobRow({ job }: { job: Job }) {
             className={clsx(
               "h-[8px] w-[8px] rounded-full",
               dot,
-              job.status === "running" &&
-                "shadow-[0_0_0_4px_rgba(255,90,54,0.18)]",
+              job.status === "running" && "pulse-dot",
             )}
           />
           <span className="font-mono text-[13px] font-semibold">

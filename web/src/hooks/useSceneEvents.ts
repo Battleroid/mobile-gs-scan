@@ -3,6 +3,12 @@ import { useEffect, useRef, useState } from "react";
 import { wsUrl } from "@/lib/api";
 import type { Scene, ServerEvent } from "@/lib/types";
 
+// Capped exponential backoff for WS reconnects (1s → 2s → 4s → 8s
+// → 15s). Mirrored in useCaptureEvents — the symptom we're fixing is
+// "had to refresh to see progress", which is a silent WS disconnect
+// with no client-side reconnect; both hooks need the same recovery.
+const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
+
 export interface EditResult {
   kept: number;
   total: number;
@@ -51,9 +57,28 @@ export function useSceneEvents(sceneId: string | null): {
 
   useEffect(() => {
     if (!sceneId) return;
-    const url = wsUrl(`/api/scenes/${sceneId}/events`);
-    const ws = new WebSocket(url);
-    ws.onmessage = (e) => {
+    let cancelled = false;
+    let ws: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let attempt = 0;
+
+    const connect = () => {
+      if (cancelled) return;
+      const url = wsUrl(`/api/scenes/${sceneId}/events`);
+      ws = new WebSocket(url);
+      ws.onopen = () => {
+        attempt = 0;
+        // Re-fetch the canonical snapshot on every (re)connect. The
+        // server sends one as part of the WS handshake, but a silent
+        // disconnect-reconnect cycle would otherwise leave the page
+        // on stale state for any events that fired during the gap.
+        // Belt-and-braces with the snapshot WS event.
+        const gen = ++refreshGen.current;
+        void refreshScene(sceneId).then((next) => {
+          if (next && !cancelled && gen === refreshGen.current) setScene(next);
+        });
+      };
+      ws.onmessage = (e) => {
       try {
         const evt = JSON.parse(e.data) as ServerEvent;
         setLastEvent(evt);
@@ -221,8 +246,25 @@ export function useSceneEvents(sceneId: string | null): {
       } catch {
         // ignore
       }
+      };
+      ws.onclose = () => {
+        if (cancelled) return;
+        const delay =
+          RECONNECT_DELAYS_MS[
+            Math.min(attempt, RECONNECT_DELAYS_MS.length - 1)
+          ];
+        attempt += 1;
+        reconnectTimer = setTimeout(connect, delay);
+      };
     };
-    return () => ws.close();
+
+    connect();
+
+    return () => {
+      cancelled = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (ws) ws.close();
+    };
   }, [sceneId]);
 
   return { scene, lastEvent, editProgress, lastEditResult, meshProgress };
