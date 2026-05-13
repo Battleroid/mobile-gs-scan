@@ -2,7 +2,10 @@
 // style displays. Order of preference:
 //   1. APP_BUILD_LABEL env var (set by CI for tagged releases — empty
 //      string is honored, yielding a clean ``v0.1.0`` with no SHA).
-//   2. Repo-root VERSION file + short git SHA (the dev / master path).
+//   2. Repo-root version.txt file + short git SHA (the dev / master
+//      path). The filename matches release-please's ``simple``
+//      release-type default so its release PR can bump the file
+//      without any extra config.
 //   3. Bare "0.1.0" fallback for sandboxed builds with no git context.
 //
 // Read once at config evaluation time (build) so the resulting string
@@ -20,9 +23,9 @@ function resolveAppVersion() {
   }
   let base = "0.1.0";
   try {
-    base = readFileSync(resolve(__dirname, "..", "VERSION"), "utf8").trim();
+    base = readFileSync(resolve(__dirname, "..", "version.txt"), "utf8").trim();
   } catch {
-    /* repo-root VERSION missing — use the default */
+    /* repo-root version.txt missing — use the default */
   }
   let sha = "";
   try {

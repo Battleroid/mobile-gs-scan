@@ -1,7 +1,7 @@
 # Pebble
 
 [![ci](https://github.com/Battleroid/mobile-gs-scan/actions/workflows/ci.yml/badge.svg)](https://github.com/Battleroid/mobile-gs-scan/actions/workflows/ci.yml)
-[![release](https://github.com/Battleroid/mobile-gs-scan/actions/workflows/release.yml/badge.svg)](https://github.com/Battleroid/mobile-gs-scan/actions/workflows/release.yml)
+[![release-please](https://github.com/Battleroid/mobile-gs-scan/actions/workflows/release-please.yml/badge.svg)](https://github.com/Battleroid/mobile-gs-scan/actions/workflows/release-please.yml)
 [![build-images](https://github.com/Battleroid/mobile-gs-scan/actions/workflows/build-images.yml/badge.svg)](https://github.com/Battleroid/mobile-gs-scan/actions/workflows/build-images.yml)
 [![latest release](https://img.shields.io/github/v/release/Battleroid/mobile-gs-scan?label=release&sort=semver)](https://github.com/Battleroid/mobile-gs-scan/releases/latest)
 [![last commit](https://img.shields.io/github/last-commit/Battleroid/mobile-gs-scan?label=commit)](https://github.com/Battleroid/mobile-gs-scan/commits/)

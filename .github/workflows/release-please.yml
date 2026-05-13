@@ -1,0 +1,111 @@
+name: release-please
+
+# release-please is the release-driver this repo uses. On every push
+# to the default branch:
+#
+#   1. ``release-please-action`` inspects conventional-commit
+#      messages since the last ``vX.Y.Z`` tag, computes the next
+#      version (``feat`` → minor, ``fix`` → patch, ``BREAKING
+#      CHANGE`` → major, ``chore`` / ``docs`` / ``ci`` alone → no
+#      bump), and opens/updates a "release PR" titled
+#      ``chore(main): release vX.Y.Z``. The PR bumps ``VERSION``
+#      and prepends a freshly-generated section to ``CHANGELOG.md``.
+#   2. When that release PR is merged, the same workflow run that
+#      release-please fires on the merge commit also CREATES the
+#      tag + GitHub Release. Output ``release_created`` flips to
+#      ``true`` for that specific run.
+#   3. The downstream ``apk`` job in this same workflow sees
+#      ``release_created=true`` and builds the Android APK with a
+#      clean ``vX.Y.Z`` ``versionName`` (no +sha suffix), then
+#      uploads it as a release asset on the just-created release.
+#
+# Keeping everything in one workflow sidesteps the GitHub Actions
+# "GITHUB_TOKEN-triggered events don't fire other workflows"
+# behavior — the apk job runs in-process via ``needs:``, no
+# downstream trigger involved.
+
+on:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  # ─── Open/merge the release PR ─────────────────────────────────
+  release-please:
+    name: release-please
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+      version: ${{ steps.rp.outputs.version }}
+      upload_url: ${{ steps.rp.outputs.upload_url }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: rp
+        with:
+          # ``simple`` release type: ``version.txt`` at the repo
+          # root is the single source of truth for the package
+          # version. release-please bumps it + maintains
+          # CHANGELOG.md; no per-language manifest indirection
+          # (which the node / python / java release-types would
+          # require). ``version.txt`` is the filename release-
+          # please's simple strategy reads + writes by default,
+          # which is why our build configs read from that path
+          # too.
+          release-type: simple
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # ─── Build APK + attach to the release ─────────────────────────
+  apk:
+    name: build apk
+    needs: release-please
+    # Only build when release-please actually cut a release (i.e.
+    # the run that fires on the merge of a release PR). Every other
+    # push to the default branch — feature merges, doc tweaks —
+    # exits the workflow after release-please opens/updates its
+    # release PR.
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Check out the freshly-created tag so the APK's
+          # ``versionName`` reflects the released version, not the
+          # branch head.
+          ref: ${{ needs.release-please.outputs.tag_name }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: bootstrap gradle wrapper
+        run: gradle wrapper --gradle-version 8.10
+      - name: set version label
+        # Clean version (no +sha suffix). The base ``versionName``
+        # already comes from version.txt via build.gradle.kts; we
+        # override APP_BUILD_LABEL so the SHA suffix isn't
+        # appended for tagged builds.
+        run: |
+          echo "APP_BUILD_LABEL=${{ needs.release-please.outputs.version }}" >> "$GITHUB_ENV"
+      - name: assemble debug
+        # Debug build still — release signing is unconfigured. When
+        # signing lands, switch to assembleRelease and add the
+        # keystore secrets here.
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
+      - name: rename APK for release
+        run: |
+          src="app/build/outputs/apk/debug/app-debug.apk"
+          dst="app/build/outputs/apk/debug/pebble-v${{ needs.release-please.outputs.version }}.apk"
+          cp "$src" "$dst"
+      - name: upload APK to release
+        uses: softprops/action-gh-release@v2
+        with:
+          # Attach to the release release-please just created.
+          tag_name: ${{ needs.release-please.outputs.tag_name }}
+          files: android/app/build/outputs/apk/debug/pebble-v*.apk
