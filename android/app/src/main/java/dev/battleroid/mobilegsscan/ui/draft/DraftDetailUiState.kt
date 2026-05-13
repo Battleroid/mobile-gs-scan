@@ -2,6 +2,7 @@ package dev.battleroid.mobilegsscan.ui.draft
 
 import androidx.compose.runtime.Immutable
 import dev.battleroid.mobilegsscan.DraftMeta
+import java.io.File
 
 /**
  * Snapshot the [DraftDetailScreen] composable renders from.
@@ -26,6 +27,11 @@ data class DraftDetailUiState(
      *  Compose port keeps a state field instead so the screen can
      *  drive a Compose Material3 dialog. */
     val uploadError: String?,
+    /** First captured JPEG in the draft's frames dir, or null when
+     *  the draft was created but never captured into. Refreshed
+     *  alongside ``totalBytes`` in onResume. Used as the hero
+     *  preview so the user sees what they actually scanned. */
+    val thumbnailFile: File? = null,
 ) {
     companion object {
         val Initial: DraftDetailUiState = DraftDetailUiState(
@@ -33,6 +39,7 @@ data class DraftDetailUiState(
             totalBytes = 0L,
             upload = null,
             uploadError = null,
+            thumbnailFile = null,
         )
     }
 }

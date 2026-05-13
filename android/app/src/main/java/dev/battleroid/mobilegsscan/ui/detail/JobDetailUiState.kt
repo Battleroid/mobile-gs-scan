@@ -17,6 +17,11 @@ data class JobDetailUiState(
      *  this for running/claimed jobs and kept it manually toggleable
      *  afterwards; same semantics here. */
     val log: LogPanelState,
+    /** Absolute URL of the scene's thumbnail PNG, if any. The
+     *  activity fetches the scene once per session to populate this
+     *  so the job header can show what the user's looking at while
+     *  drilling into pipeline detail. */
+    val thumbAbsoluteUrl: String? = null,
 )
 
 @Immutable

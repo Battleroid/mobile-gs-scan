@@ -116,8 +116,9 @@ class DraftDetailActivity : ComponentActivity() {
         // frames since File.length() is a stat call, not a read.
         val bytes = d.frameFiles().sumOf { it.length() } +
             (d.posesFileOrNull()?.length() ?: 0L)
+        val thumb = d.thumbnailFile()
         state.update {
-            it.copy(meta = d.meta, totalBytes = bytes)
+            it.copy(meta = d.meta, totalBytes = bytes, thumbnailFile = thumb)
         }
     }
 

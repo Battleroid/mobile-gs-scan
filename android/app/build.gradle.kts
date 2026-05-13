@@ -75,6 +75,11 @@ dependencies {
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.navigation.compose)
+    // Coil — Compose AsyncImage for static thumbnails. Pulls in
+    // coil-network-okhttp transitively; reuses OkHttp's HTTP cache
+    // semantics so a flaky studio link doesn't manifest as torn
+    // thumbnails.
+    implementation(libs.coil.compose)
     // ui-tooling is the heavyweight @Preview runtime — stays in
     // debugImplementation so it doesn't bloat the release APK.
     debugImplementation(libs.androidx.compose.ui.tooling)

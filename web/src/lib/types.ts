@@ -26,6 +26,12 @@ export interface Capture {
   meta: Record<string, unknown>;
   error: string | null;
   scene_id: string | null;
+  // Inlined from the scene's URLs so list endpoints don't force
+  // every client into an N+1 scene fetch. Web home already renders
+  // from scene snapshots directly, so these fields are usually
+  // unread on this side — kept for type fidelity with the server.
+  thumb_url: string | null;
+  orbit_url: string | null;
   created_at: string;
   updated_at: string;
 }
