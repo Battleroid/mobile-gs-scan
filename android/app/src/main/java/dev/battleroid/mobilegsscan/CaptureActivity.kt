@@ -379,6 +379,17 @@ class CaptureActivity : ComponentActivity() {
         //   * user tapped Start but Finished / backed out before any
         //     frame landed on disk (gate flipped, frames = 0)
         if (frames == 0) {
+            // Stop the GL thread before deleting — otherwise an
+            // in-flight `onDrawFrame` that already passed its
+            // `if (!captureGateActive) return` check can race into
+            // `appendFrame` against a just-deleted draft directory
+            // and trigger a `frame write failed` toast on a screen
+            // the user has already backed out of. Flipping the gate
+            // doesn't fully eliminate the race (a frame that's
+            // already past the gate-check still completes), but the
+            // appendFrame try/catch swallows that one exception
+            // cleanly — and any subsequent draw call short-circuits.
+            captureGateActive = false
             draft?.delete()
             finish()
             return
