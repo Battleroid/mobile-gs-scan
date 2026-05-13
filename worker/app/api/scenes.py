@@ -65,8 +65,47 @@ class SceneView(BaseModel):
     completed_at: str | None
 
 
+def _collapse_thumb_orbit_history(jobs: list) -> list:
+    """Hide superseded thumbnail / orbit rows from the API response.
+
+    Each filter apply / discard enqueues a fresh thumbnail+orbit
+    pair (see app.jobs.thumb_regen.enqueue_regen) — by design, so the
+    new render reflects the latest source PLY. But the prior rows
+    stay in the DB after the regen lands, and the pipeline UI on web
+    + Android shows every row from ``scene.jobs``, so after a handful
+    of filter cycles the pipeline list grows several thumbnail and
+    orbit entries even though only the most-recent of each is
+    meaningful to the user.
+
+    Collapse the history at serialization time: keep all non-(thumb,
+    orbit) rows verbatim, and for each of those two kinds keep only
+    the most-recently-created row. Audit rows stay in the DB; this
+    is purely a view filter. Filter / mesh history is intentionally
+    NOT collapsed — those are user-initiated and the row count
+    matches user intent (one click = one row).
+    """
+    collapsible = {JobKind.thumbnail, JobKind.orbit}
+    latest_by_kind: dict[JobKind, object] = {}
+    out: list = []
+    for j in jobs:
+        if j.kind in collapsible:
+            existing = latest_by_kind.get(j.kind)
+            if existing is None or j.created_at > existing.created_at:
+                latest_by_kind[j.kind] = j
+        else:
+            out.append(j)
+    out.extend(latest_by_kind.values())
+    # Preserve creation order across the merged list so the UI's
+    # pipeline rendering stays consistent (mirrors the natural
+    # extract → sfm → train → export → thumbnail → orbit sequence
+    # for a fresh capture).
+    out.sort(key=lambda j: j.created_at)
+    return out
+
+
 async def _to_view(scene: Scene) -> SceneView:
     jobs = await store.list_jobs_for_scene(scene.id)
+    jobs = _collapse_thumb_orbit_history(jobs)
     edit_status = (
         scene.edit_status.value
         if scene.edit_status is not None
