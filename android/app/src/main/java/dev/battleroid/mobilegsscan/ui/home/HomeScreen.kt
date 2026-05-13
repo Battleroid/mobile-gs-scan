@@ -207,10 +207,13 @@ private fun HomeHeader(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
-        // Left: PebbleMark + wordmark. Mark is rendered as a Compose
-        // Canvas in [PebbleMark] later; for the foundation PR we
-        // use a tomato circle as a placeholder so the header layout
-        // is solid without dragging in the mark composable yet.
+        // Left: PebbleMark + wordmark + build-label chip. Mark is
+        // rendered as a Compose Canvas in [PebbleMark] later; for the
+        // foundation PR we use a tomato circle as a placeholder so
+        // the header layout is solid without dragging in the mark
+        // composable yet. The chip pins ``v<base>+<sha>`` from
+        // BuildConfig so a user reporting a bug can read the exact
+        // commit they're on without rummaging through Settings.
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
                 modifier = Modifier
@@ -226,6 +229,8 @@ private fun HomeHeader(
                 ),
                 color = pebble.ink,
             )
+            Spacer(Modifier.size(10.dp))
+            VersionChip()
         }
 
         // Right: live studio pill + gear button.
@@ -234,6 +239,47 @@ private fun HomeHeader(
             Spacer(Modifier.size(6.dp))
             SettingsButton(onClick = onSettingsClick)
         }
+    }
+}
+
+@Composable
+private fun VersionChip() {
+    val pebble = MaterialTheme.pebble
+    // Render the EXACT versionName the APK was packaged with — i.e.
+    // ``BuildConfig.VERSION_NAME``. Reconstructing the label from
+    // APP_BASE_VERSION + APP_BUILD_SHA would diverge from versionName
+    // whenever CI overrides it via APP_BUILD_LABEL (tagged releases
+    // ship ``0.1.0``; dev builds ship ``0.1.0+ab12cd3``). For
+    // readability the SHA suffix is rendered with a bullet separator
+    // instead of the plus sign — the underlying versionName stays
+    // semver-compliant.
+    val rawVersion = dev.battleroid.mobilegsscan.BuildConfig.VERSION_NAME
+    val label = "v" + rawVersion.replaceFirst('+', ' ').let { withSpace ->
+        // Two segments: ``base sha`` (after the swap) → render as
+        // ``base · sha``. One segment (no SHA): leave as is.
+        val parts = withSpace.split(' ', limit = 2)
+        if (parts.size == 2 && parts[1].isNotBlank()) {
+            "${parts[0]} · ${parts[1]}"
+        } else {
+            parts[0]
+        }
+    }
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .border(
+                width = 1.dp,
+                color = pebble.rule,
+                shape = RoundedCornerShape(999.dp),
+            )
+            .padding(horizontal = 8.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = pebble.inkMuted,
+        )
     }
 }
 
