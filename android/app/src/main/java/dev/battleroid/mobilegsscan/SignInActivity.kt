@@ -50,7 +50,22 @@ class SignInActivity : ComponentActivity() {
     }
 
     private fun onEnterUrl() {
-        startActivity(Intent(this, ServerConfigActivity::class.java))
+        // Don't push Settings directly — if the user reached SignIn
+        // via Profile → "Sign out", there's a Settings activity
+        // underneath in the back stack. Starting another one stacks
+        // them; Back from the new Settings returns to the old one
+        // rather than Home, which is confusing.
+        //
+        // Route through MainActivity with CLEAR_TOP so any prior
+        // Settings / Profile / SignIn in the back stack collapses
+        // to Main, then push a fresh Settings on top. Back from
+        // Settings now goes to Home regardless of how SignIn was
+        // reached.
+        val home = Intent(this, MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        }
+        val settings = Intent(this, ServerConfigActivity::class.java)
+        startActivities(arrayOf(home, settings))
         finish()
     }
 }

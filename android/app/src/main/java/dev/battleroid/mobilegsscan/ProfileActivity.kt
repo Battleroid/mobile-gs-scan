@@ -6,24 +6,39 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import dev.battleroid.mobilegsscan.ui.profile.ProfileScreen
 import dev.battleroid.mobilegsscan.ui.profile.ProfileUiState
 import dev.battleroid.mobilegsscan.ui.theme.PebbleTheme
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * Profile screen — Pebble's account / device summary surface.
  *
- * Auth fields ([displayName], [email]) are placeholder literals
- * because real auth is deferred (per the original Phase 1 plan).
- * Device fields ([deviceModel], [appVersion], etc.) come from the
+ * Auth fields ([ProfileUiState.displayName], [ProfileUiState.email])
+ * are placeholder literals because real auth is deferred (per the
+ * original Phase 1 plan). Device + pairing fields come from the
  * runtime so what's shown is real.
  *
  * Reachable from [ServerConfigActivity]'s header — there's no slot
  * for a profile button on the home header in the design source.
  * "Sign out" routes to [SignInActivity]; "Unpair this device"
  * clears the studio URL pref and routes to SignIn.
+ *
+ * Pairing/host state is held in a StateFlow rebuilt in onResume so
+ * a round-trip into Settings (which can change the studio URL)
+ * reflects on return — without that the paired chip + host
+ * subtitle would show stale values until the activity is
+ * recreated.
  */
 class ProfileActivity : ComponentActivity() {
+    private val state: MutableStateFlow<ProfileUiState> by lazy {
+        MutableStateFlow(buildState())
+    }
+    private val uiState: StateFlow<ProfileUiState> by lazy { state.asStateFlow() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -31,8 +46,9 @@ class ProfileActivity : ComponentActivity() {
 
         setContent {
             PebbleTheme {
+                val current by uiState.collectAsState()
                 ProfileScreen(
-                    state = buildState(),
+                    state = current,
                     onBackClick = { finish() },
                     onSettingsClick = ::openSettings,
                     onSignOutClick = ::onSignOut,
@@ -40,6 +56,14 @@ class ProfileActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Studio URL may have been edited from Settings in the
+        // round-trip; rebuild to refresh the paired chip + host
+        // subtitle. Cheap — just reads prefs + a few Build fields.
+        state.value = buildState()
     }
 
     private fun buildState(): ProfileUiState {
