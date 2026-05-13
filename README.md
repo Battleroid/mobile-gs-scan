@@ -1,5 +1,11 @@
 # Pebble
 
+[![ci](https://github.com/Battleroid/mobile-gs-scan/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/Battleroid/mobile-gs-scan/actions/workflows/ci.yml)
+[![release](https://github.com/Battleroid/mobile-gs-scan/actions/workflows/release.yml/badge.svg)](https://github.com/Battleroid/mobile-gs-scan/actions/workflows/release.yml)
+[![build-images](https://github.com/Battleroid/mobile-gs-scan/actions/workflows/build-images.yml/badge.svg)](https://github.com/Battleroid/mobile-gs-scan/actions/workflows/build-images.yml)
+[![latest release](https://img.shields.io/github/v/release/Battleroid/mobile-gs-scan?label=release&sort=semver)](https://github.com/Battleroid/mobile-gs-scan/releases/latest)
+[![last commit](https://img.shields.io/github/last-commit/Battleroid/mobile-gs-scan/master?label=commit)](https://github.com/Battleroid/mobile-gs-scan/commits/master)
+
 A small studio for 3D scans. Drop a folder of images or a video at
 the web UI and a single GPU worker on your LAN runs it through SfM →
 splatfacto → export, and serves the result back in a browser-side
