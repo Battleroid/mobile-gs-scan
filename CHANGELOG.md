@@ -9,9 +9,11 @@ different rendering.
 
 ## [Unreleased]
 
-Working snapshot of `master` since the last release tag. Tag a new
-`vX.Y.Z` (after bumping `VERSION`) to flush these entries into a
-versioned section and cut a downloadable APK release.
+Working snapshot of the default branch since the last release tag.
+Bump the top-level `VERSION` file in a PR and merge it — the
+release workflow auto-tags the merge commit as `vX.Y.Z`, regenerates
+this file, attaches the Android APK to a GitHub Release, and pushes
+the changelog back. No manual `git tag` required.
 
 <!-- The seed body below is a brief roll-up of work to date so a
      reader landing here before the first tag still has signal.
