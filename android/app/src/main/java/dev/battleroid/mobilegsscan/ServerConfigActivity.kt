@@ -74,9 +74,14 @@ class ServerConfigActivity : ComponentActivity() {
                     },
                     onSaveClick = ::onSave,
                     onBackClick = { finish() },
+                    onProfileClick = ::openProfile,
                 )
             }
         }
+    }
+
+    private fun openProfile() {
+        startActivity(android.content.Intent(this, ProfileActivity::class.java))
     }
 
     private fun onSave() {

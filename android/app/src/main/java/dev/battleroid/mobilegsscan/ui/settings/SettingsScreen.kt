@@ -76,6 +76,7 @@ fun SettingsScreen(
     onOverlayAlphaPctChange: (Int) -> Unit,
     onSaveClick: () -> Unit,
     onBackClick: () -> Unit,
+    onProfileClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val pebble = MaterialTheme.pebble
@@ -92,7 +93,7 @@ fun SettingsScreen(
                 WindowInsets.statusBars.only(WindowInsetsSides.Top)
             ),
     ) {
-        Header(onBackClick = onBackClick)
+        Header(onBackClick = onBackClick, onProfileClick = onProfileClick)
 
         Column(
             modifier = Modifier
@@ -208,7 +209,7 @@ fun SettingsScreen(
 }
 
 @Composable
-private fun Header(onBackClick: () -> Unit) {
+private fun Header(onBackClick: () -> Unit, onProfileClick: () -> Unit) {
     val pebble = MaterialTheme.pebble
     Row(
         modifier = Modifier
@@ -238,7 +239,35 @@ private fun Header(onBackClick: () -> Unit) {
                 fontWeight = FontWeight.SemiBold,
             ),
             color = pebble.ink,
+            modifier = Modifier.weight(1f),
         )
+        // Profile entry. Sits opposite the back arrow on the right
+        // — Settings is the discoverable hop into Profile this PR;
+        // the design source doesn't surface a profile button on
+        // the home header, so this is the natural slot.
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .clip(androidx.compose.foundation.shape.CircleShape)
+                .background(pebble.chip2)
+                .border(
+                    width = 1.dp,
+                    color = pebble.rule,
+                    shape = androidx.compose.foundation.shape.CircleShape,
+                )
+                .clickable(onClick = onProfileClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            // "MW" placeholder mirrors the design's profile avatar
+            // initials. Replaced with real initials when auth ships.
+            Text(
+                text = "MW",
+                style = MaterialTheme.typography.labelMedium.copy(
+                    fontWeight = FontWeight.SemiBold,
+                ),
+                color = pebble.ink,
+            )
+        }
     }
 }
 
@@ -548,6 +577,7 @@ private fun SettingsScreenPreview() {
             onOverlayAlphaPctChange = {},
             onSaveClick = {},
             onBackClick = {},
+            onProfileClick = {},
         )
     }
 }
