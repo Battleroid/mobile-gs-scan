@@ -11,6 +11,7 @@ import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -146,6 +147,20 @@ class CaptureActivity : ComponentActivity() {
         state.update {
             it.copy(sessionName = draft?.meta?.name.orEmpty())
         }
+
+        // Back-press handler: route through the same logic as
+        // tapping FINISH. A user who hit "+ new" then backed out
+        // without recording anything used to leave an empty draft
+        // sitting on the home screen; mirror onFinishTapped so the
+        // gesture cleans up after itself. With frames recorded,
+        // back surfaces the three-way Finish prompt — same as
+        // tapping the CTA — so the user doesn't accidentally lose
+        // work to a stray gesture.
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                onFinishTapped()
+            }
+        })
 
         setContent {
             PebbleTheme {
@@ -348,8 +363,16 @@ class CaptureActivity : ComponentActivity() {
     }
 
     private fun onFinishTapped() {
-        if (!captureGateActive) {
-            // Never started — discard the empty draft and back out.
+        val frames = draft?.meta?.frame_count ?: 0
+        // No frames committed → always discard. Covers:
+        //   * user hit "+ new" and immediately backed out (most
+        //     common — used to leave an orphan 0-frame draft on the
+        //     home screen)
+        //   * user tapped Start but Finished / backed out before any
+        //     frame landed on disk
+        // Either way there's nothing to upload, no recovery value
+        // in keeping the draft directory around.
+        if (!captureGateActive || frames == 0) {
             draft?.delete()
             finish()
             return
@@ -359,7 +382,7 @@ class CaptureActivity : ComponentActivity() {
         captureGateActive = false
         state.update { it.copy(captureActive = false) }
         dialogs.update {
-            it.copy(finishPrompt = FinishPrompt(frameCount = draft?.meta?.frame_count ?: 0))
+            it.copy(finishPrompt = FinishPrompt(frameCount = frames))
         }
     }
 
