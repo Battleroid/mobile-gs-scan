@@ -78,8 +78,11 @@ export function useSceneEvents(sceneId: string | null): {
     let ws: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
-    let everConnected = false;
-    let probedAfterFirstFail = false;
+    // Per-disconnect-streak probe flag — see useCaptureEvents for
+    // the full rationale. Resets on each successful onopen so a
+    // scene deleted after a prior session still gets probed when
+    // the next reconnect streak starts.
+    let streakProbed = false;
 
     const scheduleReconnect = () => {
       if (cancelled) return;
@@ -97,7 +100,7 @@ export function useSceneEvents(sceneId: string | null): {
       ws = new WebSocket(url);
       ws.onopen = () => {
         attempt = 0;
-        everConnected = true;
+        streakProbed = false;
         // No REST snapshot refetch on reconnect. The server sends a
         // ``snapshot`` event on every ``ws.accept()``; ``onmessage``
         // is attached synchronously before any frame can arrive, so
@@ -277,13 +280,14 @@ export function useSceneEvents(sceneId: string | null): {
       };
       ws.onclose = () => {
         if (cancelled) return;
-        // First failure on a hook that's never seen onopen: HTTP
-        // probe the resource to discriminate "deleted" (404 → stop)
-        // from "transient outage" (anything else → keep retrying
-        // forever with backoff). Runs once; later failures just
-        // reschedule. See useCaptureEvents for the full rationale.
-        if (!everConnected && !probedAfterFirstFail) {
-          probedAfterFirstFail = true;
+        // First failure of THIS disconnect streak: HTTP-probe so a
+        // scene deleted mid-session (or before first connect) stops
+        // the retry loop. Server doesn't emit a terminal scene-
+        // deleted event the client can observe before the WS drops,
+        // so a per-streak probe is the only durable signal. Streak
+        // flag resets on every successful onopen.
+        if (!streakProbed) {
+          streakProbed = true;
           void probeSceneExists(sceneId).then((exists) => {
             if (cancelled) return;
             if (exists === false) return; // 404 → permanent stop

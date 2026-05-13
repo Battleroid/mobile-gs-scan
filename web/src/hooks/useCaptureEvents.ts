@@ -44,8 +44,12 @@ export function useCaptureEvents(captureId: string | null): {
     let ws: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
-    let everConnected = false;
-    let probedAfterFirstFail = false;
+    // Per-disconnect-streak flag: probe once when we drop from a
+    // connected state (or start cold), then don't re-probe until the
+    // socket opens again. Resets on every successful onopen so a
+    // capture deleted AFTER an earlier successful session still
+    // gets probed when the next reconnect streak starts.
+    let streakProbed = false;
 
     const scheduleReconnect = () => {
       if (cancelled) return;
@@ -63,7 +67,7 @@ export function useCaptureEvents(captureId: string | null): {
       ws = new WebSocket(url);
       ws.onopen = () => {
         attempt = 0;
-        everConnected = true;
+        streakProbed = false;
         // No REST snapshot refetch here. The server's WS handler
         // sends a ``snapshot`` event on every ``ws.accept()``, and
         // ``onmessage`` is attached synchronously before any frame
@@ -96,18 +100,16 @@ export function useCaptureEvents(captureId: string | null): {
       };
       ws.onclose = () => {
         if (cancelled) return;
-        // First failure on a hook that's never seen onopen: do an
-        // HTTP existence probe to discriminate "resource genuinely
-        // deleted" (server returns 404 → stop, no point retrying)
-        // from "transient outage" (anything else — keep retrying
-        // with backoff so the page recovers when the API comes back).
-        // The probe runs ONCE — for subsequent failures we just
-        // keep retrying indefinitely on the assumption that whatever
-        // the probe saw is still true. A capture deleted mid-session
-        // after we already connected once flows through the normal
-        // capture.deleted event on the WS.
-        if (!everConnected && !probedAfterFirstFail) {
-          probedAfterFirstFail = true;
+        // First failure of THIS disconnect streak: do an HTTP
+        // existence probe so a deleted capture stops the retry loop
+        // even if we previously had a successful session (server
+        // doesn't emit a terminal capture.deleted event the client
+        // can observe before the WS drops). Anything other than a
+        // 404 keeps the backoff loop running so transient outages
+        // recover on their own. ``streakProbed`` re-arms on every
+        // successful onopen so each disconnect streak gets one probe.
+        if (!streakProbed) {
+          streakProbed = true;
           void probeCaptureExists(captureId).then((exists) => {
             if (cancelled) return;
             if (exists === false) return; // 404 → permanent stop
