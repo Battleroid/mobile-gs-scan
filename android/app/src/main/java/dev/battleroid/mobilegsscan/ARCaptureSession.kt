@@ -115,7 +115,11 @@ class ARCaptureSession(
      * [update], if and only if:
      *   - ARCore is currently TRACKING (so the pose is meaningful)
      *   - enough time has elapsed since the last emit to honour the
-     *     [targetIntervalMs] rate limit
+     *     [targetIntervalMs] rate limit. A non-positive interval
+     *     disables the throttle entirely, letting the caller rely
+     *     on ARCore's own pacing — used when a fixed CameraConfig
+     *     preset pins the frame rate at the hardware level and an
+     *     app-side cap would just drop perfectly good frames.
      *   - acquireCameraImage actually has a frame ready (NotYet on
      *     the first few calls is normal).
      *
@@ -126,7 +130,7 @@ class ARCaptureSession(
         if (camera.trackingState != TrackingState.TRACKING) return null
 
         val now = frame.timestamp / 1_000_000L
-        if (now - lastEmitMs < targetIntervalMs) return null
+        if (targetIntervalMs > 0 && now - lastEmitMs < targetIntervalMs) return null
 
         val jpeg = encodeFrameJpeg(frame) ?: return null
         val intrinsics = readIntrinsics(camera.imageIntrinsics)

@@ -337,11 +337,25 @@ class CaptureActivity : ComponentActivity() {
 
     private fun startArSession() {
         try {
+            // When a fixed CameraConfig preset is active, skip the
+            // app-side fps throttle — ARCore is already pacing
+            // delivery at the camera's hardware rate, and capping
+            // again on top of that would silently drop frames
+            // (e.g. 60 fps preset + old 10 fps slider value would
+            // emit at 10 fps instead of 60). Custom keeps the
+            // slider-driven interval so users who deliberately want
+            // a slower stream still get it.
+            val cameraKey = ServerConfig.cameraConfigKey(this)
+            val intervalMs = if (cameraKey == ServerConfig.CAMERA_CONFIG_CUSTOM) {
+                ServerConfig.captureIntervalMs(this)
+            } else {
+                0L
+            }
             arSession = ARCaptureSession(
                 context = this,
-                targetIntervalMs = ServerConfig.captureIntervalMs(this),
+                targetIntervalMs = intervalMs,
                 jpegQuality = ServerConfig.captureJpegQuality(this),
-                cameraConfigKey = ServerConfig.cameraConfigKey(this),
+                cameraConfigKey = cameraKey,
             )
         } catch (e: Exception) {
             Toast.makeText(
