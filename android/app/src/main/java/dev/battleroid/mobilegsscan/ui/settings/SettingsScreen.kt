@@ -74,6 +74,7 @@ fun SettingsScreen(
     onJpegQualityChange: (Int) -> Unit,
     onTrainItersChange: (Int) -> Unit,
     onOverlayAlphaPctChange: (Int) -> Unit,
+    onCameraConfigKeyChange: (String) -> Unit,
     onSaveClick: () -> Unit,
     onBackClick: () -> Unit,
     onProfileClick: () -> Unit,
@@ -128,17 +129,40 @@ fun SettingsScreen(
 
             Section(
                 eyebrow = "camera",
-                title = "Capture rate",
-                hint = "frames per second sent to the studio. higher = " +
-                    "smoother coverage but more bandwidth and battery " +
-                    "drain. 10 fps is the default.",
+                title = "Capture format",
+                hint = "pick a resolution + frame rate your device's " +
+                    "ARCore camera actually supports, or stay on " +
+                    "Custom to keep the freeform fps slider below.",
             ) {
-                IntSliderRow(
-                    value = state.captureFps,
-                    valueRange = ServerConfig.MIN_FPS..ServerConfig.MAX_FPS,
-                    onValueChange = onCaptureFpsChange,
-                    suffix = "fps",
+                CameraConfigRow(
+                    selected = state.cameraConfigKey,
+                    configs = state.cameraConfigs,
+                    status = state.cameraProbeStatus,
+                    onSelect = onCameraConfigKeyChange,
                 )
+            }
+
+            // Freeform fps slider — only meaningful when the user
+            // has the Custom preset selected. Hidden once they pick
+            // a fixed (resolution × fps) preset because the ARCore
+            // CameraConfig there pins the frame rate at the hardware
+            // level and the slider becomes a footgun (it'd silently
+            // request more frames than the camera delivers).
+            if (state.cameraConfigKey == ServerConfig.CAMERA_CONFIG_CUSTOM) {
+                Section(
+                    eyebrow = "camera",
+                    title = "Capture rate",
+                    hint = "frames per second sent to the studio. higher = " +
+                        "smoother coverage but more bandwidth and battery " +
+                        "drain. 10 fps is the default.",
+                ) {
+                    IntSliderRow(
+                        value = state.captureFps,
+                        valueRange = ServerConfig.MIN_FPS..ServerConfig.MAX_FPS,
+                        onValueChange = onCaptureFpsChange,
+                        suffix = "fps",
+                    )
+                }
             }
 
             Section(
@@ -399,6 +423,86 @@ private fun IntSliderRow(
 }
 
 @Composable
+private fun CameraConfigRow(
+    selected: String,
+    configs: List<dev.battleroid.mobilegsscan.CameraConfigOption>,
+    status: CameraProbeStatus,
+    onSelect: (String) -> Unit,
+) {
+    val pebble = MaterialTheme.pebble
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        when (status) {
+            CameraProbeStatus.Pending -> {
+                Text(
+                    text = "probing supported formats…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = pebble.inkSoft,
+                )
+            }
+            is CameraProbeStatus.Failed -> {
+                // Soft-fail: keep the Custom chip available so a user
+                // who hits Settings before granting camera permission
+                // can still pick freeform fps. Surface the reason
+                // inline so they know why the resolution chips aren't
+                // there yet.
+                Text(
+                    text = status.reason,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = pebble.warn,
+                )
+            }
+            CameraProbeStatus.Ok -> Unit
+        }
+
+        // Chip flow: each device-supported preset followed by the
+        // Custom chip. Wrapped via Column-of-Rows so a long list on
+        // a wide preset matrix wraps gracefully without needing
+        // FlowRow (which is still experimental in foundation).
+        val chipsPerRow = 2
+        val withCustom = configs + listOf(CUSTOM_OPTION)
+        withCustom.chunked(chipsPerRow).forEach { row ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                row.forEach { opt ->
+                    PresetCell(
+                        modifier = Modifier.weight(1f),
+                        label = opt.label.substringBefore(" · "),
+                        sub = opt.label.substringAfter(" · ", missingDelimiterValue = ""),
+                        selected = selected == opt.key,
+                        onClick = { onSelect(opt.key) },
+                    )
+                }
+                // Pad the final row so the lone trailing chip
+                // (typical when the preset count is odd) keeps the
+                // same width as its peers instead of stretching to
+                // fill the row.
+                if (row.size < chipsPerRow) {
+                    Spacer(Modifier.weight((chipsPerRow - row.size).toFloat()))
+                }
+            }
+        }
+    }
+}
+
+/** Sentinel chip that always renders, so the user has an out from
+ *  the device's preset matrix even when the probe failed or
+ *  returned nothing useful. The freeform fps slider below the
+ *  ``CameraConfigRow`` section only renders when this chip is
+ *  selected. */
+private val CUSTOM_OPTION = dev.battleroid.mobilegsscan.CameraConfigOption(
+    key = dev.battleroid.mobilegsscan.ServerConfig.CAMERA_CONFIG_CUSTOM,
+    label = "Custom · freeform fps",
+    width = 0,
+    height = 0,
+    fps = 0,
+)
+
+@Composable
 private fun TrainingPresetRow(
     selected: Int,
     onChange: (Int) -> Unit,
@@ -606,12 +710,16 @@ private fun SettingsScreenPreview() {
                 jpegQuality = 85,
                 trainIters = ServerConfig.TRAIN_ITERS_STANDARD,
                 overlayAlphaPct = 70,
+                cameraConfigKey = ServerConfig.CAMERA_CONFIG_CUSTOM,
+                cameraConfigs = emptyList(),
+                cameraProbeStatus = CameraProbeStatus.Ok,
             ),
             onStudioUrlChange = {},
             onCaptureFpsChange = {},
             onJpegQualityChange = {},
             onTrainItersChange = {},
             onOverlayAlphaPctChange = {},
+            onCameraConfigKeyChange = {},
             onSaveClick = {},
             onBackClick = {},
             onProfileClick = {},

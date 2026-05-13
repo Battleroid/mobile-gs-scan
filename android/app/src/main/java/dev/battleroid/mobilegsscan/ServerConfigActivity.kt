@@ -1,5 +1,7 @@
 package dev.battleroid.mobilegsscan
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -7,6 +9,9 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
+import dev.battleroid.mobilegsscan.ui.settings.CameraProbeStatus
 import dev.battleroid.mobilegsscan.ui.settings.SettingsScreen
 import dev.battleroid.mobilegsscan.ui.settings.SettingsUiState
 import dev.battleroid.mobilegsscan.ui.theme.PebbleTheme
@@ -14,6 +19,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 
 /**
  * Settings screen — Compose port of the prior programmatic
@@ -21,23 +27,24 @@ import kotlinx.coroutines.flow.update
  * a LinearLayout of TextViews / EditTexts / SeekBars / Buttons
  * inline in onCreate).
  *
- * Same five fields the legacy form surfaced:
- *   * Studio URL (text input, scheme prepended on save by
- *     [ServerConfig.setStudioUrl]).
- *   * Capture FPS (slider, range from [ServerConfig.MIN_FPS] to
- *     [ServerConfig.MAX_FPS]).
- *   * JPEG quality (slider, [ServerConfig.MIN_JPEG_QUALITY]..
- *     [ServerConfig.MAX_JPEG_QUALITY]).
- *   * Training fidelity preset (3-button row: Low / Standard /
- *     High, mapped to [ServerConfig.TRAIN_ITERS_LOW] / `_STANDARD`
- *     / `_HIGH`).
- *   * Coverage overlay opacity (slider,
- *     [ServerConfig.MIN_OVERLAY_ALPHA_PCT]..`MAX_OVERLAY_ALPHA_PCT`).
+ * Fields surfaced (one save commits all of them):
+ *   * Studio URL — text input, ``ServerConfig.setStudioUrl`` prepends
+ *     the scheme on save when the user typed a bare host.
+ *   * Capture format — chip row of ARCore CameraConfigs the device
+ *     actually exposes, queried lazily on screen open. A Custom
+ *     chip reveals the freeform fps slider below.
+ *   * Capture FPS — slider, only rendered when the Custom format
+ *     chip is selected.
+ *   * JPEG quality — slider.
+ *   * Training fidelity preset — Low / Standard / High / Custom.
+ *   * Coverage overlay opacity — slider.
  *
- * Behaviour preserved verbatim — Save commits all five fields
- * back to [ServerConfig] and finishes the activity (returning to
- * the home screen, which re-reads ServerConfig on its next
- * onResume tick). URL-empty toast still surfaces on save attempt.
+ * Camera-config probe: a one-shot ARCore ``Session`` is created on
+ * a background coroutine to enumerate ``getSupportedCameraConfigs``.
+ * The session is closed immediately after — we don't keep it
+ * around. Requires camera permission; absent permission, the probe
+ * surfaces a soft inline warning + the user still gets the Custom
+ * + freeform fps slider path.
  */
 class ServerConfigActivity : ComponentActivity() {
     private val state: MutableStateFlow<SettingsUiState> =
@@ -58,7 +65,12 @@ class ServerConfigActivity : ComponentActivity() {
             jpegQuality = ServerConfig.captureJpegQuality(this),
             trainIters = ServerConfig.captureTrainIters(this),
             overlayAlphaPct = ServerConfig.coverageOverlayAlphaPct(this),
+            cameraConfigKey = ServerConfig.cameraConfigKey(this),
+            cameraConfigs = emptyList(),
+            cameraProbeStatus = CameraProbeStatus.Pending,
         )
+
+        runCameraConfigProbe()
 
         setContent {
             PebbleTheme {
@@ -72,9 +84,57 @@ class ServerConfigActivity : ComponentActivity() {
                     onOverlayAlphaPctChange = { v ->
                         state.update { it.copy(overlayAlphaPct = v) }
                     },
+                    onCameraConfigKeyChange = { v ->
+                        state.update { it.copy(cameraConfigKey = v) }
+                    },
                     onSaveClick = ::onSave,
                     onBackClick = { finish() },
                     onProfileClick = ::openProfile,
+                )
+            }
+        }
+    }
+
+    /**
+     * One-shot ARCore probe. Skips entirely when camera permission
+     * isn't granted yet so we don't trigger the permission prompt
+     * from a settings screen; the user will go through the normal
+     * AR capture flow first which already has a proper rationale
+     * UI. On failure (no permission, ARCore not installed, no back
+     * camera) the chip row falls back to the Custom-only state and
+     * the freeform fps slider stays visible.
+     */
+    private fun runCameraConfigProbe() {
+        val granted = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.CAMERA,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            state.update {
+                it.copy(
+                    cameraProbeStatus = CameraProbeStatus.Failed(
+                        "Grant camera access in an AR capture to see device-supported formats.",
+                    ),
+                )
+            }
+            return
+        }
+        lifecycleScope.launch {
+            val configs = try {
+                probeCameraConfigs(this@ServerConfigActivity)
+            } catch (e: Exception) {
+                state.update {
+                    it.copy(
+                        cameraProbeStatus = CameraProbeStatus.Failed(
+                            "Couldn't read device formats: ${e.message ?: "unknown"}",
+                        ),
+                    )
+                }
+                return@launch
+            }
+            state.update {
+                it.copy(
+                    cameraConfigs = configs,
+                    cameraProbeStatus = CameraProbeStatus.Ok,
                 )
             }
         }
@@ -96,6 +156,7 @@ class ServerConfigActivity : ComponentActivity() {
         ServerConfig.setCaptureJpegQuality(this, s.jpegQuality)
         ServerConfig.setCaptureTrainIters(this, s.trainIters)
         ServerConfig.setCoverageOverlayAlphaPct(this, s.overlayAlphaPct)
+        ServerConfig.setCameraConfigKey(this, s.cameraConfigKey)
         val saved = ServerConfig.studioUrl(this).orEmpty()
         if (saved != url) {
             // setStudioUrl prepends https:// when no scheme was

@@ -36,9 +36,23 @@ class ARCaptureSession(
     context: Context,
     private val targetIntervalMs: Long = 200, // 5 fps default
     private val jpegQuality: Int = 85,
+    /** ARCore CameraConfig preset id; matches the format in
+     *  [ServerConfig.cameraConfigKey] (``<w>x<h>@<fps>`` or
+     *  [ServerConfig.CAMERA_CONFIG_CUSTOM]). Resolved against the
+     *  current Session's supported configs at construction time —
+     *  a stale / unrecognised key (device changed, OS upgrade)
+     *  falls through to the ARCore default. */
+    cameraConfigKey: String = ServerConfig.CAMERA_CONFIG_CUSTOM,
 ) {
 
     private val session: Session = Session(context).apply {
+        // Apply the user's preset BEFORE configure(cfg). ARCore
+        // requires camera-config changes to land before the first
+        // configure call on a given session; setting it afterwards
+        // is silently ignored. resolveCameraConfig returns null on
+        // unrecognised / Custom keys → no override, ARCore picks
+        // its default.
+        resolveCameraConfig(this, cameraConfigKey)?.let { setCameraConfig(it) }
         val cfg = Config(this).apply {
             focusMode = Config.FocusMode.AUTO
             updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE

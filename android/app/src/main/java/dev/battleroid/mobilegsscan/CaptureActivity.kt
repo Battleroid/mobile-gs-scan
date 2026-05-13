@@ -341,6 +341,7 @@ class CaptureActivity : ComponentActivity() {
                 context = this,
                 targetIntervalMs = ServerConfig.captureIntervalMs(this),
                 jpegQuality = ServerConfig.captureJpegQuality(this),
+                cameraConfigKey = ServerConfig.cameraConfigKey(this),
             )
         } catch (e: Exception) {
             Toast.makeText(
