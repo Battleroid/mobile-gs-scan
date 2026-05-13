@@ -107,6 +107,13 @@ services:
       context: ./web
       args:
         NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE-http://localhost:8000}
+        # Label baked into the version chip + Profile screens. The
+        # Makefile computes this from repo-root version.txt + ``git
+        # rev-parse --short HEAD`` and exports it before invoking
+        # the build; if it's not set, next.config.mjs falls back to
+        # the bare base version (clean release-style label, just
+        # without a SHA suffix).
+        APP_BUILD_LABEL: ${APP_BUILD_LABEL-}
     environment:
       NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE-http://localhost:8000}
     ports:
