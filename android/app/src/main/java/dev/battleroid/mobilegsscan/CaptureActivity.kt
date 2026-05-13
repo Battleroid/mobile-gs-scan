@@ -17,6 +17,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
 import com.google.ar.core.ArCoreApk
 import dev.battleroid.mobilegsscan.ui.capture.ArUnsupportedDialog
 import dev.battleroid.mobilegsscan.ui.capture.CaptureDialogs
@@ -174,6 +175,16 @@ class CaptureActivity : ComponentActivity() {
      * its lifecycle directly without going through Compose state.
      * Compose only calls this once per `AndroidView` mount; the
      * cached check is defensive against any future re-mount.
+     *
+     * Lifecycle race: unlike `setContentView`, Compose's
+     * `AndroidView` factory runs during composition, which is
+     * dispatched onto the main thread and can land *after*
+     * `onResume()` has already executed. If the activity's
+     * `onResume` ran before this factory, the `glSurface?.onResume()`
+     * call there short-circuited on null and the surface starts
+     * stuck — rendering paused/blank until the user backgrounds
+     * and reopens the activity. Catch that here by syncing the
+     * new view to the current lifecycle state on creation.
      */
     private fun createGlSurface(context: android.content.Context): GLSurfaceView {
         glSurface?.let { return it }
@@ -183,6 +194,9 @@ class CaptureActivity : ComponentActivity() {
             renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
         }
         glSurface = view
+        if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+            view.onResume()
+        }
         return view
     }
 
