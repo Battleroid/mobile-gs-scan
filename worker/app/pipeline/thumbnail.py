@@ -60,19 +60,29 @@ async def run_thumbnail(
     src_ply: Path,
     progress: ProgressCb,
     job_id: str | None = None,
+    use_ply_renderer: bool = False,
 ) -> dict:
     """Produce ``<scene_dir>/thumb.png`` from the trained splat.
+
+    Two renderer paths:
+    * ``use_ply_renderer=False`` (default, original-splat path):
+      ``ns-render`` against the splatfacto checkpoint at
+      ``train/.../config.yml``. Faster, leverages nerfstudio's own
+      camera projection.
+    * ``use_ply_renderer=True`` (filter-triggered regen): gsplat-
+      based PLY rasterizer at [ply_render.render_png]. Reads
+      gaussians from the (edited) PLY directly, so a filter that
+      mutated ``edited_ply_path`` actually shows up in the
+      thumbnail. ns-render can't do this — it reads the
+      splatfacto checkpoint, which filter doesn't touch.
 
     Returns one of three result shapes:
     * ``{"thumbnail": <path>}`` on a successful render.
     * ``{"permanent_skip": "<reason>"}`` when the scene structurally
-      can't be rendered on this host: stub training, ns-render
-      missing on PATH, or no nerfstudio config under ``train/``.
-      Backfill uses this marker to stop re-queueing the scene
-      every cycle (see store.list_scenes_needing_thumbnail). A
-      future ``POST /api/scenes/{id}/thumbnail`` retry endpoint
-      can override the marker for hosts that just installed
-      nerfstudio.
+      can't be rendered on this host: stub training, renderer
+      tooling missing (ns-render OR gsplat/CUDA depending on the
+      path), or no nerfstudio config under ``train/``. Backfill
+      uses this marker to stop re-queueing the scene every cycle.
     * ``{}`` when the source .ply is missing — treated as a
       transient skip; backfill will retry on the next cycle once
       ``ply_path`` is populated.
@@ -82,6 +92,39 @@ async def run_thumbnail(
         log.info("thumbnail: stub scene, skipping render")
         await progress(1.0, "thumbnail: skipped (stub scene)")
         return {"permanent_skip": "synthetic stub scene"}
+
+    if not src_ply.exists():
+        log.warning("thumbnail: source .ply missing at %s", src_ply)
+        return {}
+
+    if use_ply_renderer:
+        # Filter-triggered regen path. Gsplat reads the (edited)
+        # PLY directly, so the rendered frame reflects the user's
+        # filter recipe. No nerfstudio config needed — the renderer
+        # is self-contained.
+        from app.pipeline import ply_render
+
+        ok, reason = ply_render.is_available()
+        if not ok:
+            log.info("thumbnail: ply_render unavailable (%s)", reason)
+            await progress(1.0, f"thumbnail: skipped ({reason})")
+            return {"permanent_skip": reason}
+
+        await progress(0.1, "thumbnail: ply-render (camera + rasterize)")
+        camera_to_world = _camera_for_ply(src_ply)
+        png_bytes = ply_render.render_png(
+            ply_path=src_ply,
+            c2w_opengl=camera_to_world,
+            fov_deg=DEFAULT_FOV_DEG,
+            width=THUMB_W,
+            height=THUMB_H,
+        )
+        thumb_path = scene_dir / "thumb.png"
+        thumb_path.write_bytes(png_bytes)
+        await progress(1.0, "thumbnail: done")
+        return {"thumbnail": str(thumb_path)}
+
+    # Default ns-render path (against splatfacto checkpoint).
     if not shutil.which("ns-render"):
         log.info("thumbnail: ns-render not on PATH, skipping render")
         await progress(1.0, "thumbnail: skipped (ns-render unavailable)")
@@ -92,10 +135,6 @@ async def run_thumbnail(
         log.warning("thumbnail: no nerfstudio config.yml under train/")
         return {"permanent_skip": "no nerfstudio config under train/"}
     config = candidates[-1]
-
-    if not src_ply.exists():
-        log.warning("thumbnail: source .ply missing at %s", src_ply)
-        return {}
 
     await progress(0.05, "thumbnail: computing camera")
     camera_to_world = _camera_for_ply(src_ply)

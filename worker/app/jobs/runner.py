@@ -553,6 +553,32 @@ async def _run_filter(*, job: Job, scene: Scene, settings: Settings) -> None:
         total=result.get("total"),
     )
 
+    # Filter-triggered thumbnail regen. The post-export thumbnail
+    # was rendered against the unedited splat; without this hook,
+    # a user who filters their splat would see the home grid card
+    # still showing the pre-filter state. Enqueue a fresh
+    # thumbnail + orbit pair with ``use_edited_ply: True`` —
+    # _run_thumbnail / _run_orbit will route through the gsplat
+    # PLY rasterizer against scene.edited_ply_path. The result
+    # path overwrites Scene.thumbnail_path / Scene.orbit_path, so
+    # the same artifact URLs serve the new content.
+    #
+    # Defensive try: a regen enqueue failure shouldn't propagate
+    # as a filter failure — filter itself succeeded. The home
+    # grid would just show the stale pre-filter thumb until the
+    # user re-applies the filter or triggers a manual re-render.
+    if result.get("ply"):
+        try:
+            await store.enqueue_job(
+                scene.id, JobKind.thumbnail,
+                payload={"use_edited_ply": True},
+            )
+        except Exception:
+            log.exception(
+                "filter %s: failed to enqueue regen thumbnail",
+                job.id,
+            )
+
 
 async def _dispatch(
     *,
@@ -734,10 +760,22 @@ async def _run_thumbnail(*, job: Job, scene: Scene, settings: Settings) -> None:
     artifact's presence on disk + ``thumbnail_path`` on the row are
     the only signal.
     """
-    src_ply = scene.ply_path
+    # Two source-PLY paths:
+    #  * Default (post-export pipeline): scene.ply_path, paired with
+    #    the ns-render path against the splatfacto checkpoint.
+    #  * Filter-regen (payload.use_edited_ply): scene.edited_ply_path,
+    #    paired with the gsplat PLY rasterizer. Necessary because
+    #    ns-render reads the checkpoint, which filter doesn't touch
+    #    — feeding the edited PLY to ns-render produces a
+    #    byte-identical unedited frame.
+    use_edited_ply = bool(job.payload.get("use_edited_ply"))
+    src_ply = scene.edited_ply_path if use_edited_ply else scene.ply_path
     if not src_ply or not Path(src_ply).exists():
-        log.info("thumbnail %s: scene has no .ply yet; skipping", job.id)
-        await _complete_thumbnail_job(job, scene, result={"skipped": "no .ply"})
+        which = "edited .ply" if use_edited_ply else ".ply"
+        log.info("thumbnail %s: scene has no %s yet; skipping", job.id, which)
+        await _complete_thumbnail_job(
+            job, scene, result={"skipped": f"no {which}"},
+        )
         return
 
     scene_dir = settings.scenes_dir() / scene.id
@@ -756,6 +794,7 @@ async def _run_thumbnail(*, job: Job, scene: Scene, settings: Settings) -> None:
             src_ply=Path(src_ply),
             progress=progress,
             job_id=job.id,
+            use_ply_renderer=use_edited_ply,
         )
     )
     hb_task = asyncio.create_task(_heartbeat(job.id, dispatch_task))
@@ -838,7 +877,17 @@ async def _run_thumbnail(*, job: Job, scene: Scene, settings: Settings) -> None:
         # rendering. Orbit failure is non-fatal: the CaptureCard
         # falls back to the still PNG.
         try:
-            await store.enqueue_job(scene.id, JobKind.orbit, payload={})
+            # Forward use_edited_ply so a filter-regen thumbnail
+            # produces a filter-regen orbit (same edited PLY +
+            # gsplat path). Otherwise the post-success orbit
+            # would render the unedited checkpoint, defeating the
+            # whole point of the regen.
+            orbit_payload: dict = {}
+            if job.payload.get("use_edited_ply"):
+                orbit_payload["use_edited_ply"] = True
+            await store.enqueue_job(
+                scene.id, JobKind.orbit, payload=orbit_payload,
+            )
         except Exception:
             # Same defensive shape as the rest of the post-success
             # bookkeeping: don't let an orbit-enqueue failure
@@ -894,10 +943,19 @@ async def _run_orbit(*, job: Job, scene: Scene, settings: Settings) -> None:
     differences vs thumbnail are the result field name (``orbit``
     vs ``thumbnail``) and the published event name.
     """
-    src_ply = scene.ply_path
+    # Two source-PLY paths, mirrors _run_thumbnail. Filter-regen
+    # passes ``use_edited_ply`` via the job payload; that flag
+    # selects scene.edited_ply_path + the gsplat PLY rasterizer
+    # (which actually rasterizes the edited gaussians) over
+    # ns-render against the unedited checkpoint.
+    use_edited_ply = bool(job.payload.get("use_edited_ply"))
+    src_ply = scene.edited_ply_path if use_edited_ply else scene.ply_path
     if not src_ply or not Path(src_ply).exists():
-        log.info("orbit %s: scene has no .ply yet; skipping", job.id)
-        await _complete_orbit_job(job, scene, result={"skipped": "no .ply"})
+        which = "edited .ply" if use_edited_ply else ".ply"
+        log.info("orbit %s: scene has no %s yet; skipping", job.id, which)
+        await _complete_orbit_job(
+            job, scene, result={"skipped": f"no {which}"},
+        )
         return
 
     scene_dir = settings.scenes_dir() / scene.id
@@ -916,6 +974,7 @@ async def _run_orbit(*, job: Job, scene: Scene, settings: Settings) -> None:
             src_ply=Path(src_ply),
             progress=progress,
             job_id=job.id,
+            use_ply_renderer=use_edited_ply,
         )
     )
     hb_task = asyncio.create_task(_heartbeat(job.id, dispatch_task))
