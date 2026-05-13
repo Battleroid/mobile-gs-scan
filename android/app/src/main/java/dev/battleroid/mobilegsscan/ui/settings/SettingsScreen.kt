@@ -195,6 +195,8 @@ fun SettingsScreen(
 
             Spacer(Modifier.height(8.dp))
             SaveButton(onClick = onSaveClick)
+            Spacer(Modifier.height(20.dp))
+            AboutBlock()
             // Footer space so the Save button can scroll off the
             // gesture nav cleanly on short forms.
             Spacer(
@@ -205,6 +207,41 @@ fun SettingsScreen(
                     .height(24.dp),
             )
         }
+    }
+}
+
+@Composable
+private fun AboutBlock() {
+    val pebble = MaterialTheme.pebble
+    // Renders the build label the APK was actually packaged with.
+    // Lived in the home header until the chip pushed the Settings
+    // gear off the right edge on narrow phones; Settings is the
+    // natural home for build metadata anyway (the user only really
+    // needs to read it when filing a bug). ``BuildConfig.VERSION_NAME``
+    // is the canonical value — bakes in ``+sha`` for dev builds and
+    // a clean version for tagged releases (CI passes APP_BUILD_LABEL
+    // to override the suffix).
+    val rawVersion = dev.battleroid.mobilegsscan.BuildConfig.VERSION_NAME
+    val label = "v" + rawVersion.replaceFirst('+', ' ').let { withSpace ->
+        val parts = withSpace.split(' ', limit = 2)
+        if (parts.size == 2 && parts[1].isNotBlank()) {
+            "${parts[0]} · ${parts[1]}"
+        } else {
+            parts[0]
+        }
+    }
+    Column(Modifier.fillMaxWidth()) {
+        Text(
+            text = "ABOUT",
+            style = MaterialTheme.typography.labelSmall,
+            color = pebble.inkMuted,
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyMedium,
+            color = pebble.ink,
+        )
     }
 }
 

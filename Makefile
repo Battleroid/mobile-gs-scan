@@ -46,6 +46,26 @@
 
 COMPOSE := $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
 
+# Build label exported to ``docker compose build`` as APP_BUILD_LABEL.
+# Composed from the repo-root ``version.txt`` plus the current short
+# git SHA so the version chip + Profile screen show the exact build
+# a user is running. Exported (not just := assigned) so child
+# processes — docker compose, gradle — see it. Falls back to the
+# bare base version when ``git`` isn't on PATH or the working tree
+# isn't a checkout (sandboxed builds), matching how a tagged
+# release renders.
+APP_VERSION_BASE := $(shell cat version.txt 2>/dev/null | tr -d '[:space:]')
+ifeq ($(APP_VERSION_BASE),)
+APP_VERSION_BASE := 0.1.0
+endif
+APP_GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null)
+ifeq ($(APP_GIT_SHA),)
+APP_BUILD_LABEL := $(APP_VERSION_BASE)
+else
+APP_BUILD_LABEL := $(APP_VERSION_BASE)+$(APP_GIT_SHA)
+endif
+export APP_BUILD_LABEL
+
 # Overlay that flips the `image:` references in docker-compose.yml from
 # the local-build tags (mobile-gs-scan/{base,api,worker-gs,web}:latest)
 # to the ghcr.io paths the CI workflow publishes to. Applied via -f
