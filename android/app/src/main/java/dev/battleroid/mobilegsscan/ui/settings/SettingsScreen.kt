@@ -435,9 +435,17 @@ private fun CustomTrainItersInput(
         value = text,
         onValueChange = { raw ->
             text = raw
-            raw.trim().toIntOrNull()?.let { parsed ->
-                onValueChange(parsed.coerceAtLeast(1))
-            }
+            // Strip every non-digit before parsing so the displayed
+            // grouping (`12 000`, `12,000`) parses cleanly into
+            // 12000. The placeholder advertises grouped input, and
+            // the soft keyboard's Number layout still surfaces a
+            // space key that users naturally reach for at thousands
+            // breaks. Anchoring on `isDigit()` rather than stripping
+            // a specific separator covers locales that use comma /
+            // dot / nbsp without us having to enumerate them.
+            raw.filter { it.isDigit() }
+                .toIntOrNull()
+                ?.let { parsed -> onValueChange(parsed.coerceAtLeast(1)) }
         },
         label = { Text("Custom iteration count") },
         placeholder = { Text("e.g. 12 000") },
