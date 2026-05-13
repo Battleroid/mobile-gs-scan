@@ -9,6 +9,9 @@ import type { Scene, ServerEvent } from "@/lib/types";
 // with no client-side reconnect; both hooks need the same recovery.
 const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
 
+// Probe cooldown — see useCaptureEvents for the rationale.
+const PROBE_COOLDOWN_MS = 30_000;
+
 // HTTP existence probe — see useCaptureEvents for the full rationale.
 // Returns false on 404 (resource deleted, stop retrying), true on a
 // 2xx (resource exists, keep retrying), null on 5xx / network error
@@ -81,11 +84,11 @@ export function useSceneEvents(sceneId: string | null): {
     let ws: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
-    // Per-disconnect-streak probe flag — see useCaptureEvents for
-    // the full rationale. Resets on each successful onopen so a
-    // scene deleted after a prior session still gets probed when
-    // the next reconnect streak starts.
-    let streakProbed = false;
+    // Cooldown timestamp for the existence probe — see
+    // useCaptureEvents for the full rationale. Probe fires at most
+    // once per PROBE_COOLDOWN_MS so long outages still get periodic
+    // re-checks if the resource gets deleted mid-outage.
+    let lastProbeAt = 0;
 
     const scheduleReconnect = () => {
       if (cancelled || permanentlyStopped) return;
@@ -103,7 +106,6 @@ export function useSceneEvents(sceneId: string | null): {
       ws = new WebSocket(url);
       ws.onopen = () => {
         attempt = 0;
-        streakProbed = false;
         // No REST snapshot refetch on reconnect. The server sends a
         // ``snapshot`` event on every ``ws.accept()``; ``onmessage``
         // is attached synchronously before any frame can arrive, so
@@ -284,12 +286,13 @@ export function useSceneEvents(sceneId: string | null): {
       ws.onclose = () => {
         if (cancelled || permanentlyStopped) return;
         // Schedule reconnect FIRST so a slow probe doesn't delay
-        // recovery. Probe runs concurrently and, if it returns 404,
-        // sets ``permanentlyStopped`` + clears the pending timer.
-        // See useCaptureEvents for the full rationale.
+        // recovery. Probe runs concurrently with PROBE_COOLDOWN_MS
+        // throttling so long outages still get periodic re-checks
+        // — see useCaptureEvents for the full rationale.
         scheduleReconnect();
-        if (!streakProbed) {
-          streakProbed = true;
+        const now = Date.now();
+        if (now - lastProbeAt >= PROBE_COOLDOWN_MS) {
+          lastProbeAt = now;
           void probeSceneExists(sceneId).then((exists) => {
             if (cancelled || permanentlyStopped) return;
             if (exists !== false) return; // 2xx / 5xx / err → keep retrying
