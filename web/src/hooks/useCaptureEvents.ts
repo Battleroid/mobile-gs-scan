@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { wsUrl } from "@/lib/api";
 import type { Capture, ServerEvent } from "@/lib/types";
 
@@ -9,15 +9,19 @@ import type { Capture, ServerEvent } from "@/lib/types";
 // seconds, and the page sits visibly frozen until we reconnect.
 const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
 
-// Close-codes the server uses to signal a TERMINAL rejection — the
-// subscription is structurally invalid and retrying is pointless.
-// The capture/scene WS endpoints close with 4404 when the resource
-// doesn't exist (deleted out from under the tab, or a bad URL). The
-// 1008/1011 codes are the WS-protocol-level "policy violation" /
-// "internal error" markers we leave alone the same way — both are
-// fail-permanent, not "wait and retry". Anything else (1006 abnormal,
-// 1001 going away, etc.) keeps the backoff loop alive.
-const TERMINAL_CLOSE_CODES: ReadonlySet<number> = new Set([4404, 1008, 1011]);
+// How many times we'll retry before declaring the subscription
+// permanently failed (resource deleted, URL wrong, etc.). Only the
+// "never connected" path is gated: once we've successfully opened
+// at least once and the connection later drops, we treat it as a
+// transient blip and keep retrying forever with backoff.
+//
+// We can't gate retries on CloseEvent.code for the missing-resource
+// case — the server rejects the WS handshake via ``ws.close(4404)``
+// BEFORE ``ws.accept()`` (see worker/app/api/captures.py +
+// scenes.py), which the browser surfaces as a 1006 abnormal
+// closure (the same code transient network blips produce). The
+// attempt cap is the only durable signal here.
+const MAX_INITIAL_ATTEMPTS = 5;
 
 export function useCaptureEvents(captureId: string | null): {
   capture: Capture | null;
@@ -25,12 +29,6 @@ export function useCaptureEvents(captureId: string | null): {
 } {
   const [capture, setCapture] = useState<Capture | null>(null);
   const [lastEvent, setLastEvent] = useState<ServerEvent | null>(null);
-  // Monotonic counter so the snapshot-refetch fired from each
-  // (re)connect's onopen only commits when it's still the latest
-  // one in flight. Mirrors useSceneEvents — without it two close-
-  // together reconnects can resolve out of order and let the
-  // earlier snapshot stomp newer state.
-  const refreshGen = useRef(0);
 
   useEffect(() => {
     if (!captureId) return;
@@ -38,6 +36,7 @@ export function useCaptureEvents(captureId: string | null): {
     let ws: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
+    let everConnected = false;
 
     const connect = () => {
       if (cancelled) return;
@@ -45,20 +44,14 @@ export function useCaptureEvents(captureId: string | null): {
       ws = new WebSocket(url);
       ws.onopen = () => {
         attempt = 0;
-        // Re-fetch the canonical snapshot defensively — the server
-        // sends one on connect, but if it raced our onmessage
-        // attachment (vanishingly rare but possible) the page would
-        // stay on pre-disconnect state. Idempotent on the happy path.
-        const gen = ++refreshGen.current;
-        void (async () => {
-          try {
-            const { api } = await import("@/lib/api");
-            const fresh = await api.getCapture(captureId);
-            if (!cancelled && gen === refreshGen.current) setCapture(fresh);
-          } catch {
-            // ignore — the snapshot event will populate us if it arrives.
-          }
-        })();
+        everConnected = true;
+        // No REST snapshot refetch here. The server's WS handler
+        // sends a ``snapshot`` event on every ``ws.accept()``, and
+        // ``onmessage`` is attached synchronously before any frame
+        // can arrive — so the snapshot WS event always reaches us.
+        // A parallel REST fetch would race ``stream.frames.*``
+        // events arriving concurrently on the socket and could roll
+        // back frame_count after newer events bumped it.
       };
       ws.onmessage = (e) => {
         try {
@@ -82,12 +75,13 @@ export function useCaptureEvents(captureId: string | null): {
           // ignore malformed payloads
         }
       };
-      ws.onclose = (event) => {
+      ws.onclose = () => {
         if (cancelled) return;
-        // Terminal codes mean the server explicitly told us not to
-        // come back — don't reschedule. Anything else is treated as
-        // a transient drop and the backoff loop runs.
-        if (TERMINAL_CLOSE_CODES.has(event.code)) return;
+        // If we've never opened, cap the attempts so a deleted or
+        // nonexistent capture doesn't loop forever. Once we've been
+        // connected at least once, treat every close as a transient
+        // drop and keep retrying — that's the actual reconnect goal.
+        if (!everConnected && attempt + 1 >= MAX_INITIAL_ATTEMPTS) return;
         const delay =
           RECONNECT_DELAYS_MS[
             Math.min(attempt, RECONNECT_DELAYS_MS.length - 1)

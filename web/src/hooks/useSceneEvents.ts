@@ -9,11 +9,13 @@ import type { Scene, ServerEvent } from "@/lib/types";
 // with no client-side reconnect; both hooks need the same recovery.
 const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
 
-// Terminal close-codes — see the matching list in useCaptureEvents.
-// 4404 is the server's "this scene/capture does not exist" signal;
-// 1008/1011 are protocol-level policy/error. None of these are worth
-// retrying; the backoff loop only runs for transient drops.
-const TERMINAL_CLOSE_CODES: ReadonlySet<number> = new Set([4404, 1008, 1011]);
+// Cap initial-attempt retries. Mirror of useCaptureEvents — the
+// server rejects missing-scene subscriptions BEFORE accepting the
+// WS handshake (worker/app/api/scenes.py: ``ws.close(4404)`` before
+// ``ws.accept()``), so the browser sees a 1006 abnormal closure
+// indistinguishable from a transient drop. The attempt cap is the
+// only durable signal that we've hit a deleted/nonexistent resource.
+const MAX_INITIAL_ATTEMPTS = 5;
 
 export interface EditResult {
   kept: number;
@@ -67,6 +69,7 @@ export function useSceneEvents(sceneId: string | null): {
     let ws: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
+    let everConnected = false;
 
     const connect = () => {
       if (cancelled) return;
@@ -74,15 +77,14 @@ export function useSceneEvents(sceneId: string | null): {
       ws = new WebSocket(url);
       ws.onopen = () => {
         attempt = 0;
-        // Re-fetch the canonical snapshot on every (re)connect. The
-        // server sends one as part of the WS handshake, but a silent
-        // disconnect-reconnect cycle would otherwise leave the page
-        // on stale state for any events that fired during the gap.
-        // Belt-and-braces with the snapshot WS event.
-        const gen = ++refreshGen.current;
-        void refreshScene(sceneId).then((next) => {
-          if (next && !cancelled && gen === refreshGen.current) setScene(next);
-        });
+        everConnected = true;
+        // No REST snapshot refetch on reconnect. The server sends a
+        // ``snapshot`` event on every ``ws.accept()``; ``onmessage``
+        // is attached synchronously before any frame can arrive, so
+        // the snapshot WS event is guaranteed to reach the client.
+        // A concurrent REST fetch would race the in-flight WS
+        // ``job.progress`` / ``scene.*`` events on the socket and
+        // could roll back recently-applied incremental updates.
       };
       ws.onmessage = (e) => {
       try {
@@ -253,9 +255,14 @@ export function useSceneEvents(sceneId: string | null): {
         // ignore
       }
       };
-      ws.onclose = (event) => {
+      ws.onclose = () => {
         if (cancelled) return;
-        if (TERMINAL_CLOSE_CODES.has(event.code)) return;
+        // See useCaptureEvents for the rationale: server rejects
+        // missing-scene subscriptions pre-accept (1006 abnormal,
+        // indistinguishable from a transient drop). Cap initial
+        // attempts; once we've connected at least once, transient
+        // drops keep retrying indefinitely.
+        if (!everConnected && attempt + 1 >= MAX_INITIAL_ATTEMPTS) return;
         const delay =
           RECONNECT_DELAYS_MS[
             Math.min(attempt, RECONNECT_DELAYS_MS.length - 1)
