@@ -37,8 +37,16 @@ async def cancel_in_flight_thumb_orbit(scene_id: str) -> None:
     in_flight = (JobStatus.queued, JobStatus.claimed, JobStatus.running)
     for j in await store.list_jobs_for_scene(scene_id):
         if j.kind in (JobKind.thumbnail, JobKind.orbit) and j.status in in_flight:
-            await store.cancel_job(j.id)
-            await events.publish_job(j.id, "job.canceled")
+            # cancel_job's UPDATE has a status-still-in-flight
+            # WHERE clause and returns False when the row moved to
+            # a terminal state between the list above and this
+            # call. Gate the event publish on its return so we
+            # don't broadcast a spurious ``job.canceled`` for a
+            # job that actually completed — same shape every
+            # other cancel call site uses (api/jobs cancel, api/
+            # scenes.clear_edit).
+            if await store.cancel_job(j.id):
+                await events.publish_job(j.id, "job.canceled")
 
 
 async def enqueue_regen(scene_id: str, *, use_edited_ply: bool) -> None:
