@@ -1,34 +1,110 @@
 name: release
 
-# Cuts a GitHub Release whenever a ``v*`` tag is pushed. Tagging the
-# same commit triggers ``build-images.yml`` in parallel, so the
-# release notes can reference the newly-published image tags by
-# version. Tag pushes also flush the Unreleased section of
-# CHANGELOG.md into a versioned entry (via git-cliff) and attach the
-# Android APK built without the +sha suffix.
+# Cuts a GitHub Release in two scenarios:
+#   1. A ``v*`` tag is pushed (manual ``git tag v0.2.0 && git push
+#      origin v0.2.0``).
+#   2. A change to ``VERSION`` lands on the default branch — auto-
+#      tagging path. Bumping the file in a PR and merging is the
+#      whole release ritual; this workflow tags the merge commit
+#      and runs the rest of the release in the same run.
+#
+# Both scenarios converge on the same job graph: derive the
+# vX.Y.Z label, build the Android APK without the +sha suffix,
+# regenerate CHANGELOG.md via git-cliff, push the changelog back
+# to the default branch, and cut a GitHub Release with the APK
+# attached.
 
 on:
   push:
+    branches: [main, master]
+    paths: [VERSION]
     tags: ["v*"]
 
 permissions:
-  # ``contents: write`` for both the release body itself and the
-  # CHANGELOG.md commit-back to master.
+  # ``contents: write`` covers both the release body itself, the
+  # CHANGELOG.md commit-back to default branch, and the auto-tag
+  # push on the VERSION-bump path.
   contents: write
 
 jobs:
+  # ─── Resolve the tag we're releasing (creates it on auto-bump) ──
+  setup:
+    name: resolve release tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      should_release: ${{ steps.resolve.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Default GITHUB_TOKEN is enough for ``git push origin
+          # vX.Y.Z`` — contents:write covers refs/tags. Workflow
+          # triggers downstream are gated by GitHub against the
+          # default token's own pushes, but the rest of this same
+          # workflow continues in-place so no downstream trigger
+          # is needed.
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - id: resolve
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        # On a tag push: use the tag name verbatim — fast path,
+        # nothing to create. On a VERSION-bump branch push: read
+        # the file, derive ``v<version>``, check whether the tag
+        # already exists (idempotent re-run safety), create + push
+        # it if not.
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" = "tag" ]; then
+            tag="$REF_NAME"
+            version="${tag#v}"
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          version="$(cat VERSION | tr -d '[:space:]')"
+          if [ -z "$version" ]; then
+            echo "::error ::VERSION file is empty"
+            exit 1
+          fi
+          tag="v$version"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if git rev-parse --verify "refs/tags/$tag" >/dev/null 2>&1; then
+            # Tag already exists for this VERSION. Skip the rest —
+            # this run was triggered by an unrelated edit to VERSION
+            # (whitespace, comment, etc.) and there's nothing new
+            # to release.
+            echo "::notice ::tag $tag already exists; skipping release"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "Release $tag"
+          git push origin "$tag"
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+
   # ─── Android APK build ─────────────────────────────────────────
   apk:
     name: build apk
+    needs: setup
+    if: needs.setup.outputs.should_release == 'true'
     runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.label.outputs.version }}
-      apk_path: ${{ steps.rename.outputs.apk_path }}
     defaults:
       run:
         working-directory: android
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Check out the freshly-created tag (auto-bump path) or
+          # the tag that triggered the workflow directly (manual
+          # tag push). Either way the working tree reflects the
+          # exact commit the release points to.
+          ref: ${{ needs.setup.outputs.tag }}
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -36,40 +112,33 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: bootstrap gradle wrapper
         run: gradle wrapper --gradle-version 8.10
-      - name: derive version from tag
-        id: label
-        # Tag is ``vX.Y.Z`` — strip the leading ``v`` for the
-        # versionName. Clean (no +sha suffix) so an installed
-        # tagged APK reads as a release rather than a dev build.
+      - name: set version label
+        # Clean version (no +sha suffix) so an installed tagged
+        # APK reads as a release rather than a dev build.
         run: |
-          tag="${GITHUB_REF#refs/tags/}"
-          version="${tag#v}"
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "APP_BUILD_LABEL=${version}" >> "$GITHUB_ENV"
+          echo "APP_BUILD_LABEL=${{ needs.setup.outputs.version }}" >> "$GITHUB_ENV"
       - name: assemble debug
         # Debug build still — Pebble doesn't yet have a release
         # signing setup. When signing lands, switch to assembleRelease
         # and add the keystore secrets here.
         run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
       - name: rename APK for release
-        id: rename
         run: |
           src="app/build/outputs/apk/debug/app-debug.apk"
-          dst="app/build/outputs/apk/debug/pebble-v${{ steps.label.outputs.version }}.apk"
+          dst="app/build/outputs/apk/debug/pebble-v${{ needs.setup.outputs.version }}.apk"
           cp "$src" "$dst"
-          echo "apk_path=android/$dst" >> "$GITHUB_OUTPUT"
       - name: upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pebble-apk-${{ steps.label.outputs.version }}
+          name: pebble-apk-${{ needs.setup.outputs.version }}
           path: android/app/build/outputs/apk/debug/pebble-v*.apk
           retention-days: 90
 
   # ─── Changelog regen + GitHub Release ──────────────────────────
   release:
     name: cut release
-    needs: apk
+    needs: [setup, apk]
+    if: needs.setup.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -78,9 +147,7 @@ jobs:
           # can diff against it; otherwise the generated entries
           # would be limited to the tag commit's own metadata.
           fetch-depth: 0
-          # Use a PAT or the workflow token that can push back to
-          # master; the default GITHUB_TOKEN has contents:write
-          # which is enough for normal pushes.
+          ref: ${{ needs.setup.outputs.tag }}
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: pull APK
         uses: actions/download-artifact@v4
@@ -94,7 +161,7 @@ jobs:
           # cliff.toml at repo root configures the rendering shape
           # (sections, conventional-commit parsers, footer trim).
           config: cliff.toml
-          args: --tag ${{ github.ref_name }} --output CHANGELOG.md
+          args: --tag ${{ needs.setup.outputs.tag }} --output CHANGELOG.md
         env:
           OUTPUT: CHANGELOG.md
       - name: commit CHANGELOG.md
@@ -115,7 +182,7 @@ jobs:
           fi
           if [ -n "$(git status --porcelain CHANGELOG.md)" ]; then
             git add CHANGELOG.md
-            git commit -m "chore: regenerate CHANGELOG.md for ${{ github.ref_name }}"
+            git commit -m "chore: regenerate CHANGELOG.md for ${{ needs.setup.outputs.tag }}"
             if ! git push origin "HEAD:$DEFAULT_BRANCH"; then
               echo "::warning ::could not push CHANGELOG to $DEFAULT_BRANCH (branch protection?)"
             fi
@@ -130,6 +197,7 @@ jobs:
       - name: cut GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.setup.outputs.tag }}
           body: ${{ steps.notes.outputs.changelog }}
           generate_release_notes: true
           # Attach the APK built upstream so the release page
