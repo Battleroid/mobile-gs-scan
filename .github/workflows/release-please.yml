@@ -46,11 +46,15 @@ jobs:
       - uses: googleapis/release-please-action@v4
         id: rp
         with:
-          # ``simple`` release type: VERSION file is the single
-          # source of truth for the package version. release-please
-          # bumps it + maintains CHANGELOG.md; no per-language
-          # manifest indirection (which the node / python / java
-          # release-types would require).
+          # ``simple`` release type: ``version.txt`` at the repo
+          # root is the single source of truth for the package
+          # version. release-please bumps it + maintains
+          # CHANGELOG.md; no per-language manifest indirection
+          # (which the node / python / java release-types would
+          # require). ``version.txt`` is the filename release-
+          # please's simple strategy reads + writes by default,
+          # which is why our build configs read from that path
+          # too.
           release-type: simple
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -84,7 +88,7 @@ jobs:
         run: gradle wrapper --gradle-version 8.10
       - name: set version label
         # Clean version (no +sha suffix). The base ``versionName``
-        # already comes from VERSION via build.gradle.kts; we
+        # already comes from version.txt via build.gradle.kts; we
         # override APP_BUILD_LABEL so the SHA suffix isn't
         # appended for tagged builds.
         run: |

@@ -5,13 +5,20 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
-// Read the repo-wide ``VERSION`` file. Single source of truth for the
-// semantic part of the app version on both Android and web; bumped
-// manually before tagging a ``v*`` release. Wrapped in a try/catch so
-// a missing file in unusual checkouts (no-history clone, CI cache miss)
-// falls back to a known default rather than failing configuration.
+// Read the repo-wide ``version.txt`` file. Single source of truth
+// for the semantic part of the app version on both Android and web;
+// release-please bumps it (via the release PR it opens against
+// master). Wrapped in a try/catch so a missing file in unusual
+// checkouts (no-history clone, CI cache miss) falls back to a
+// known default rather than failing configuration.
+//
+// The filename is ``version.txt`` rather than ``VERSION`` because
+// that's the file release-please's ``simple`` release-type reads
+// and updates by default — keeping the name on the convention
+// avoids needing release-please-specific annotations inside the
+// file.
 val appBaseVersion: String = runCatching {
-    rootProject.file("../VERSION").readText().trim()
+    rootProject.file("../version.txt").readText().trim()
 }.getOrDefault("0.1.0")
 
 // Short git SHA for the current HEAD. Appended to ``versionName`` as

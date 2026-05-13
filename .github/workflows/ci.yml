@@ -96,13 +96,14 @@ jobs:
       - name: compute build label
         id: label
         # Build label format: ``0.1.0+ab12cd3``. Base version comes
-        # from the repo-root VERSION file (single source of truth
-        # shared with the web build); SHA is whatever GitHub Actions
-        # checked out. Exposed as a step output AND env var so the
-        # next steps can use either without re-reading.
+        # from the repo-root version.txt file (single source of
+        # truth shared with the web build, and what release-please's
+        # ``simple`` release-type bumps); SHA is whatever GitHub
+        # Actions checked out. Exposed as a step output AND env
+        # var so the next steps can use either without re-reading.
         working-directory: ${{ github.workspace }}
         run: |
-          base="$(cat VERSION | tr -d '[:space:]')"
+          base="$(cat version.txt | tr -d '[:space:]')"
           sha="$(git rev-parse --short HEAD)"
           label="${base}+${sha}"
           echo "base=${base}" >> "$GITHUB_OUTPUT"
