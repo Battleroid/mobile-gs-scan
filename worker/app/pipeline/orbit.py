@@ -121,23 +121,41 @@ async def run_orbit(
             await progress(1.0, f"orbit: skipped ({reason})")
             return {"permanent_skip": reason}
 
-        await progress(0.1, "orbit: ply-render (rasterizing frames)")
+        await progress(0.05, "orbit: ply-render (loading scene)")
         c2ws = _orbit_camera_path(src_ply)
-        frames = ply_render.render_frames(
-            ply_path=src_ply,
-            c2ws_opengl=c2ws,
-            fov_deg=DEFAULT_FOV_DEG,
-            width=ORBIT_W,
-            height=ORBIT_H,
-        )
-        if len(frames) < ORBIT_FRAMES:
-            raise RuntimeError(
-                f"ply_render produced {len(frames)} frames; expected {ORBIT_FRAMES}"
+        # Load PLY → GPU tensors ONCE off-thread so the event loop
+        # can run heartbeats during the (cheap but still blocking)
+        # parse + upload step.
+        prepared = await asyncio.to_thread(ply_render.prepare_scene, src_ply)
+
+        # Render + PNG-encode per frame in a thread, with an
+        # asyncio.sleep(0) between each. This is the cancellation
+        # checkpoint: without it, gsplat.rasterization holds the
+        # event loop for ~30 s and the worker's heartbeat task
+        # can't observe ``status=canceled`` until the whole orbit
+        # finishes. With per-frame await yields, the heartbeat
+        # ticks ~every 600 ms and a user-cancel mid-orbit
+        # propagates within a frame boundary instead of after the
+        # full render.
+        for i, c2w in enumerate(c2ws[:ORBIT_FRAMES]):
+            frame = await asyncio.to_thread(
+                ply_render.render_one,
+                prepared,
+                c2w,
+                fov_deg=DEFAULT_FOV_DEG,
+                width=ORBIT_W,
+                height=ORBIT_H,
             )
-        await progress(0.65, "orbit: writing frame sequence")
-        for i, frame in enumerate(frames[:ORBIT_FRAMES]):
-            Image.fromarray(frame).save(
-                seq_dir / f"{i:05d}.png", format="PNG", optimize=False,
+            await asyncio.to_thread(
+                lambda f=frame, p=seq_dir / f"{i:05d}.png":
+                Image.fromarray(f).save(p, format="PNG", optimize=False),
+            )
+            # Yield to the event loop so the heartbeat task can
+            # run + observe any user cancel between frames.
+            await asyncio.sleep(0)
+            await progress(
+                0.1 + 0.55 * ((i + 1) / ORBIT_FRAMES),
+                f"orbit: ply-render frame {i + 1}/{ORBIT_FRAMES}",
             )
     else:
         # Default ns-render path (against splatfacto checkpoint).

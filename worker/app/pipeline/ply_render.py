@@ -63,39 +63,25 @@ def is_available() -> tuple[bool, str | None]:
     return True, None
 
 
-def render_frames(
-    *,
-    ply_path: Path,
-    c2ws_opengl: Sequence[Sequence[float]],
-    fov_deg: float,
-    width: int,
-    height: int,
-):
-    """Render a batch of frames from one PLY at the given cameras.
+def prepare_scene(ply_path: Path):
+    """Load a splatfacto PLY into GPU tensors once. Returns an
+    opaque ``PreparedScene`` that subsequent ``render_one`` calls
+    can reuse without re-parsing or re-uploading.
 
-    Returns a numpy array of shape ``(N, H, W, 3)`` with dtype
-    ``uint8`` — RGB in [0, 255]. Caller batches because the GPU
-    setup (PLY load + tensor upload) is the dominant cost; one
-    camera is ~the same wall time as 24 cameras once the buffers
-    are resident.
+    Splitting prepare + render lets async callers (orbit step)
+    amortize the load cost across N frames AND interleave
+    ``await asyncio.sleep(0)`` between frames so the worker's
+    heartbeat task can run + observe ``status=canceled`` promptly.
+    Without this split the orbit's batched render holds the event
+    loop for the full ~30 s CUDA call and a user cancel mid-render
+    is delayed by minutes.
 
-    Args:
-        ply_path: source splatfacto PLY.
-        c2ws_opengl: list of N flattened 4×4 camera-to-world
-            matrices in nerfstudio / OpenGL convention (column 0
-            right, column 1 up, column 2 backward, column 3
-            position). Same flatten produced by
-            ``thumbnail._look_at``.
-        fov_deg: vertical field-of-view in degrees.
-        width, height: output dimensions.
+    Late imports — keep the module importable without CUDA so the
+    caller can probe ``is_available`` cleanly. Failures here are
+    programmer errors at this point.
     """
-    # Late imports — keep the module importable without CUDA so the
-    # caller can probe ``is_available`` cleanly. Failures here are
-    # programmer errors at this point (caller should have probed
-    # first), so we let the natural ImportError propagate.
     import numpy as np
     import torch
-    from gsplat.rendering import rasterization
     from plyfile import PlyData
 
     device = torch.device("cuda")
@@ -103,22 +89,15 @@ def render_frames(
         ply_path, device=device, np=np, torch=torch, PlyData=PlyData,
     )
 
-    # gsplat expects colors as either:
-    #   * raw SH coefficients with ``sh_degree>=0``: shape [N, K, 3]
-    #     where K = (degree+1)**2, OR
-    #   * already-converted RGB with ``sh_degree=None``: [N, 3]
-    # SH degree 0 is just a constant color per gaussian, so we
-    # convert ourselves with the standard SH C0 coefficient and
-    # pass raw RGB. Bypasses any per-gsplat-version SH internals
-    # and the [N, 3] path is the cheapest.
+    # SH degree 0 → RGB via the standard SH C0 coefficient. Pass
+    # already-converted RGB into gsplat (sh_degree=None) — the
+    # cheapest input path and bypasses per-gsplat-version SH
+    # internals.
     SH_C0 = 0.28209479177387814  # 1 / (2 * sqrt(pi))
     rgb = (0.5 + SH_C0 * colors_dc).clamp(0.0, 1.0)
 
-    # Build viewmats (world→camera in OpenCV convention) and
-    # intrinsics. nerfstudio camera_to_world is OpenGL convention;
-    # gsplat wants OpenCV. The Y/Z flip below converts:
-    #   OpenGL: +X right, +Y up,    +Z back
-    #   OpenCV: +X right, +Y down,  +Z forward
+    # OpenGL → OpenCV camera-axis flip (Y and Z negated). Cached
+    # so each render_one call doesn't rebuild it.
     flip_yz = torch.tensor(
         [
             [1.0, 0.0, 0.0, 0.0],
@@ -128,49 +107,92 @@ def render_frames(
         ],
         device=device,
     )
-    c2w_opengl = torch.tensor(
-        [list(c) for c in c2ws_opengl], device=device, dtype=torch.float32,
-    ).view(-1, 4, 4)
-    c2w_opencv = c2w_opengl @ flip_yz
+
+    return {
+        "device": device,
+        "means": means,
+        "quats": quats,
+        "scales": scales,
+        "opacities": opacities,
+        "rgb": rgb,
+        "flip_yz": flip_yz,
+    }
+
+
+def render_one(
+    prepared,
+    c2w_opengl: Sequence[float],
+    *,
+    fov_deg: float,
+    width: int,
+    height: int,
+):
+    """Render a single frame against a pre-loaded scene. Returns a
+    ``(H, W, 3)`` uint8 numpy array. Synchronous CUDA work; call
+    via ``asyncio.to_thread`` from async paths so the event loop
+    stays free for heartbeats."""
+    import torch
+    from gsplat.rendering import rasterization
+
+    device = prepared["device"]
+    flip_yz = prepared["flip_yz"]
+
+    c2w = torch.tensor(
+        list(c2w_opengl), device=device, dtype=torch.float32,
+    ).view(1, 4, 4)
+    c2w_opencv = c2w @ flip_yz
     viewmats = torch.linalg.inv(c2w_opencv)
 
-    # Pinhole intrinsics from vertical FoV. Square pixels: fx = fy.
     fov_rad = math.radians(fov_deg)
     fy = height / (2.0 * math.tan(fov_rad / 2.0))
     fx = fy
-    cx = width / 2.0
-    cy = height / 2.0
     K = torch.tensor(
-        [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]],
+        [[fx, 0.0, width / 2.0], [0.0, fy, height / 2.0], [0.0, 0.0, 1.0]],
         device=device,
         dtype=torch.float32,
-    )
-    Ks = K.unsqueeze(0).expand(viewmats.shape[0], 3, 3).contiguous()
+    ).unsqueeze(0)
 
-    # Rasterize. gsplat returns colors at shape [C, H, W, 3]
-    # alongside alpha + a meta dict; we only consume colors. The
-    # default ``rasterize_mode="classic"`` matches what splatfacto
-    # uses at training time.
     render_colors, _alphas, _meta = rasterization(
-        means=means,
-        quats=quats,
-        scales=scales,
-        opacities=opacities,
-        colors=rgb,
+        means=prepared["means"],
+        quats=prepared["quats"],
+        scales=prepared["scales"],
+        opacities=prepared["opacities"],
+        colors=prepared["rgb"],
         viewmats=viewmats,
-        Ks=Ks,
+        Ks=K,
         width=width,
         height=height,
         sh_degree=None,
-        # near_plane / far_plane defaults are fine for the
-        # bbox-fit cameras the still + orbit produce. Going past
-        # the defaults can cull foreground gaussians and produce
-        # an empty render.
     )
-
-    # [C, H, W, 3] → uint8 RGB on CPU for PNG encoding.
-    out = (render_colors.clamp(0.0, 1.0) * 255.0).to(torch.uint8).cpu().numpy()
+    out = (render_colors[0].clamp(0.0, 1.0) * 255.0).to(torch.uint8).cpu().numpy()
     return out
+
+
+def render_frames(
+    *,
+    ply_path: Path,
+    c2ws_opengl: Sequence[Sequence[float]],
+    fov_deg: float,
+    width: int,
+    height: int,
+):
+    """Synchronous batched render — convenience for non-async
+    callers (tests, scripts). Loops over [prepare_scene +
+    render_one] internally. Async callers should use prepare_scene
+    + render_one directly with ``asyncio.to_thread`` so per-frame
+    work doesn't block the event loop.
+
+    Returns a numpy array of shape ``(N, H, W, 3)`` with dtype
+    ``uint8`` — RGB in [0, 255].
+    """
+    import numpy as np
+
+    prepared = prepare_scene(ply_path)
+    frames = [
+        render_one(prepared, c2w, fov_deg=fov_deg, width=width, height=height)
+        for c2w in c2ws_opengl
+    ]
+    return np.stack(frames, axis=0)
 
 
 def render_png(
@@ -182,20 +204,18 @@ def render_png(
     height: int,
 ) -> bytes:
     """Render a single frame and PNG-encode it. Convenience for
-    the still-thumbnail path; the orbit step uses ``render_frames``
-    directly and pipes the RGB sequence to ffmpeg.
+    the still-thumbnail path; the orbit step uses prepare_scene +
+    per-frame render_one for cancellation-friendly streaming.
     """
     from PIL import Image  # late import, Pillow ships with torch
 
-    frames = render_frames(
-        ply_path=ply_path,
-        c2ws_opengl=[list(c2w_opengl)],
-        fov_deg=fov_deg,
-        width=width,
-        height=height,
+    prepared = prepare_scene(ply_path)
+    arr = render_one(
+        prepared, c2w_opengl,
+        fov_deg=fov_deg, width=width, height=height,
     )
     buf = io.BytesIO()
-    Image.fromarray(frames[0]).save(buf, format="PNG", optimize=True)
+    Image.fromarray(arr).save(buf, format="PNG", optimize=True)
     return buf.getvalue()
 
 

@@ -112,7 +112,14 @@ async def run_thumbnail(
 
         await progress(0.1, "thumbnail: ply-render (camera + rasterize)")
         camera_to_world = _camera_for_ply(src_ply)
-        png_bytes = ply_render.render_png(
+        # Off-thread so the event loop stays free for heartbeats
+        # during the ~500 ms PLY load + CUDA render. Single frame
+        # so we don't need the per-frame cooperative-cancel
+        # ceremony the orbit step has — the whole call is brief
+        # enough that wait-on-cancel is bounded by one render
+        # cycle.
+        png_bytes = await asyncio.to_thread(
+            ply_render.render_png,
             ply_path=src_ply,
             c2w_opengl=camera_to_world,
             fov_deg=DEFAULT_FOV_DEG,
