@@ -364,21 +364,29 @@ class CaptureActivity : ComponentActivity() {
 
     private fun onFinishTapped() {
         val frames = draft?.meta?.frame_count ?: 0
-        // No frames committed → always discard. Covers:
-        //   * user hit "+ new" and immediately backed out (most
-        //     common — used to leave an orphan 0-frame draft on the
-        //     home screen)
+        // No frames committed → discard. Single condition (not
+        // gated on captureGateActive) so a second back press while
+        // the Finish prompt is already up doesn't silently delete
+        // a draft that has frames in it. The gate-active check
+        // would invert on re-entry — first call flips the gate to
+        // false to stop recording, second call sees `!gate` and
+        // would erase a non-empty draft.
+        //
+        // Covers both legacy discard cases by virtue of the frames
+        // check alone:
+        //   * user hit "+ new" and immediately backed out (gate
+        //     never flipped, frames = 0)
         //   * user tapped Start but Finished / backed out before any
-        //     frame landed on disk
-        // Either way there's nothing to upload, no recovery value
-        // in keeping the draft directory around.
-        if (!captureGateActive || frames == 0) {
+        //     frame landed on disk (gate flipped, frames = 0)
+        if (frames == 0) {
             draft?.delete()
             finish()
             return
         }
         // Surface the three-way prompt; Finish is committed when
-        // the user picks one of the three handlers.
+        // the user picks one of the three handlers. Idempotent on
+        // re-entry — second back press while the dialog is up just
+        // re-applies the same MutableStateFlow values.
         captureGateActive = false
         state.update { it.copy(captureActive = false) }
         dialogs.update {
