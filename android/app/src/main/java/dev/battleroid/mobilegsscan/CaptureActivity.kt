@@ -11,6 +11,7 @@ import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -146,6 +147,20 @@ class CaptureActivity : ComponentActivity() {
         state.update {
             it.copy(sessionName = draft?.meta?.name.orEmpty())
         }
+
+        // Back-press handler: route through the same logic as
+        // tapping FINISH. A user who hit "+ new" then backed out
+        // without recording anything used to leave an empty draft
+        // sitting on the home screen; mirror onFinishTapped so the
+        // gesture cleans up after itself. With frames recorded,
+        // back surfaces the three-way Finish prompt — same as
+        // tapping the CTA — so the user doesn't accidentally lose
+        // work to a stray gesture.
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                onFinishTapped()
+            }
+        })
 
         setContent {
             PebbleTheme {
@@ -348,18 +363,45 @@ class CaptureActivity : ComponentActivity() {
     }
 
     private fun onFinishTapped() {
-        if (!captureGateActive) {
-            // Never started — discard the empty draft and back out.
+        val frames = draft?.meta?.frame_count ?: 0
+        // No frames committed → discard. Single condition (not
+        // gated on captureGateActive) so a second back press while
+        // the Finish prompt is already up doesn't silently delete
+        // a draft that has frames in it. The gate-active check
+        // would invert on re-entry — first call flips the gate to
+        // false to stop recording, second call sees `!gate` and
+        // would erase a non-empty draft.
+        //
+        // Covers both legacy discard cases by virtue of the frames
+        // check alone:
+        //   * user hit "+ new" and immediately backed out (gate
+        //     never flipped, frames = 0)
+        //   * user tapped Start but Finished / backed out before any
+        //     frame landed on disk (gate flipped, frames = 0)
+        if (frames == 0) {
+            // Stop the GL thread before deleting — otherwise an
+            // in-flight `onDrawFrame` that already passed its
+            // `if (!captureGateActive) return` check can race into
+            // `appendFrame` against a just-deleted draft directory
+            // and trigger a `frame write failed` toast on a screen
+            // the user has already backed out of. Flipping the gate
+            // doesn't fully eliminate the race (a frame that's
+            // already past the gate-check still completes), but the
+            // appendFrame try/catch swallows that one exception
+            // cleanly — and any subsequent draw call short-circuits.
+            captureGateActive = false
             draft?.delete()
             finish()
             return
         }
         // Surface the three-way prompt; Finish is committed when
-        // the user picks one of the three handlers.
+        // the user picks one of the three handlers. Idempotent on
+        // re-entry — second back press while the dialog is up just
+        // re-applies the same MutableStateFlow values.
         captureGateActive = false
         state.update { it.copy(captureActive = false) }
         dialogs.update {
-            it.copy(finishPrompt = FinishPrompt(frameCount = draft?.meta?.frame_count ?: 0))
+            it.copy(finishPrompt = FinishPrompt(frameCount = frames))
         }
     }
 
