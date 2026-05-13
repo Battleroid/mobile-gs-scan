@@ -117,6 +117,15 @@ export const api = {
       `/api/jobs/${id}/cancel`,
       { method: "POST" },
     ),
+  // Enqueue a fresh copy of a failed / canceled job. The original
+  // row stays as audit; the new one starts from ``queued`` and the
+  // runner picks it up on its next claim cycle. Server enforces
+  // the status gate (409 on completed / in-flight rows).
+  retryJob: (id: string) =>
+    jsonReq<{ ok: boolean; job_id: string; kind: string; status: string }>(
+      `/api/jobs/${id}/retry`,
+      { method: "POST" },
+    ),
   // Replace this scene's edit recipe and (re)enqueue the filter job.
   // Idempotent — calling again with a different recipe cancels any
   // in-flight filter job and starts fresh.

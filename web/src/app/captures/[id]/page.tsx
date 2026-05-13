@@ -408,6 +408,12 @@ function PipelineJobRow({ job }: { job: Job }) {
     job.status === "claimed" ||
     job.status === "running";
   const [cancelling, setCancelling] = useState(false);
+  // Retry is offered on terminal-non-success rows. Server enforces
+  // the same gate (409 otherwise), but mirroring it on the client
+  // keeps the button out of the disabled-but-clickable trap.
+  const retryable =
+    job.status === "failed" || job.status === "canceled";
+  const [retrying, setRetrying] = useState(false);
   const dot =
     job.status === "completed"
       ? "bg-accent3"
@@ -426,6 +432,17 @@ function PipelineJobRow({ job }: { job: Job }) {
       window.alert(`cancel failed: ${(err as Error).message}`);
     } finally {
       setCancelling(false);
+    }
+  };
+
+  const onRetry = async () => {
+    setRetrying(true);
+    try {
+      await api.retryJob(job.id);
+    } catch (err) {
+      window.alert(`retry failed: ${(err as Error).message}`);
+    } finally {
+      setRetrying(false);
     }
   };
 
@@ -456,6 +473,16 @@ function PipelineJobRow({ job }: { job: Job }) {
               className="font-mono text-[11px] text-danger underline hover:text-fg disabled:opacity-50"
             >
               {cancelling ? "…" : "cancel"}
+            </button>
+          )}
+          {retryable && (
+            <button
+              type="button"
+              onClick={onRetry}
+              disabled={retrying}
+              className="font-mono text-[11px] text-accent underline hover:text-fg disabled:opacity-50"
+            >
+              {retrying ? "…" : "retry"}
             </button>
           )}
         </div>

@@ -135,6 +135,56 @@ async def cancel_job_endpoint(job_id: str) -> dict:
     }
 
 
+@router.post("/{job_id}/retry")
+async def retry_job_endpoint(job_id: str) -> dict:
+    """Enqueue a fresh copy of a failed / canceled job.
+
+    The original row stays in the DB unchanged as an audit trail;
+    callers (web PipelineJobRow, Android JobDetailScreen) surface
+    the retry button only on terminal-non-success rows.
+
+    Only failed and canceled rows are eligible — running / claimed /
+    queued / completed all return 409. Retrying a completed job
+    would silently double-run; retrying an in-flight job would
+    introduce a parallel run of the same kind for the same scene
+    (the cancel-then-retry flow does this in two steps, which is
+    what the existing UI promises).
+
+    Restoring scene-level status (``scene.status``,
+    ``edit_status``, ``mesh_status``) is intentionally left to the
+    runner's normal claim path. ``_run_one`` flips
+    ``scene.status`` to ``processing`` on every pipeline-kind
+    claim; ``_run_filter`` / ``_run_mesh`` flip their own status
+    columns the same way. By the time the user sees the retry
+    succeed, the scene is back to its expected mid-pipeline state.
+
+    Returns the new job's id + kind so the client can route to its
+    detail page (Android) or scroll the pipeline list (web).
+    """
+    job = await store.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "job not found")
+    if job.status not in (JobStatus.failed, JobStatus.canceled):
+        raise HTTPException(
+            409,
+            f"only failed/canceled jobs can be retried (this one is {job.status.value})",
+        )
+    new_job = await store.enqueue_job(
+        job.scene_id, job.kind, payload=job.payload or {},
+    )
+    if new_job is None:
+        # Scene cascaded away between get_job and enqueue — the
+        # capture-delete cascade just won. Surface 404 rather than
+        # silently dropping the retry.
+        raise HTTPException(404, "scene no longer exists")
+    return {
+        "ok": True,
+        "job_id": new_job.id,
+        "kind": new_job.kind.value,
+        "status": new_job.status.value,
+    }
+
+
 async def _reset_scene_status_for_canceled_job(
     *, scene_id: str, kind: JobKind,
 ) -> None:

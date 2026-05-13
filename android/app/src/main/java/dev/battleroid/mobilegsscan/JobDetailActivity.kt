@@ -1,6 +1,7 @@
 package dev.battleroid.mobilegsscan
 
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -39,6 +40,13 @@ import kotlinx.coroutines.launch
  * (sfm metrics, train stats, export paths) and the rendering
  * audience is debugging a failed job, so the raw payload is the
  * useful thing to show.
+ *
+ * Retry: failed / canceled rows surface a tomato "Retry" CTA at
+ * the bottom of the screen. Tapping POSTs ``/api/jobs/{id}/retry``
+ * which enqueues a fresh job of the same kind + payload; the user
+ * stays on this screen and the next poll tick can route them
+ * forward if we ever want detail-page-on-success behavior. For
+ * now a Toast confirms the new job was queued.
  */
 class JobDetailActivity : ComponentActivity() {
     companion object {
@@ -67,14 +75,12 @@ class JobDetailActivity : ComponentActivity() {
     // through running do NOT re-open if the user has explicitly
     // closed the panel.
     private var lastStatus: String = ""
-    private var baseUrl: String = ""
-    private var thumbFetched: Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        baseUrl = intent.getStringExtra(EXTRA_BASE_URL).orEmpty()
+        val baseUrl = intent.getStringExtra(EXTRA_BASE_URL).orEmpty()
         jobId = intent.getStringExtra(EXTRA_JOB_ID).orEmpty()
         val seedKind = intent.getStringExtra(EXTRA_JOB_KIND).orEmpty()
         if (baseUrl.isEmpty() || jobId.isEmpty()) {
@@ -92,6 +98,7 @@ class JobDetailActivity : ComponentActivity() {
                     state = current,
                     onBackClick = { finish() },
                     onToggleLog = ::toggleLog,
+                    onRetryClick = ::onRetryClick,
                 )
             }
         }
@@ -140,29 +147,6 @@ class JobDetailActivity : ComponentActivity() {
             )
         }
 
-        // Fetch the parent scene once to populate the thumbnail
-        // strip in the header. Skips when scene_id isn't known yet
-        // (early poll cycles), when a previous fetch already
-        // succeeded, or when the scene has no thumb yet. Failures
-        // are silent — the strip just stays hidden.
-        if (!thumbFetched) {
-            val sceneId = detail.scene_id
-            if (sceneId.isNotBlank()) {
-                val thumbRel = try {
-                    c.getScene(sceneId).thumb_url
-                } catch (_: Exception) {
-                    null
-                }
-                if (thumbRel != null) {
-                    val abs = dev.battleroid.mobilegsscan.ui.home.absoluteUrl(
-                        baseUrl, thumbRel,
-                    )
-                    state.update { it.copy(thumbAbsoluteUrl = abs) }
-                    thumbFetched = true
-                }
-            }
-        }
-
         if (state.value.log.open) {
             fetchAndRenderLog()
         }
@@ -175,6 +159,37 @@ class JobDetailActivity : ComponentActivity() {
             // Fetch immediately so the user doesn't have to wait for
             // the next 3 s poll tick.
             lifecycleScope.launch { fetchAndRenderLog() }
+        }
+    }
+
+    private fun onRetryClick() {
+        val c = client ?: return
+        if (state.value.retrying) return
+        state.update { it.copy(retrying = true) }
+        lifecycleScope.launch {
+            try {
+                c.retryJob(jobId)
+                Toast.makeText(
+                    this@JobDetailActivity,
+                    "Queued a fresh job",
+                    Toast.LENGTH_SHORT,
+                ).show()
+                // Force a poll tick so the row's status flips back
+                // to ``queued`` / ``running`` visibly without waiting
+                // for the next 3 s cycle. The polled row will keep
+                // showing the ORIGINAL job (id didn't change) — but
+                // the parent capture page will see the new job
+                // appear in the pipeline list on its next refresh.
+                pollOnce()
+            } catch (e: Exception) {
+                Toast.makeText(
+                    this@JobDetailActivity,
+                    "Retry failed: ${e.message ?: "unknown"}",
+                    Toast.LENGTH_LONG,
+                ).show()
+            } finally {
+                state.update { it.copy(retrying = false) }
+            }
         }
     }
 
