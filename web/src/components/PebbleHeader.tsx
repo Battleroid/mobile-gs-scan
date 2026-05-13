@@ -25,6 +25,13 @@ const NAV: { href: string; label: string }[] = [
 // standalone splat viewer popup is fullscreen).
 const HEADERLESS = new Set(["/sign-in", "/viewer"]);
 
+// Build label baked at build time by next.config.mjs. For dev
+// builds this is ``0.1.0+ab12cd3`` so the chip pinpoints exactly
+// which commit produced the bundle; tagged releases drop the SHA
+// suffix via APP_BUILD_LABEL. Fall back to the base version if
+// nothing was injected so the chip never renders as ``v · LAN``.
+const appVersion = process.env.NEXT_PUBLIC_APP_VERSION || "0.1.0";
+
 export function PebbleHeader() {
   const pathname = usePathname();
   if (pathname && HEADERLESS.has(pathname)) return null;
@@ -39,8 +46,11 @@ export function PebbleHeader() {
         <Link href="/" className="flex items-center gap-3">
           <PebbleMark size={28} />
           <span className="text-lg font-semibold tracking-tight">pebble</span>
-          <span className="rounded-pill border border-rule px-2 py-[2px] font-mono text-[10px] uppercase tracking-wider text-muted">
-            v1.0 · LAN
+          <span
+            className="rounded-pill border border-rule px-2 py-[2px] font-mono text-[10px] uppercase tracking-wider text-muted"
+            title={`build ${appVersion}`}
+          >
+            v{appVersion} · LAN
           </span>
         </Link>
 

@@ -5,6 +5,41 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// Read the repo-wide ``VERSION`` file. Single source of truth for the
+// semantic part of the app version on both Android and web; bumped
+// manually before tagging a ``v*`` release. Wrapped in a try/catch so
+// a missing file in unusual checkouts (no-history clone, CI cache miss)
+// falls back to a known default rather than failing configuration.
+val appBaseVersion: String = runCatching {
+    rootProject.file("../VERSION").readText().trim()
+}.getOrDefault("0.1.0")
+
+// Short git SHA for the current HEAD. Appended to ``versionName`` as
+// ``v0.1.0+ab12cd3`` for non-release builds so an installed APK
+// reports exactly which commit produced it. Empty string when git
+// isn't available (gradle sync from a tarball, sandboxed CI) — in
+// that case versionName is just the base version, matching how a
+// tagged release renders.
+val appBuildSha: String = runCatching {
+    val proc = ProcessBuilder("git", "rev-parse", "--short", "HEAD")
+        .directory(rootProject.projectDir.parentFile)
+        .redirectErrorStream(true)
+        .start()
+    proc.waitFor()
+    proc.inputStream.bufferedReader().readText().trim()
+}.getOrDefault("")
+
+// Allow CI to override the suffix entirely (e.g. tagged release builds
+// pass APP_BUILD_LABEL="" so the APK reads as a clean ``v0.1.0``). The
+// "+sha" suffix is only added when there's a SHA to add AND no
+// override is set.
+val versionLabelOverride: String? = System.getenv("APP_BUILD_LABEL")
+val computedVersionName: String = when {
+    versionLabelOverride != null -> versionLabelOverride
+    appBuildSha.isNotEmpty() -> "$appBaseVersion+$appBuildSha"
+    else -> appBaseVersion
+}
+
 android {
     namespace = "dev.battleroid.mobilegsscan"
     compileSdk = 35
@@ -14,7 +49,17 @@ android {
         minSdk = 28
         targetSdk = 35
         versionCode = 1
-        versionName = "0.1.0"
+        versionName = computedVersionName
+
+        // Expose the version components to runtime code via
+        // BuildConfig so the home header chip + Profile screen can
+        // render them without parsing versionName back apart.
+        buildConfigField(
+            "String", "APP_BASE_VERSION", "\"$appBaseVersion\"",
+        )
+        buildConfigField(
+            "String", "APP_BUILD_SHA", "\"$appBuildSha\"",
+        )
     }
 
     buildTypes {

@@ -207,10 +207,13 @@ private fun HomeHeader(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
-        // Left: PebbleMark + wordmark. Mark is rendered as a Compose
-        // Canvas in [PebbleMark] later; for the foundation PR we
-        // use a tomato circle as a placeholder so the header layout
-        // is solid without dragging in the mark composable yet.
+        // Left: PebbleMark + wordmark + build-label chip. Mark is
+        // rendered as a Compose Canvas in [PebbleMark] later; for the
+        // foundation PR we use a tomato circle as a placeholder so
+        // the header layout is solid without dragging in the mark
+        // composable yet. The chip pins ``v<base>+<sha>`` from
+        // BuildConfig so a user reporting a bug can read the exact
+        // commit they're on without rummaging through Settings.
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
                 modifier = Modifier
@@ -226,6 +229,8 @@ private fun HomeHeader(
                 ),
                 color = pebble.ink,
             )
+            Spacer(Modifier.size(10.dp))
+            VersionChip()
         }
 
         // Right: live studio pill + gear button.
@@ -234,6 +239,36 @@ private fun HomeHeader(
             Spacer(Modifier.size(6.dp))
             SettingsButton(onClick = onSettingsClick)
         }
+    }
+}
+
+@Composable
+private fun VersionChip() {
+    val pebble = MaterialTheme.pebble
+    // Read from BuildConfig (populated by build.gradle.kts at compile
+    // time from the repo's VERSION file + git short-SHA). Falls back
+    // to the bare base version when the SHA is empty (sandboxed
+    // builds, tagged releases).
+    val label = dev.battleroid.mobilegsscan.BuildConfig.APP_BASE_VERSION.let { base ->
+        val sha = dev.battleroid.mobilegsscan.BuildConfig.APP_BUILD_SHA
+        if (sha.isBlank()) "v$base" else "v$base · $sha"
+    }
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .border(
+                width = 1.dp,
+                color = pebble.rule,
+                shape = RoundedCornerShape(999.dp),
+            )
+            .padding(horizontal = 8.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = pebble.inkMuted,
+        )
     }
 }
 

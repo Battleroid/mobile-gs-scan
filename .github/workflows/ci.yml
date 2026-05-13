@@ -93,15 +93,45 @@ jobs:
         # Same one-time wrapper bootstrap that `make android-bootstrap`
         # does locally. Idempotent.
         run: gradle wrapper --gradle-version 8.10
+      - name: compute build label
+        id: label
+        # Build label format: ``0.1.0+ab12cd3``. Base version comes
+        # from the repo-root VERSION file (single source of truth
+        # shared with the web build); SHA is whatever GitHub Actions
+        # checked out. Exposed as a step output AND env var so the
+        # next steps can use either without re-reading.
+        working-directory: ${{ github.workspace }}
+        run: |
+          base="$(cat VERSION | tr -d '[:space:]')"
+          sha="$(git rev-parse --short HEAD)"
+          label="${base}+${sha}"
+          echo "base=${base}" >> "$GITHUB_OUTPUT"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "label=${label}" >> "$GITHUB_OUTPUT"
+          echo "APP_BUILD_LABEL=${label}" >> "$GITHUB_ENV"
       - name: assemble debug
         run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
       - name: lint
         run: ./gradlew :app:lintDebug --no-daemon
         continue-on-error: true # informational in PR #1; gate later
+      - name: rename APK with version + sha
+        # Drops a copy of the APK at a versioned path so the
+        # downloaded artifact unpacks to ``pebble-v0.1.0+ab12cd3.apk``
+        # rather than the generic ``app-debug.apk`` — useful when
+        # sideloading two builds back-to-back to confirm an upgrade
+        # actually landed.
+        run: |
+          src="app/build/outputs/apk/debug/app-debug.apk"
+          dst="app/build/outputs/apk/debug/pebble-v${{ steps.label.outputs.label }}.apk"
+          cp "$src" "$dst"
       - name: upload debug apk
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug.apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          # Artifact NAME stays stable so a download URL pattern
+          # (``actions/runs/.../artifacts/.../app-debug``) keeps
+          # working across versions. The FILE inside the zip is
+          # the versioned one above.
+          name: app-debug
+          path: android/app/build/outputs/apk/debug/pebble-v*.apk
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 30

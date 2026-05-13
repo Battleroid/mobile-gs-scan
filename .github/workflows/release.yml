@@ -1,32 +1,132 @@
 name: release
 
-# Cuts a GitHub Release whenever a `v*` tag is pushed. Tagging the same
-# commit triggers `build-images.yml` in parallel, so the release notes
-# can reference the newly-published image tags by version.
+# Cuts a GitHub Release whenever a ``v*`` tag is pushed. Tagging the
+# same commit triggers ``build-images.yml`` in parallel, so the
+# release notes can reference the newly-published image tags by
+# version. Tag pushes also flush the Unreleased section of
+# CHANGELOG.md into a versioned entry (via git-cliff) and attach the
+# Android APK built without the +sha suffix.
 
 on:
   push:
     tags: ["v*"]
 
 permissions:
+  # ``contents: write`` for both the release body itself and the
+  # CHANGELOG.md commit-back to master.
   contents: write
 
 jobs:
+  # ─── Android APK build ─────────────────────────────────────────
+  apk:
+    name: build apk
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.label.outputs.version }}
+      apk_path: ${{ steps.rename.outputs.apk_path }}
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: bootstrap gradle wrapper
+        run: gradle wrapper --gradle-version 8.10
+      - name: derive version from tag
+        id: label
+        # Tag is ``vX.Y.Z`` — strip the leading ``v`` for the
+        # versionName. Clean (no +sha suffix) so an installed
+        # tagged APK reads as a release rather than a dev build.
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          version="${tag#v}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "APP_BUILD_LABEL=${version}" >> "$GITHUB_ENV"
+      - name: assemble debug
+        # Debug build still — Pebble doesn't yet have a release
+        # signing setup. When signing lands, switch to assembleRelease
+        # and add the keystore secrets here.
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
+      - name: rename APK for release
+        id: rename
+        run: |
+          src="app/build/outputs/apk/debug/app-debug.apk"
+          dst="app/build/outputs/apk/debug/pebble-v${{ steps.label.outputs.version }}.apk"
+          cp "$src" "$dst"
+          echo "apk_path=android/$dst" >> "$GITHUB_OUTPUT"
+      - name: upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pebble-apk-${{ steps.label.outputs.version }}
+          path: android/app/build/outputs/apk/debug/pebble-v*.apk
+          retention-days: 90
+
+  # ─── Changelog regen + GitHub Release ──────────────────────────
   release:
+    name: cut release
+    needs: apk
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # changelog generator walks back to previous tag
-
-      - id: notes
+          # Walk back to the previous tag so the changelog generator
+          # can diff against it; otherwise the generated entries
+          # would be limited to the tag commit's own metadata.
+          fetch-depth: 0
+          # Use a PAT or the workflow token that can push back to
+          # master; the default GITHUB_TOKEN has contents:write
+          # which is enough for normal pushes.
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: pull APK
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pebble-apk-*
+          path: dist
+          merge-multiple: true
+      - name: regenerate CHANGELOG.md
+        uses: orhun/git-cliff-action@v4
+        with:
+          # cliff.toml at repo root configures the rendering shape
+          # (sections, conventional-commit parsers, footer trim).
+          config: cliff.toml
+          args: --tag ${{ github.ref_name }} --output CHANGELOG.md
+        env:
+          OUTPUT: CHANGELOG.md
+      - name: commit CHANGELOG.md
+        # Push the regenerated changelog back to master so future
+        # tag-less builds see the updated content. Skip the push
+        # when nothing changed (idempotent for re-runs).
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -n "$(git status --porcelain CHANGELOG.md)" ]; then
+            git add CHANGELOG.md
+            git commit -m "chore: regenerate CHANGELOG.md for ${{ github.ref_name }}"
+            # Best-effort push to master; the tag commit doesn't
+            # need to know about this CHANGELOG bump (it's
+            # post-release housekeeping), so a failure here
+            # surfaces as a warning rather than a blocker.
+            git push origin HEAD:master || echo "could not push CHANGELOG to master (branch protection?)"
+          fi
+      - name: build release-notes body
+        id: notes
         uses: mikepenz/release-changelog-builder-action@v5
         with:
           configuration: ".github/release-notes.json"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: softprops/action-gh-release@v2
+      - name: cut GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
           body: ${{ steps.notes.outputs.changelog }}
           generate_release_notes: true
+          # Attach the APK built upstream so the release page
+          # serves it directly — no need to go fishing in the
+          # workflow artifact tab.
+          files: |
+            dist/pebble-v*.apk
