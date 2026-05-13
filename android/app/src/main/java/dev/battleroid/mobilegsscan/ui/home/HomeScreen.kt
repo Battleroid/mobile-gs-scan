@@ -245,13 +245,24 @@ private fun HomeHeader(
 @Composable
 private fun VersionChip() {
     val pebble = MaterialTheme.pebble
-    // Read from BuildConfig (populated by build.gradle.kts at compile
-    // time from the repo's VERSION file + git short-SHA). Falls back
-    // to the bare base version when the SHA is empty (sandboxed
-    // builds, tagged releases).
-    val label = dev.battleroid.mobilegsscan.BuildConfig.APP_BASE_VERSION.let { base ->
-        val sha = dev.battleroid.mobilegsscan.BuildConfig.APP_BUILD_SHA
-        if (sha.isBlank()) "v$base" else "v$base · $sha"
+    // Render the EXACT versionName the APK was packaged with — i.e.
+    // ``BuildConfig.VERSION_NAME``. Reconstructing the label from
+    // APP_BASE_VERSION + APP_BUILD_SHA would diverge from versionName
+    // whenever CI overrides it via APP_BUILD_LABEL (tagged releases
+    // ship ``0.1.0``; dev builds ship ``0.1.0+ab12cd3``). For
+    // readability the SHA suffix is rendered with a bullet separator
+    // instead of the plus sign — the underlying versionName stays
+    // semver-compliant.
+    val rawVersion = dev.battleroid.mobilegsscan.BuildConfig.VERSION_NAME
+    val label = "v" + rawVersion.replaceFirst('+', ' ').let { withSpace ->
+        // Two segments: ``base sha`` (after the swap) → render as
+        // ``base · sha``. One segment (no SHA): leave as is.
+        val parts = withSpace.split(' ', limit = 2)
+        if (parts.size == 2 && parts[1].isNotBlank()) {
+            "${parts[0]} · ${parts[1]}"
+        } else {
+            parts[0]
+        }
     }
     Row(
         modifier = Modifier
