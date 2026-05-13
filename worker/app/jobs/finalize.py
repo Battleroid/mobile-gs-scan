@@ -23,11 +23,21 @@ True immediately, the status flip is idempotent).
 from __future__ import annotations
 
 from app.jobs import events, store
-from app.jobs.schema import CaptureStatus, JobStatus
+from app.jobs.schema import CaptureStatus, JobKind, JobStatus
+
+# Job kinds that should NOT block scene finalization. These run
+# AFTER the scene has everything it needs to be marked completed,
+# and their failure / pending state shouldn't keep the home grid's
+# capture chip stuck on "training". Currently just JobKind.orbit
+# — the still PNG (JobKind.thumbnail) is the canonical thumbnail
+# and lands first; the MP4 orbit is a richer-feel backfill that
+# can take a few extra minutes. If we ever add other "richer feel"
+# post-pipeline jobs (preview spz, etc.) they belong here too.
+NON_BLOCKING_KINDS: frozenset[JobKind] = frozenset({JobKind.orbit})
 
 
 async def maybe_finalize_scene(scene_id: str) -> None:
-    """Mark scene + capture completed if every job is done.
+    """Mark scene + capture completed if every blocking job is done.
 
     Re-fetches the scene by id (rather than trusting a snapshot)
     so a caller that hands in a stale ``Scene`` post capture-delete
@@ -39,16 +49,26 @@ async def maybe_finalize_scene(scene_id: str) -> None:
     (→ canceled). The artifact-presence check keeps the rule
     durable as the pipeline evolves — no need to hardcode which
     JobKinds are essential.
+
+    ``NON_BLOCKING_KINDS`` (currently just ``JobKind.orbit``) is
+    skipped during the all-terminal pass so the scene can finalize
+    on PNG thumbnail completion without waiting for the heavier
+    MP4 orbit. The orbit job's own completion will re-call this
+    method, which is idempotent once the scene is already
+    completed (the unconditional status flip + event publish
+    re-run cheaply; if we ever want to suppress them, gate on a
+    `status == processing` check here).
     """
     refreshed = await store.get_scene(scene_id)
     if refreshed is None:
         return
     jobs = await store.list_jobs_for_scene(refreshed.id)
+    blocking = [j for j in jobs if j.kind not in NON_BLOCKING_KINDS]
     if any(
-        j.status not in (JobStatus.completed, JobStatus.canceled) for j in jobs
+        j.status not in (JobStatus.completed, JobStatus.canceled) for j in blocking
     ):
         return
-    if any(j.status == JobStatus.failed for j in jobs):
+    if any(j.status == JobStatus.failed for j in blocking):
         return
 
     if not refreshed.ply_path:

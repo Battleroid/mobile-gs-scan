@@ -95,7 +95,15 @@ export function CaptureCard({ capture }: { capture: Capture }) {
     refetchInterval: (query) => {
       if (isTraining) return 3_000;
       if (!canStillGainThumbnail) return false;
-      return query.state.data?.thumb_url ? false : 15_000;
+      // Keep polling while we're still waiting on EITHER the still
+      // PNG or the MP4 orbit. Two-stage thumbnail: thumb_url lands
+      // ~10 s post-export, orbit_url backfills 1-3 min later. Stop
+      // polling only once orbit has arrived (the richer asset);
+      // settling for the still PNG would mean the card never
+      // flips from img→video without a hard refresh.
+      const data = query.state.data;
+      if (data?.orbit_url) return false;
+      return 15_000;
     },
     refetchOnWindowFocus: false,
     refetchOnMount: true,
@@ -106,24 +114,49 @@ export function CaptureCard({ capture }: { capture: Capture }) {
   const thumbUrl = scene?.thumb_url
     ? api.base() + scene.thumb_url
     : null;
+  const orbitUrl = scene?.orbit_url
+    ? api.base() + scene.orbit_url
+    : null;
 
   return (
     <Link
       href={`/captures/${capture.id}`}
       className="group block overflow-hidden rounded-lg border border-rule bg-surface shadow-[0_1px_0_rgba(0,0,0,0.02)] transition-transform hover:-translate-y-[2px] hover:shadow-md"
     >
-      {/* Thumbnail. Trained scenes serve a server-rendered PNG via
-       *  the JobKind.thumbnail step — when present, it replaces the
-       *  gradient + sparse-particle placeholder. Training cards
-       *  layer a progress bar + 'splatfacto · NN%' chip on top of
-       *  whichever background is showing. */}
+      {/* Thumbnail. Trained scenes get a two-stage backing media:
+       *  the still PNG (JobKind.thumbnail) lands first and the MP4
+       *  orbit (JobKind.orbit) backfills the motion variant. Cards
+       *  prefer orbit when both are present, fall back to the PNG,
+       *  and finally to a chip-tinted gradient + sparse particles.
+       *  Training cards layer a progress bar + 'splatfacto · NN%'
+       *  chip on top of whichever background is showing. */}
       <div
         className="relative h-[180px] overflow-hidden"
         style={{
           background: `linear-gradient(135deg, ${from} 0%, ${to} 100%)`,
         }}
       >
-        {thumbUrl ? (
+        {orbitUrl ? (
+          // Autoplay loop, muted (per <video> autoplay policy on
+          // every modern browser; without muted the orbit would
+          // never start without a click). preload="metadata" so
+          // the browser fetches just enough to start playing on
+          // the first user-visible card without saturating the
+          // tab for a 24-card grid. playsInline keeps Safari from
+          // hijacking the orbit into a fullscreen player on iOS.
+          // Thumb PNG is the poster so the card paints something
+          // before the first MP4 frame decodes.
+          <video
+            src={orbitUrl}
+            poster={thumbUrl ?? undefined}
+            autoPlay
+            loop
+            muted
+            playsInline
+            preload="metadata"
+            className="absolute inset-0 h-full w-full object-cover"
+          />
+        ) : thumbUrl ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img
             src={thumbUrl}
