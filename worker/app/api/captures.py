@@ -121,6 +121,7 @@ def _to_view(
     *,
     thumb_url: str | None = None,
     orbit_url: str | None = None,
+    total_bytes: int = 0,
 ) -> CaptureView:
     return CaptureView(
         id=cap.id,
@@ -129,7 +130,14 @@ def _to_view(
         source=cap.source,
         frame_count=cap.frame_count,
         dropped_count=cap.dropped_count,
-        total_bytes=_capture_total_bytes(cap.id),
+        # 0 in list / create responses; populated in single-capture
+        # paths (detail GET, rename, WS snapshot) where the extra
+        # dirent walk is amortised over a single request. Computing
+        # it in the list response would turn ``GET /api/captures``
+        # into O(captures × frames) synchronous I/O on the event
+        # loop, which dominates list latency on shelves with hundreds
+        # of frames per capture.
+        total_bytes=total_bytes,
         has_pose=cap.has_pose,
         meta=cap.meta,
         error=cap.error,
@@ -202,11 +210,17 @@ async def get_capture(capture_id: str) -> CaptureView:
         raise HTTPException(404, "capture not found")
     scene = await store.get_scene_for_capture(cap.id)
     thumb_url, orbit_url = _scene_thumb_orbit_urls(scene)
+    # Offload the dirent walk to a thread so even a capture with
+    # thousands of frames doesn't block the event loop. Single
+    # capture per request — the per-request cost is bounded and
+    # the home grid's list path stays free of this work entirely.
+    total_bytes = await asyncio.to_thread(_capture_total_bytes, cap.id)
     return _to_view(
         cap,
         scene_id=scene.id if scene else None,
         thumb_url=thumb_url,
         orbit_url=orbit_url,
+        total_bytes=total_bytes,
     )
 
 
@@ -226,12 +240,14 @@ async def rename_capture(capture_id: str, body: CaptureRename) -> CaptureView:
     assert cap is not None  # re-read; row exists per the check above
     scene = await store.get_scene_for_capture(cap.id)
     thumb_url, orbit_url = _scene_thumb_orbit_urls(scene)
+    total_bytes = await asyncio.to_thread(_capture_total_bytes, cap.id)
     await events.publish_capture(cap.id, "capture.renamed", name=new_name)
     return _to_view(
         cap,
         scene_id=scene.id if scene else None,
         thumb_url=thumb_url,
         orbit_url=orbit_url,
+        total_bytes=total_bytes,
     )
 
 
@@ -476,6 +492,7 @@ async def capture_events_endpoint(ws: WebSocket, capture_id: str) -> None:
     try:
         scene = await store.get_scene_for_capture(cap.id)
         thumb_url, orbit_url = _scene_thumb_orbit_urls(scene)
+        total_bytes = await asyncio.to_thread(_capture_total_bytes, cap.id)
         await ws.send_text(
             json.dumps(
                 {
@@ -486,6 +503,7 @@ async def capture_events_endpoint(ws: WebSocket, capture_id: str) -> None:
                         scene_id=scene.id if scene else None,
                         thumb_url=thumb_url,
                         orbit_url=orbit_url,
+                        total_bytes=total_bytes,
                     ).model_dump(),
                 }
             )
