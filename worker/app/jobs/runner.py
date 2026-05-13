@@ -24,7 +24,7 @@ import traceback
 from pathlib import Path
 
 from app.config import Settings, get_settings
-from app.jobs import events, store
+from app.jobs import events, store, thumb_regen
 from app.jobs.finalize import maybe_finalize_scene as _shared_finalize_scene
 from app.jobs.schema import (
     CaptureStatus,
@@ -563,16 +563,26 @@ async def _run_filter(*, job: Job, scene: Scene, settings: Settings) -> None:
     # path overwrites Scene.thumbnail_path / Scene.orbit_path, so
     # the same artifact URLs serve the new content.
     #
+    # Cancel any in-flight thumbnail / orbit jobs for this scene
+    # FIRST. Multi-worker race: an older unedited render finishing
+    # after the regen enqueue would otherwise overwrite
+    # Scene.thumbnail_path / Scene.orbit_path with the pre-filter
+    # frame, leaving the user intermittently seeing the stale
+    # thumb. The cancel flips status=canceled and the worker's
+    # heartbeat loop catches that on its next tick to kill the
+    # subprocess (or abort cleanly if it's still in the pre-render
+    # setup). The cancel-ack paths in _run_thumbnail / _run_orbit
+    # leave Scene.thumbnail_path / Scene.orbit_path untouched, so
+    # the regen jobs we enqueue below land on a stable starting
+    # state.
+    #
     # Defensive try: a regen enqueue failure shouldn't propagate
     # as a filter failure — filter itself succeeded. The home
     # grid would just show the stale pre-filter thumb until the
     # user re-applies the filter or triggers a manual re-render.
     if result.get("ply"):
         try:
-            await store.enqueue_job(
-                scene.id, JobKind.thumbnail,
-                payload={"use_edited_ply": True},
-            )
+            await thumb_regen.enqueue_regen(scene.id, use_edited_ply=True)
         except Exception:
             log.exception(
                 "filter %s: failed to enqueue regen thumbnail",

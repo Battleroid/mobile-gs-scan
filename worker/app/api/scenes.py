@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.config import get_settings
-from app.jobs import events, store
+from app.jobs import events, store, thumb_regen
 from app.jobs.schema import EditStatus, JobKind, JobStatus, MeshStatus, Scene
 from app.pipeline.filter import validate_recipe
 from app.pipeline.mesh import DEFAULT_PARAMS as MESH_DEFAULT_PARAMS
@@ -316,6 +316,31 @@ async def clear_edit(scene_id: str) -> SceneView:
         edit_error=None,
     )
     await events.publish_scene(scene.id, "scene.edit_cleared")
+
+    # Regen the thumbnail / orbit pair against the ORIGINAL splat.
+    # Without this, the home grid would keep showing the filtered
+    # thumb after the user discarded their edit (Scene.thumbnail_path
+    # / Scene.orbit_path still point at the filter-regen renders on
+    # disk). The regen routes through ns-render against the
+    # splatfacto checkpoint at scene.ply_path — same code path the
+    # first post-export thumbnail used — so the output is byte-
+    # identical to the original thumbnail (just rebuilt). The
+    # helper also cancels any in-flight thumbnail / orbit jobs first
+    # so a stale filter-regen finishing after this enqueue can't
+    # overwrite the freshly-restored original thumbnail.
+    #
+    # Skip the regen when there's no original ply yet (capture is
+    # mid-pipeline, edge case for filter applied to a stub scene).
+    if scene.ply_path:
+        try:
+            await thumb_regen.enqueue_regen(scene.id, use_edited_ply=False)
+        except Exception:
+            log.exception(
+                "edit-clear %s: failed to enqueue thumbnail regen "
+                "(home grid will keep showing the filtered thumb "
+                "until next post-export render)",
+                scene.id,
+            )
 
     refreshed = await store.get_scene(scene.id)
     assert refreshed is not None
