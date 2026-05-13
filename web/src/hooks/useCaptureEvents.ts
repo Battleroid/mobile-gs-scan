@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { wsUrl } from "@/lib/api";
+import { api, wsUrl } from "@/lib/api";
 import type { Capture, ServerEvent } from "@/lib/types";
 
 // Capped exponential backoff for WS reconnects. 1s → 2s → 4s → 8s → 15s.
@@ -9,19 +9,27 @@ import type { Capture, ServerEvent } from "@/lib/types";
 // seconds, and the page sits visibly frozen until we reconnect.
 const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
 
-// How many times we'll retry before declaring the subscription
-// permanently failed (resource deleted, URL wrong, etc.). Only the
-// "never connected" path is gated: once we've successfully opened
-// at least once and the connection later drops, we treat it as a
-// transient blip and keep retrying forever with backoff.
-//
-// We can't gate retries on CloseEvent.code for the missing-resource
-// case — the server rejects the WS handshake via ``ws.close(4404)``
-// BEFORE ``ws.accept()`` (see worker/app/api/captures.py +
-// scenes.py), which the browser surfaces as a 1006 abnormal
-// closure (the same code transient network blips produce). The
-// attempt cap is the only durable signal here.
-const MAX_INITIAL_ATTEMPTS = 5;
+// HTTP existence probe used to distinguish "resource was deleted"
+// from "transient outage" when the WS keeps failing to open. The
+// server rejects missing-resource subscriptions via ``ws.close(4404)``
+// BEFORE ``ws.accept()`` (worker/app/api/captures.py +
+// scenes.py), which the browser surfaces as a 1006 abnormal closure
+// — indistinguishable from a transient network drop. Returns:
+//   true  → resource is reachable, keep retrying the WS
+//   false → server explicitly said 404, the resource is gone
+//   null  → couldn't tell (5xx, CORS, network error) — keep retrying
+async function probeCaptureExists(captureId: string): Promise<boolean | null> {
+  try {
+    const res = await fetch(`${api.base()}/api/captures/${captureId}`, {
+      method: "GET",
+    });
+    if (res.status === 404) return false;
+    if (res.ok) return true;
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 export function useCaptureEvents(captureId: string | null): {
   capture: Capture | null;
@@ -37,6 +45,17 @@ export function useCaptureEvents(captureId: string | null): {
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
     let everConnected = false;
+    let probedAfterFirstFail = false;
+
+    const scheduleReconnect = () => {
+      if (cancelled) return;
+      const delay =
+        RECONNECT_DELAYS_MS[
+          Math.min(attempt, RECONNECT_DELAYS_MS.length - 1)
+        ];
+      attempt += 1;
+      reconnectTimer = setTimeout(connect, delay);
+    };
 
     const connect = () => {
       if (cancelled) return;
@@ -77,17 +96,26 @@ export function useCaptureEvents(captureId: string | null): {
       };
       ws.onclose = () => {
         if (cancelled) return;
-        // If we've never opened, cap the attempts so a deleted or
-        // nonexistent capture doesn't loop forever. Once we've been
-        // connected at least once, treat every close as a transient
-        // drop and keep retrying — that's the actual reconnect goal.
-        if (!everConnected && attempt + 1 >= MAX_INITIAL_ATTEMPTS) return;
-        const delay =
-          RECONNECT_DELAYS_MS[
-            Math.min(attempt, RECONNECT_DELAYS_MS.length - 1)
-          ];
-        attempt += 1;
-        reconnectTimer = setTimeout(connect, delay);
+        // First failure on a hook that's never seen onopen: do an
+        // HTTP existence probe to discriminate "resource genuinely
+        // deleted" (server returns 404 → stop, no point retrying)
+        // from "transient outage" (anything else — keep retrying
+        // with backoff so the page recovers when the API comes back).
+        // The probe runs ONCE — for subsequent failures we just
+        // keep retrying indefinitely on the assumption that whatever
+        // the probe saw is still true. A capture deleted mid-session
+        // after we already connected once flows through the normal
+        // capture.deleted event on the WS.
+        if (!everConnected && !probedAfterFirstFail) {
+          probedAfterFirstFail = true;
+          void probeCaptureExists(captureId).then((exists) => {
+            if (cancelled) return;
+            if (exists === false) return; // 404 → permanent stop
+            scheduleReconnect();
+          });
+          return;
+        }
+        scheduleReconnect();
       };
       // onerror just precedes onclose for our purposes — let onclose
       // own the reconnect schedule so we don't double-fire.

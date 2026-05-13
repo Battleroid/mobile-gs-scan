@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { wsUrl } from "@/lib/api";
+import { api, wsUrl } from "@/lib/api";
 import type { Scene, ServerEvent } from "@/lib/types";
 
 // Capped exponential backoff for WS reconnects (1s → 2s → 4s → 8s
@@ -9,13 +9,22 @@ import type { Scene, ServerEvent } from "@/lib/types";
 // with no client-side reconnect; both hooks need the same recovery.
 const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
 
-// Cap initial-attempt retries. Mirror of useCaptureEvents — the
-// server rejects missing-scene subscriptions BEFORE accepting the
-// WS handshake (worker/app/api/scenes.py: ``ws.close(4404)`` before
-// ``ws.accept()``), so the browser sees a 1006 abnormal closure
-// indistinguishable from a transient drop. The attempt cap is the
-// only durable signal that we've hit a deleted/nonexistent resource.
-const MAX_INITIAL_ATTEMPTS = 5;
+// HTTP existence probe — see useCaptureEvents for the full rationale.
+// Returns false on 404 (resource deleted, stop retrying), true on a
+// 2xx (resource exists, keep retrying), null on 5xx / network error
+// (couldn't tell, keep retrying).
+async function probeSceneExists(sceneId: string): Promise<boolean | null> {
+  try {
+    const res = await fetch(`${api.base()}/api/scenes/${sceneId}`, {
+      method: "GET",
+    });
+    if (res.status === 404) return false;
+    if (res.ok) return true;
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 export interface EditResult {
   kept: number;
@@ -70,6 +79,17 @@ export function useSceneEvents(sceneId: string | null): {
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
     let everConnected = false;
+    let probedAfterFirstFail = false;
+
+    const scheduleReconnect = () => {
+      if (cancelled) return;
+      const delay =
+        RECONNECT_DELAYS_MS[
+          Math.min(attempt, RECONNECT_DELAYS_MS.length - 1)
+        ];
+      attempt += 1;
+      reconnectTimer = setTimeout(connect, delay);
+    };
 
     const connect = () => {
       if (cancelled) return;
@@ -257,18 +277,21 @@ export function useSceneEvents(sceneId: string | null): {
       };
       ws.onclose = () => {
         if (cancelled) return;
-        // See useCaptureEvents for the rationale: server rejects
-        // missing-scene subscriptions pre-accept (1006 abnormal,
-        // indistinguishable from a transient drop). Cap initial
-        // attempts; once we've connected at least once, transient
-        // drops keep retrying indefinitely.
-        if (!everConnected && attempt + 1 >= MAX_INITIAL_ATTEMPTS) return;
-        const delay =
-          RECONNECT_DELAYS_MS[
-            Math.min(attempt, RECONNECT_DELAYS_MS.length - 1)
-          ];
-        attempt += 1;
-        reconnectTimer = setTimeout(connect, delay);
+        // First failure on a hook that's never seen onopen: HTTP
+        // probe the resource to discriminate "deleted" (404 → stop)
+        // from "transient outage" (anything else → keep retrying
+        // forever with backoff). Runs once; later failures just
+        // reschedule. See useCaptureEvents for the full rationale.
+        if (!everConnected && !probedAfterFirstFail) {
+          probedAfterFirstFail = true;
+          void probeSceneExists(sceneId).then((exists) => {
+            if (cancelled) return;
+            if (exists === false) return; // 404 → permanent stop
+            scheduleReconnect();
+          });
+          return;
+        }
+        scheduleReconnect();
       };
     };
 
