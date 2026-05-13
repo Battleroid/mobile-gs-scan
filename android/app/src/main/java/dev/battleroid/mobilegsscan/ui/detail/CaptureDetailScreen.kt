@@ -84,6 +84,11 @@ fun CaptureDetailScreen(
     var renameDialog: CaptureRenameDialog? by remember { mutableStateOf(null) }
     val capture = state.capture
     val scene = state.scene
+    // Computed once so the scroll tail-spacer can omit its bottom
+    // system-bar inset when the CTA is rendered (the CTA already
+    // applies that inset itself, double-padding would push it up).
+    val artifactReady =
+        !scene?.ply_url.isNullOrBlank() || !scene?.spz_url.isNullOrBlank()
 
     Column(
         modifier = modifier
@@ -169,11 +174,25 @@ fun CaptureDetailScreen(
             }
 
             Spacer(Modifier.height(16.dp))
+
+            // Inset-aware tail padding. The bottom CTA below applies
+            // its own systemBars bottom inset, but that only runs in
+            // the artifact-ready branch — the common case
+            // (`training` / `queued` captures with no artifact yet)
+            // would otherwise drop the last pipeline card under the
+            // gesture nav. Apply the inset unconditionally inside
+            // the scroll content so the bottom card stays readable
+            // whether or not the CTA renders.
+            Spacer(
+                Modifier
+                    .windowInsetsPadding(
+                        WindowInsets.systemBars.only(WindowInsetsSides.Bottom)
+                    )
+                    .height(if (artifactReady) 0.dp else 16.dp),
+            )
         }
 
         // Bottom CTA — only render when an artifact is available.
-        val artifactReady =
-            !scene?.ply_url.isNullOrBlank() || !scene?.spz_url.isNullOrBlank()
         if (artifactReady) {
             OpenViewerButton(
                 onClick = onOpenViewerClick,
