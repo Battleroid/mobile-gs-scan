@@ -31,6 +31,10 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -157,12 +161,19 @@ fun SettingsScreen(
                 hint = "how long the splatfacto trainer runs per capture. " +
                     "higher = sharper splats but longer wait. on a 4090 " +
                     "expect ~3 min for low, ~10 min for standard, ~25 min " +
-                    "for high.",
+                    "for high. pick Custom to enter your own iteration count.",
             ) {
                 TrainingPresetRow(
                     selected = state.trainIters,
                     onChange = onTrainItersChange,
                 )
+                if (isCustomTrainIters(state.trainIters)) {
+                    Spacer(Modifier.height(8.dp))
+                    CustomTrainItersInput(
+                        value = state.trainIters,
+                        onValueChange = onTrainItersChange,
+                    )
+                }
             }
 
             Section(
@@ -326,33 +337,123 @@ private fun TrainingPresetRow(
     selected: Int,
     onChange: (Int) -> Unit,
 ) {
-    val pebble = MaterialTheme.pebble
-    Row(
+    // 2×2 grid of preset chips so the four cells (Low / Standard /
+    // High / Custom) stay readable on a phone-width screen. A single
+    // row of four made the inner labels too cramped.
+    Column(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        PresetCell(
-            modifier = Modifier.weight(1f),
-            label = "Low",
-            sub = "5 k iters",
-            selected = selected == ServerConfig.TRAIN_ITERS_LOW,
-            onClick = { onChange(ServerConfig.TRAIN_ITERS_LOW) },
-        )
-        PresetCell(
-            modifier = Modifier.weight(1f),
-            label = "Standard",
-            sub = "15 k iters",
-            selected = selected == ServerConfig.TRAIN_ITERS_STANDARD,
-            onClick = { onChange(ServerConfig.TRAIN_ITERS_STANDARD) },
-        )
-        PresetCell(
-            modifier = Modifier.weight(1f),
-            label = "High",
-            sub = "30 k iters",
-            selected = selected == ServerConfig.TRAIN_ITERS_HIGH,
-            onClick = { onChange(ServerConfig.TRAIN_ITERS_HIGH) },
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            PresetCell(
+                modifier = Modifier.weight(1f),
+                label = "Low",
+                sub = "5 k iters",
+                selected = selected == ServerConfig.TRAIN_ITERS_LOW,
+                onClick = { onChange(ServerConfig.TRAIN_ITERS_LOW) },
+            )
+            PresetCell(
+                modifier = Modifier.weight(1f),
+                label = "Standard",
+                sub = "15 k iters",
+                selected = selected == ServerConfig.TRAIN_ITERS_STANDARD,
+                onClick = { onChange(ServerConfig.TRAIN_ITERS_STANDARD) },
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            PresetCell(
+                modifier = Modifier.weight(1f),
+                label = "High",
+                sub = "30 k iters",
+                selected = selected == ServerConfig.TRAIN_ITERS_HIGH,
+                onClick = { onChange(ServerConfig.TRAIN_ITERS_HIGH) },
+            )
+            PresetCell(
+                modifier = Modifier.weight(1f),
+                label = "Custom",
+                // Sub label flips when Custom is active so the user
+                // sees their current number echoed back. The
+                // OutlinedTextField below the row is the actual
+                // editor.
+                sub = if (isCustomTrainIters(selected)) {
+                    "$selected iters"
+                } else {
+                    "tune it"
+                },
+                selected = isCustomTrainIters(selected),
+                onClick = {
+                    // Seed the custom field with the current value
+                    // when the user first taps Custom. If the value
+                    // happens to be one of the three preset values
+                    // (which is the case before Custom is ever
+                    // tapped), bump it by 1 so the field renders
+                    // "non-preset" and stays editable without
+                    // immediately snapping back to the matching
+                    // preset cell on the next composition.
+                    val seed = if (isCustomTrainIters(selected)) {
+                        selected
+                    } else {
+                        selected + 1
+                    }
+                    onChange(seed)
+                },
+            )
+        }
     }
+}
+
+/**
+ * True iff the iters value isn't one of the three named presets.
+ * Used both to compute the "Custom" cell's selected highlight and
+ * to drive the conditional reveal of the integer input below the
+ * preset row.
+ */
+private fun isCustomTrainIters(iters: Int): Boolean =
+    iters != ServerConfig.TRAIN_ITERS_LOW &&
+        iters != ServerConfig.TRAIN_ITERS_STANDARD &&
+        iters != ServerConfig.TRAIN_ITERS_HIGH
+
+@Composable
+private fun CustomTrainItersInput(
+    value: Int,
+    onValueChange: (Int) -> Unit,
+) {
+    val pebble = MaterialTheme.pebble
+    // Mirror the textfield as a String so the user can hold a
+    // transiently-empty field while typing (e.g. clearing to
+    // re-enter). Pushed back to the Int state on every parse-able
+    // change; we clamp to >= 1 to match ServerConfig's storage
+    // contract.
+    var text by remember(value) { mutableStateOf(value.toString()) }
+    OutlinedTextField(
+        value = text,
+        onValueChange = { raw ->
+            text = raw
+            raw.trim().toIntOrNull()?.let { parsed ->
+                onValueChange(parsed.coerceAtLeast(1))
+            }
+        },
+        label = { Text("Custom iteration count") },
+        placeholder = { Text("e.g. 12 000") },
+        singleLine = true,
+        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+            keyboardType = androidx.compose.ui.text.input.KeyboardType.Number,
+        ),
+        modifier = Modifier.fillMaxWidth(),
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedBorderColor = pebble.accent,
+            unfocusedBorderColor = pebble.rule,
+            cursorColor = pebble.accent,
+            focusedContainerColor = pebble.surface,
+            unfocusedContainerColor = pebble.surface,
+        ),
+    )
 }
 
 @Composable
