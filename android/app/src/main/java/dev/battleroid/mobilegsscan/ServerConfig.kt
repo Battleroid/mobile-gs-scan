@@ -30,7 +30,14 @@ object ServerConfig {
     // YUV-to-JPEG encoding on a Pixel-class device.
     const val DEFAULT_FPS = 10
     const val MIN_FPS = 1
-    const val MAX_FPS = 30
+    // Raised from 30 to 60 so users on phones whose ARCore camera
+    // delivers 60 fps native can stream at the higher rate. The
+    // captureIntervalMs floor (16 ms below) is the matching gate
+    // on the renderer side. If a device's ARCore CameraConfig
+    // tops out at 30 fps (the common default), sampling at 60 fps
+    // is harmless — ARCaptureSession just samples every frame it
+    // gets, which can't exceed the camera's native rate.
+    const val MAX_FPS = 60
 
     const val DEFAULT_JPEG_QUALITY = 85
     const val MIN_JPEG_QUALITY = 50
@@ -114,13 +121,17 @@ object ServerConfig {
 
     /**
      * Translate the user-facing "fps" prefs to the per-frame interval
-     * the ARCaptureSession rate-limit reads. Floor at 33ms to avoid
-     * the renderer fighting itself when the display refresh is also
-     * ~30 Hz.
+     * the ARCaptureSession rate-limit reads. Floor at 16 ms (≈60 fps)
+     * matches typical 60 Hz display refresh; the previous 33 ms floor
+     * capped the effective rate at ~30 fps regardless of the user's
+     * setting. Phones with 90 / 120 Hz displays still see 60 fps as
+     * the cap — that's a deliberate fp32-capture-overhead choice, not
+     * a display-refresh limit; if we ever want >60 we'd also need to
+     * verify ARCore CameraConfig actually delivers it.
      */
     fun captureIntervalMs(ctx: Context): Long {
         val fps = captureFps(ctx)
-        return (1000L / fps).coerceAtLeast(33L)
+        return (1000L / fps).coerceAtLeast(16L)
     }
 
     /**
