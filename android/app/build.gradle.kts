@@ -20,13 +20,20 @@ val appBaseVersion: String = runCatching {
 // isn't available (gradle sync from a tarball, sandboxed CI) — in
 // that case versionName is just the base version, matching how a
 // tagged release renders.
+//
+// Stderr is kept separate (no ``redirectErrorStream``) and the exit
+// code is checked explicitly so a non-git worktree's fatal message
+// ("fatal: not a git repository") doesn't end up captured as the
+// SHA. Output is length-checked too so anything other than the
+// expected short-hex falls back cleanly.
 val appBuildSha: String = runCatching {
     val proc = ProcessBuilder("git", "rev-parse", "--short", "HEAD")
         .directory(rootProject.projectDir.parentFile)
-        .redirectErrorStream(true)
         .start()
-    proc.waitFor()
-    proc.inputStream.bufferedReader().readText().trim()
+    val out = proc.inputStream.bufferedReader().readText().trim()
+    proc.errorStream.close()
+    val exit = proc.waitFor()
+    if (exit != 0 || !out.matches(Regex("^[0-9a-f]{4,40}$"))) "" else out
 }.getOrDefault("")
 
 // Allow CI to override the suffix entirely (e.g. tagged release builds
