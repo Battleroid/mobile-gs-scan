@@ -34,7 +34,13 @@ import java.io.ByteArrayOutputStream
  */
 class ARCaptureSession(
     context: Context,
-    private val targetIntervalMs: Long = 200, // 5 fps default
+    /** App-side fps throttle when ARCore's CameraConfig isn't pinning
+     *  the frame rate. Used as ``targetIntervalMs`` only when the
+     *  preset key didn't resolve to a supported CameraConfig (Custom
+     *  or stale key); when a preset DOES apply, the constructor
+     *  switches to no throttle so ARCore's hardware pacing is the
+     *  sole rate-limit. */
+    private val customIntervalMs: Long = 200, // 5 fps default
     private val jpegQuality: Int = 85,
     /** ARCore CameraConfig preset id; matches the format in
      *  [ServerConfig.cameraConfigKey] (``<w>x<h>@<fps>`` or
@@ -45,6 +51,14 @@ class ARCaptureSession(
     cameraConfigKey: String = ServerConfig.CAMERA_CONFIG_CUSTOM,
 ) {
 
+    /** Whether a fixed CameraConfig was actually applied. ``false``
+     *  when the preset key was Custom OR stale (didn't match any
+     *  device-supported config); used to choose the effective
+     *  throttle interval below. Visible for tests / diagnostics. */
+    val presetApplied: Boolean
+
+    private val targetIntervalMs: Long
+
     private val session: Session = Session(context).apply {
         // Apply the user's preset BEFORE configure(cfg). ARCore
         // requires camera-config changes to land before the first
@@ -52,7 +66,18 @@ class ARCaptureSession(
         // is silently ignored. resolveCameraConfig returns null on
         // unrecognised / Custom keys → no override, ARCore picks
         // its default.
-        resolveCameraConfig(this, cameraConfigKey)?.let { setCameraConfig(it) }
+        val resolved = resolveCameraConfig(this, cameraConfigKey)
+        if (resolved != null) {
+            setCameraConfig(resolved)
+        }
+        // Throttle decision: skip the app-side fps cap only when
+        // ARCore is going to pace the camera itself at the resolved
+        // preset's rate. A stale or Custom key falls back to the
+        // user's slider value so we don't accidentally flood the
+        // wire at ARCore's default rate.
+        this@ARCaptureSession.presetApplied = (resolved != null)
+        this@ARCaptureSession.targetIntervalMs =
+            if (resolved != null) 0L else customIntervalMs
         val cfg = Config(this).apply {
             focusMode = Config.FocusMode.AUTO
             updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
