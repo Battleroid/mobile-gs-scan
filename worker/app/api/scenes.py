@@ -165,13 +165,14 @@ def _mesh_tex_urls(scene: Scene) -> list[str] | None:
     """
     if not scene.mesh_obj_path:
         return None
-    # Only the standard tier produces a texture-page bundle. A
-    # low-tier vertex-colored OBJ from a scene that previously ran
-    # standard tier would otherwise still pick up the cleaned-up
+    # Only textured-bundle tiers produce ``scene.mtl`` +
+    # ``scene_tex*`` sidecars. A low-tier vertex-colored OBJ from
+    # a scene that previously ran a bundle tier would otherwise
+    # still pick up the cleaned-up
     # sidecars; this gate prevents the API from advertising
     # textures the new low-tier OBJ doesn't reference.
     tier = (scene.mesh_params or {}).get("tier")
-    if tier != "standard":
+    if tier not in _TEXTURED_BUNDLE_TIERS:
         return None
     mesh_dir = _scene_mesh_dir(scene)
     if not mesh_dir.exists():
@@ -562,7 +563,15 @@ _ALLOWED_MESH_TIERS = {"low", "standard", "higher"}
 # Tiers we'll actually accept at the trigger endpoint today.
 # Anything else returns 422 with a clear message rather than
 # silently downgrading.
-_ACTIVE_MESH_TIERS = {"low", "standard"}
+_ACTIVE_MESH_TIERS = {"low", "standard", "higher"}
+# Mesh tiers that emit a textured-bundle (OBJ + MTL + JPGs).
+# ``_mesh_tex_urls`` gates on this set so a future tier that
+# also produces a bundle gets its sidecars enumerated without
+# code churn here, AND a tier that emits a vertex-colored OBJ
+# only (low) doesn't leak stale standard/higher textures from a
+# prior extraction (the ``_run_low_tier`` cleanup unlinks them
+# on disk anyway, but the gate is the API-surface defence).
+_TEXTURED_BUNDLE_TIERS = {"standard", "higher"}
 # OpenMVS's TextureMesh accepts the texture-atlas page size as a
 # power of 2. Constraining the API set to these four values keeps
 # the UI's chip-row tractable and avoids feeding a non-power-of-2
@@ -786,6 +795,20 @@ def _validate_mesh_params(raw: dict | None) -> dict:
                 422, "floater_scale_max_pct must be in [0, 100]",
             )
         out["floater_scale_max_pct"] = float(v)
+    # ─── higher-tier (2DGS retrain) knobs ───────────────────────
+    if "higher_train_iters" in raw:
+        v = raw["higher_train_iters"]
+        # Range is wide on purpose — power users may push past
+        # the default 10k for very-large captures, or pull down to
+        # 2k for a fast smoke test. Anything above ~30k just
+        # consumes wall time without measurable surface
+        # improvement (2DGS paper's published sweep plateaus at
+        # ~15k for similar-sized scenes).
+        if isinstance(v, bool) or not isinstance(v, int) or v < 2_000 or v > 30_000:
+            raise HTTPException(
+                422, "higher_train_iters must be an integer in [2000, 30000]",
+            )
+        out["higher_train_iters"] = v
     return out
 
 

@@ -147,8 +147,13 @@ def test_trigger_accepts_persisted_standard_tier(isolated_store):
     asyncio.run(go())
 
 
-def test_trigger_rejects_persisted_higher_tier_still(isolated_store):
-    """Sanity: ``higher`` remains inactive; the guard still 422s."""
+def test_trigger_accepts_persisted_higher_tier_now(isolated_store):
+    """``higher`` was an inactive tier in the PR #113 era; it
+    flipped active when the 2DGS backend landed. The trigger
+    endpoint must accept it now — the inactive-tier guard only
+    fires for genuinely-unknown values (covered by
+    ``test_trigger_rejects_persisted_unknown_tier`` in
+    test_mesh_tsdf)."""
 
     async def go():
         cap = await store.create_capture(name="t-higher", source="upload")
@@ -160,9 +165,8 @@ def test_trigger_rejects_persisted_higher_tier_still(isolated_store):
             mesh_params={"tier": "higher"},
         )
 
-        with pytest.raises(HTTPException) as exc:
-            await trigger_mesh(scene.id, MeshRequest(params=None))
-        assert exc.value.status_code == 422
+        result = await trigger_mesh(scene.id, MeshRequest(params=None))
+        assert result.mesh_status == MeshStatus.queued
 
     asyncio.run(go())
 

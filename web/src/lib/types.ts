@@ -120,6 +120,9 @@ export interface MeshParams {
   mvs_texture_size?: number;
   // RefineMesh iterations. 0 skips the refine pass entirely. [0, 4].
   mvs_refine_iters?: number;
+  // ─── higher-tier (2DGS retrain) knobs ───────────────────────
+  // Number of 2DGS retraining iterations. [2000, 30000].
+  higher_train_iters?: number;
   // ─── legacy Poisson keys, accepted-but-ignored ──────────────
   // Older mesh_params rows persist these from before the TSDF
   // switch. The worker no longer reads them but the API still

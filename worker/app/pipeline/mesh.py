@@ -195,6 +195,14 @@ DEFAULT_PARAMS: dict = {
     # detailed). 2 is the documented default — comfortable for the
     # 1080p / 4K capture ceiling this pipeline targets.
     "mvs_refine_iters": 2,
+    # ─── higher-tier (2DGS retrain) knobs ──────────────────────
+    # Number of training iterations for the 2DGS retrain pass.
+    # 10k is the sweet spot for ≤500-frame phone captures —
+    # below ~5k the surface still has 3DGS-style "puffiness",
+    # above ~15k diminishing returns kick in (the surfels are
+    # already flat-aligned). Total wall time scales linearly:
+    # ~1 min per 1k iters on a single Ampere/Ada/Hopper card.
+    "higher_train_iters": 10_000,
     # ─── legacy keys, accepted-but-ignored ──────────────────────
     # These were the Poisson-tier knobs. Persisted on scenes
     # extracted before the TSDF switch; we accept them so older
@@ -258,15 +266,13 @@ async def run_mesh(
             job_id=job_id,
         )
     if tier == "higher":
-        # Surfaced as a RuntimeError-shaped exception below — the
-        # runner catches any exception out of run_mesh and writes
-        # ``mesh_error``. The API also rejects this tier at
-        # validation time so this branch only fires for jobs
-        # already in flight when a future tier is added.
-        raise NotImplementedError(
-            f"mesh tier '{tier}' is not yet implemented; "
-            f"active tiers: 'low' (TSDF fusion), 'standard' "
-            f"(OpenMVS textured)."
+        return await _run_higher(
+            src_ply=src_ply,
+            scene_dir=scene_dir,
+            mesh_dir=mesh_dir,
+            params=merged,
+            progress=progress,
+            job_id=job_id,
         )
     raise ValueError(f"unknown mesh tier '{tier}'")
 
@@ -507,6 +513,150 @@ async def _run_mvs(
     # but consuming disk. Preserve ``mesh.log`` and any non-scene
     # files. The new bundle's content is verified above so this
     # cleanup is safe — we have something to move in.
+    for old in mesh_dir.iterdir():
+        if old.is_file() and old.name.startswith("scene"):
+            try:
+                old.unlink()
+            except OSError:
+                pass
+
+    staged_obj.replace(mesh_dir / "scene.obj")
+    staged_mtl.replace(mesh_dir / "scene.mtl")
+    tex_paths: list[str] = []
+    for tex in staged_tex:
+        dst = mesh_dir / tex.name
+        tex.replace(dst)
+        tex_paths.append(str(dst))
+    has_glb = False
+    if staged_glb.exists():
+        staged_glb.replace(mesh_dir / "scene.glb")
+        has_glb = True
+
+    shutil.rmtree(staging_dir, ignore_errors=True)
+
+    result: dict = {
+        "obj": str(mesh_dir / "scene.obj"),
+        "mtl": str(mesh_dir / "scene.mtl"),
+        "tex": tex_paths,
+    }
+    if has_glb:
+        result["glb"] = str(mesh_dir / "scene.glb")
+    await progress(1.0, "mesh: done")
+    return result
+
+
+async def _run_higher(
+    *,
+    src_ply: Path,
+    scene_dir: Path,
+    mesh_dir: Path,
+    params: dict,
+    progress: ProgressCb,
+    job_id: str | None,
+) -> dict:
+    """Dispatch the 2DGS retrain + texture-bake subprocess.
+
+    Higher tier wins over standard (OpenMVS) on textureless /
+    specular surfaces and on the normals — 2DGS surfels have
+    geometrically meaningful depth (not OpenMVS's stereo-matching
+    estimate, and not low-tier's 3DGS centroid-depth proxy). The
+    quality cost is wall-clock: a real retrain of ~10k iters
+    (~10 min on a single Ampere/Ada/Hopper card) plus the dome
+    render + TSDF + texture bake.
+
+    Shape mirrors ``_run_mvs``: sibling staging dir (so the
+    intermediate 2DGS checkpoints don't pollute mesh_dir),
+    process-group cancellation (``setsid`` + ``pgid=True``) since
+    the subprocess shells out to a long-running torch loop where
+    SIGKILL on the orchestrator alone might leave CUDA contexts
+    holding memory, per-file replace of the canonical bundle
+    (``scene.{obj,mtl,glb}`` + ``scene_tex<N>.jpg``), and the same
+    stale-sidecar cleanup the standard tier does.
+
+    Reuses gsplat 1.4.0's native 2DGS rasterizer
+    (``rasterization_2dgs``) so the worker doesn't need to vendor
+    any non-commercially-licensed Inria source — every reference
+    2DGS / SuGaR / GOF / PGSR / RaDe-GS repo inherits the Inria GS
+    license, but gsplat's reimplementation is Apache-2.0.
+    """
+    staging_dir = scene_dir / f".mesh-higher-staging-{job_id or 'anon'}"
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir, ignore_errors=True)
+    staging_dir.mkdir(parents=True)
+
+    mesh_dir.mkdir(parents=True, exist_ok=True)
+    log_path = mesh_dir / "mesh.log"
+    log_path.write_text("")
+
+    # The higher tier needs both the source splat (init for the
+    # 2DGS retrain) and the SfM workspace (GT views the retrain
+    # supervises against). Either missing is a clean failure.
+    transforms_path = scene_dir / "sfm" / "transforms.json"
+    images_src_dir = scene_dir / "sfm" / "images"
+    if not transforms_path.exists():
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise RuntimeError(
+            f"higher-tier mesh requires {transforms_path}; "
+            f"SfM step has not run or produced no transforms.json"
+        )
+
+    cmd = [
+        sys.executable, "-m", "app.pipeline._higher_subprocess",
+        "--src-ply", str(src_ply),
+        "--transforms-json", str(transforms_path),
+        "--images-src-dir", str(images_src_dir),
+        "--staging-dir", str(staging_dir),
+        "--params", json.dumps(params),
+    ]
+
+    await progress(0.0, "spawn 2dgs worker")
+
+    # ``start_new_session=True`` + pgid kill, same shape as
+    # ``_run_mvs`` — the torch retrain loop is long-running and a
+    # SIGKILL on the orchestrator only would leak the CUDA context
+    # for minutes after the user cancels.
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        start_new_session=True,
+    )
+    if job_id is not None:
+        _running.register(job_id, proc, pgid=True)
+
+    try:
+        rc = await _stream_progress(proc, log_path, progress)
+    finally:
+        if job_id is not None:
+            _running.unregister(job_id)
+
+    if rc != 0:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        tail = tail_file(log_path)
+        raise RuntimeError(
+            format_subprocess_error("2dgs", rc, log_path, tail)
+        )
+
+    staged_obj = staging_dir / "scene.obj"
+    staged_mtl = staging_dir / "scene.mtl"
+    staged_tex = sorted(
+        list(staging_dir.glob("scene_tex*.jpg"))
+        + list(staging_dir.glob("scene_tex*.png"))
+    )
+    staged_glb = staging_dir / "scene.glb"
+    if not staged_obj.exists() or not staged_mtl.exists() or not staged_tex:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise RuntimeError(
+            "2dgs exited 0 but the bundle is incomplete: "
+            f"obj={staged_obj.exists()} mtl={staged_mtl.exists()} "
+            f"tex_count={len(staged_tex)}"
+        )
+
+    # Same stale-sidecar cleanup the standard tier does: drop any
+    # ``scene*`` files from a prior tier's mesh before swapping
+    # the new bundle in. Without this, a low-tier scene that gets
+    # re-extracted as higher would leave the old vertex-colored
+    # OBJ alongside the new MTL'd one.
     for old in mesh_dir.iterdir():
         if old.is_file() and old.name.startswith("scene"):
             try:

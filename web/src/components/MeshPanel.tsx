@@ -47,6 +47,8 @@ interface ParamsState {
   mvs_dense_views: number;
   mvs_texture_size: MvsTextureSize;
   mvs_refine_iters: number;
+  // Higher-tier (2DGS retrain) knobs.
+  higher_train_iters: number;
 }
 
 const DEFAULT_PARAMS: ParamsState = {
@@ -63,6 +65,7 @@ const DEFAULT_PARAMS: ParamsState = {
   mvs_dense_views: 3,
   mvs_texture_size: 4096,
   mvs_refine_iters: 2,
+  higher_train_iters: 10_000,
 };
 
 // Tier labels keyed to the API enum. ``active=false`` flips the
@@ -81,8 +84,8 @@ const TIER_INFO: Record<MeshTier, { label: string; sub: string; active: boolean 
   },
   higher: {
     label: "Higher",
-    sub: "mesh-aware retrain",
-    active: false,
+    sub: "2DGS retrain · textured",
+    active: true,
   },
 };
 
@@ -121,6 +124,10 @@ function paramsFromScene(scene: Scene): ParamsState {
     mvs_refine_iters: typeof p.mvs_refine_iters === "number" && p.mvs_refine_iters >= 0 && p.mvs_refine_iters <= 4
       ? p.mvs_refine_iters
       : DEFAULT_PARAMS.mvs_refine_iters,
+    higher_train_iters: typeof p.higher_train_iters === "number"
+      && p.higher_train_iters >= 2_000 && p.higher_train_iters <= 30_000
+      ? p.higher_train_iters
+      : DEFAULT_PARAMS.higher_train_iters,
   };
 }
 
@@ -304,7 +311,38 @@ export function MeshPanel({ scene, meshProgress }: Props) {
         className="grid grid-cols-1 gap-3 sm:grid-cols-3"
         disabled={isRunning || submitting}
       >
-        {params.tier === "low" ? (
+        {params.tier === "higher" ? (
+          <>
+            <label
+              className="flex flex-col gap-1"
+              title="Number of 2DGS retraining iterations. 10k is the sweet spot for ≤500-frame phone captures (~10 min on a single GPU). 5k = fast/loose; 20k = tight surface; above ~15k diminishing returns. Wall time scales linearly: ~1 min per 1k iters."
+            >
+              <Eyebrow className="!text-[10px] !tracking-[0.08em]">
+                retrain iters
+              </Eyebrow>
+              <input
+                type="number"
+                value={params.higher_train_iters}
+                min={2000}
+                max={30000}
+                step={1000}
+                onChange={(e) => {
+                  const n = parseInt(e.target.value, 10);
+                  if (Number.isFinite(n) && n >= 2000 && n <= 30000) {
+                    setParams((s) => ({ ...s, higher_train_iters: n }));
+                  }
+                }}
+                className="rounded-sm border border-rule bg-bg px-3 py-2 font-mono text-sm text-fg focus:border-accent focus:outline-none disabled:opacity-60"
+              />
+            </label>
+            <div className="self-end pb-2 text-[11px] text-inkSoft sm:col-span-2">
+              Retrains a 2DGS variant from the current splat
+              (~10–15 min) then bakes a textured atlas. Surface
+              quality is the highest of the three tiers; cost is
+              wall-time. See worker logs for per-iter loss.
+            </div>
+          </>
+        ) : params.tier === "low" ? (
           <>
             <label
               className="flex flex-col gap-1"
