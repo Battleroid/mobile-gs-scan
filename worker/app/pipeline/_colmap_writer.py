@@ -95,7 +95,7 @@ def write_colmap_text(
     cam_lines = [
         "# Camera list with one line of data per camera:",
         "#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]",
-        f"# Number of cameras: 1",
+        "# Number of cameras: 1",
         f"1 {model} {width} {height} {params}",
     ]
     (out_dir / "cameras.txt").write_text("\n".join(cam_lines) + "\n")
@@ -145,7 +145,7 @@ def write_colmap_text(
     pts_lines = [
         "# 3D point list with one line of data per point:",
         "#   POINT3D_ID, X, Y, Z, R, G, B, ERROR, TRACK[] as (IMAGE_ID, POINT2D_IDX)",
-        f"# Number of points: 0",
+        "# Number of points: 0",
     ]
     (out_dir / "points3D.txt").write_text("\n".join(pts_lines) + "\n")
 
