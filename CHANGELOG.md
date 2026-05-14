@@ -14,6 +14,25 @@ and commits the new section here. Until that first release PR is
 merged, the **Unreleased** section below is a hand-authored
 roll-up so a reader landing here today still has signal.
 
+## [1.1.0](https://github.com/Battleroid/mobile-gs-scan/compare/v1.0.1...v1.1.0) (2026-05-14)
+
+
+### Features
+
+* **android:** ARCore camera-format presets in Settings (PR-C2) ([303af8e](https://github.com/Battleroid/mobile-gs-scan/commit/303af8e2056a397086a1c4e5b3c05dfa05fbbd62))
+* retry button for failed/canceled jobs + drop step thumbnail ([0ca2394](https://github.com/Battleroid/mobile-gs-scan/commit/0ca2394dc4b8db1605575c7a69b531613d8b3f5c))
+
+
+### Bug Fixes
+
+* allow retry of queued-then-canceled jobs ([379b27e](https://github.com/Battleroid/mobile-gs-scan/commit/379b27eb8e8a53f067f30a502d637d576fc0861b))
+* **android:** disable fps throttle when a fixed camera preset is active ([44b4e43](https://github.com/Battleroid/mobile-gs-scan/commit/44b4e43bd400efa24053a7348407127d35a0f055))
+* **android:** gate fps throttle on preset-actually-applied, not the stored key ([53746ab](https://github.com/Battleroid/mobile-gs-scan/commit/53746ab54dfb483d4462657f33a5b4c822c0bcf5))
+* make retry in-flight check atomic with enqueue ([3ab63d2](https://github.com/Battleroid/mobile-gs-scan/commit/3ab63d286add195b067076338e2b30cbd515686e))
+* normalize stale cameraConfigKey to Custom after probe ([3d16a85](https://github.com/Battleroid/mobile-gs-scan/commit/3d16a85538adc04f8aaee79d8e14ed0f588885d9))
+* refresh scene + dedupe retry to address codex P1s ([cba9074](https://github.com/Battleroid/mobile-gs-scan/commit/cba907470a819b1c19a9315361911e5b31423687))
+* treat unacked canceled jobs as in-flight in retry guard ([22b06e8](https://github.com/Battleroid/mobile-gs-scan/commit/22b06e81757d591de0ad7f7782c2a2c08ff3cb3a))
+
 ## [1.0.1](https://github.com/Battleroid/mobile-gs-scan/compare/v1.0.0...v1.0.1) (2026-05-13)
 
 
