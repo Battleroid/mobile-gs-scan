@@ -21,6 +21,14 @@ object ServerConfig {
     private const val KEY_JPEG_QUALITY = "capture_jpeg_quality"
     private const val KEY_TRAIN_ITERS = "train_iters"
     private const val KEY_OVERLAY_ALPHA = "overlay_alpha"
+    private const val KEY_CAMERA_CONFIG = "camera_config"
+
+    /** Sentinel value for ``cameraConfigKey`` meaning "don't apply a
+     *  specific ARCore CameraConfig; let the system default win, and
+     *  honor the user's freeform fps slider instead". Stored verbatim
+     *  in SharedPreferences so a future format change can be detected
+     *  without a migration. */
+    const val CAMERA_CONFIG_CUSTOM = "custom"
 
     // Capture-rate defaults. The previous hardcoded
     // ``targetIntervalMs = 200`` (5 fps) in ARCaptureSession was too
@@ -118,6 +126,20 @@ object ServerConfig {
     /** Convenience for CoverageRenderer.setAlpha — same value, [0, 1]. */
     fun coverageOverlayAlphaFloat(ctx: Context): Float =
         coverageOverlayAlphaPct(ctx) / 100f
+
+    /** ARCore camera-config preset id. Format ``<width>x<height>@<fps>``
+     *  (e.g. ``1920x1080@30``) when one of the device-supported
+     *  presets is selected, or [CAMERA_CONFIG_CUSTOM] when the user
+     *  has opted to drive the capture rate freeform via the fps
+     *  slider. Defaults to [CAMERA_CONFIG_CUSTOM] so installs that
+     *  predate the preset chip keep their existing behaviour. */
+    fun cameraConfigKey(ctx: Context): String =
+        prefs(ctx).getString(KEY_CAMERA_CONFIG, CAMERA_CONFIG_CUSTOM)
+            ?: CAMERA_CONFIG_CUSTOM
+
+    fun setCameraConfigKey(ctx: Context, key: String) {
+        prefs(ctx).edit { putString(KEY_CAMERA_CONFIG, key) }
+    }
 
     /**
      * Translate the user-facing "fps" prefs to the per-frame interval

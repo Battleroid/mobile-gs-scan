@@ -337,10 +337,19 @@ class CaptureActivity : ComponentActivity() {
 
     private fun startArSession() {
         try {
+            // Always pass the slider-driven interval as the FALLBACK
+            // throttle. ARCaptureSession decides internally whether
+            // to honor it: when the preset key resolves to a real
+            // device-supported CameraConfig, ARCore paces at the
+            // hardware rate and the app-side throttle is disabled.
+            // When the key is Custom OR stale (no matching config),
+            // the fallback interval keeps us from flooding the wire
+            // at ARCore's default rate.
             arSession = ARCaptureSession(
                 context = this,
-                targetIntervalMs = ServerConfig.captureIntervalMs(this),
+                customIntervalMs = ServerConfig.captureIntervalMs(this),
                 jpegQuality = ServerConfig.captureJpegQuality(this),
+                cameraConfigKey = ServerConfig.cameraConfigKey(this),
             )
         } catch (e: Exception) {
             Toast.makeText(

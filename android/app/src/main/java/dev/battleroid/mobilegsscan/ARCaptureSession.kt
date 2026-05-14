@@ -34,11 +34,50 @@ import java.io.ByteArrayOutputStream
  */
 class ARCaptureSession(
     context: Context,
-    private val targetIntervalMs: Long = 200, // 5 fps default
+    /** App-side fps throttle when ARCore's CameraConfig isn't pinning
+     *  the frame rate. Used as ``targetIntervalMs`` only when the
+     *  preset key didn't resolve to a supported CameraConfig (Custom
+     *  or stale key); when a preset DOES apply, the constructor
+     *  switches to no throttle so ARCore's hardware pacing is the
+     *  sole rate-limit. */
+    private val customIntervalMs: Long = 200, // 5 fps default
     private val jpegQuality: Int = 85,
+    /** ARCore CameraConfig preset id; matches the format in
+     *  [ServerConfig.cameraConfigKey] (``<w>x<h>@<fps>`` or
+     *  [ServerConfig.CAMERA_CONFIG_CUSTOM]). Resolved against the
+     *  current Session's supported configs at construction time —
+     *  a stale / unrecognised key (device changed, OS upgrade)
+     *  falls through to the ARCore default. */
+    cameraConfigKey: String = ServerConfig.CAMERA_CONFIG_CUSTOM,
 ) {
 
+    /** Whether a fixed CameraConfig was actually applied. ``false``
+     *  when the preset key was Custom OR stale (didn't match any
+     *  device-supported config); used to choose the effective
+     *  throttle interval below. Visible for tests / diagnostics. */
+    val presetApplied: Boolean
+
+    private val targetIntervalMs: Long
+
     private val session: Session = Session(context).apply {
+        // Apply the user's preset BEFORE configure(cfg). ARCore
+        // requires camera-config changes to land before the first
+        // configure call on a given session; setting it afterwards
+        // is silently ignored. resolveCameraConfig returns null on
+        // unrecognised / Custom keys → no override, ARCore picks
+        // its default.
+        val resolved = resolveCameraConfig(this, cameraConfigKey)
+        if (resolved != null) {
+            setCameraConfig(resolved)
+        }
+        // Throttle decision: skip the app-side fps cap only when
+        // ARCore is going to pace the camera itself at the resolved
+        // preset's rate. A stale or Custom key falls back to the
+        // user's slider value so we don't accidentally flood the
+        // wire at ARCore's default rate.
+        this@ARCaptureSession.presetApplied = (resolved != null)
+        this@ARCaptureSession.targetIntervalMs =
+            if (resolved != null) 0L else customIntervalMs
         val cfg = Config(this).apply {
             focusMode = Config.FocusMode.AUTO
             updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
@@ -101,7 +140,11 @@ class ARCaptureSession(
      * [update], if and only if:
      *   - ARCore is currently TRACKING (so the pose is meaningful)
      *   - enough time has elapsed since the last emit to honour the
-     *     [targetIntervalMs] rate limit
+     *     [targetIntervalMs] rate limit. A non-positive interval
+     *     disables the throttle entirely, letting the caller rely
+     *     on ARCore's own pacing — used when a fixed CameraConfig
+     *     preset pins the frame rate at the hardware level and an
+     *     app-side cap would just drop perfectly good frames.
      *   - acquireCameraImage actually has a frame ready (NotYet on
      *     the first few calls is normal).
      *
@@ -112,7 +155,7 @@ class ARCaptureSession(
         if (camera.trackingState != TrackingState.TRACKING) return null
 
         val now = frame.timestamp / 1_000_000L
-        if (now - lastEmitMs < targetIntervalMs) return null
+        if (targetIntervalMs > 0 && now - lastEmitMs < targetIntervalMs) return null
 
         val jpeg = encodeFrameJpeg(frame) ?: return null
         val intrinsics = readIntrinsics(camera.imageIntrinsics)
