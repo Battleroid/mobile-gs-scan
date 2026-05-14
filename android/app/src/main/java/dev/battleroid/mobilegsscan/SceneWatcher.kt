@@ -15,8 +15,10 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -346,21 +348,24 @@ object SceneWatcher {
     }
 
     private fun encode(map: Map<String, Pending>): String {
-        // Tiny payload; hand-rolled JSON keeps us off another
-        // serializer dependency.
-        val sb = StringBuilder("{")
-        map.entries.forEachIndexed { i, (k, v) ->
-            if (i > 0) sb.append(',')
-            sb.append('"').append(k).append("\":{\"baseUrl\":\"")
-                .append(v.baseUrl.replace("\"", "\\\""))
-                .append("\",\"name\":\"")
-                .append(v.name.replace("\"", "\\\""))
-                .append("\",\"captureId\":\"")
-                .append(v.captureId.replace("\"", "\\\""))
-                .append("\"}")
+        // Use the existing ``Json`` instance so we cover the full
+        // escape table (backslashes, control chars, embedded
+        // quotes, non-BMP code points) — the previous hand-
+        // rolled writer only escaped ``"`` and would emit
+        // invalid JSON for any capture name with a backslash or
+        // newline in it, which then short-circuited
+        // ``loadPersisted`` to ``emptyMap()`` on next process
+        // start and silently dropped every pending watch.
+        val obj = buildJsonObject {
+            map.forEach { (k, v) ->
+                put(k, buildJsonObject {
+                    put("baseUrl", v.baseUrl)
+                    put("name", v.name)
+                    put("captureId", v.captureId)
+                })
+            }
         }
-        sb.append('}')
-        return sb.toString()
+        return json.encodeToString(JsonObject.serializer(), obj)
     }
 
     // Per-sceneId notification ids; base + hash so different

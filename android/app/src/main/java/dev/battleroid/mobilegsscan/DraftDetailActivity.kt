@@ -13,7 +13,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import dev.battleroid.mobilegsscan.ui.draft.DraftDetailScreen
 import dev.battleroid.mobilegsscan.ui.draft.DraftDetailUiState
 import dev.battleroid.mobilegsscan.ui.draft.UploadProgress
@@ -208,41 +210,50 @@ class DraftDetailActivity : ComponentActivity() {
     }
 
     private fun bindToUploadServiceState(draftId: String, totalSeed: Int) {
-        // Collect from the service's per-draft state flow. The
-        // service updates it on every batch ack, and writes a
-        // terminal Done / Failed state when the run finishes. We
-        // route forward to CaptureDetail on Done and reset on
-        // Failed; if the user backgrounded the activity, this
-        // collector restarts on the next onCreate (the service
-        // keeps the latest state in a process-scoped Map).
+        // Collect from the service's per-draft state flow only
+        // while the activity is at least STARTED. ``lifecycleScope``
+        // alone stays active across STOPPED, which would let a
+        // backgrounded activity fire ``routeToCaptureDetail`` ->
+        // ``startActivities()`` from the background. That's a
+        // background-activity-start violation on API 29+ (the
+        // intent is dropped silently) and a UX wart on older
+        // versions (the task gets yanked to the foreground out
+        // from under the user). ``repeatOnLifecycle(STARTED)``
+        // pauses the collector on STOPPED and re-runs it on
+        // START; since ``stateFlow`` is a StateFlow it replays
+        // its latest value on re-subscribe, so a Done that
+        // arrived while we were backgrounded still routes
+        // correctly when the user returns.
         serviceCollector?.cancel()
         serviceCollector = lifecycleScope.launch {
-            UploadService.stateFlow(draftId).collect { s ->
-                when (s) {
-                    is UploadService.UploadState.Running -> {
-                        val total = if (s.total > 0) s.total else totalSeed
-                        state.update {
-                            it.copy(
-                                upload = UploadProgress(sent = s.sent, total = total),
-                                uploadError = null,
-                            )
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                UploadService.stateFlow(draftId).collect { s ->
+                    when (s) {
+                        is UploadService.UploadState.Running -> {
+                            val total = if (s.total > 0) s.total else totalSeed
+                            state.update {
+                                it.copy(
+                                    upload = UploadProgress(sent = s.sent, total = total),
+                                    uploadError = null,
+                                )
+                            }
                         }
-                    }
-                    is UploadService.UploadState.Done -> {
-                        state.update { it.copy(upload = null) }
-                        Toast.makeText(
-                            this@DraftDetailActivity,
-                            getString(R.string.upload_succeeded),
-                            Toast.LENGTH_SHORT,
-                        ).show()
-                        routeToCaptureDetail(s.captureId)
-                    }
-                    is UploadService.UploadState.Failed -> {
-                        state.update {
-                            it.copy(upload = null, uploadError = s.reason)
+                        is UploadService.UploadState.Done -> {
+                            state.update { it.copy(upload = null) }
+                            Toast.makeText(
+                                this@DraftDetailActivity,
+                                getString(R.string.upload_succeeded),
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                            routeToCaptureDetail(s.captureId)
                         }
+                        is UploadService.UploadState.Failed -> {
+                            state.update {
+                                it.copy(upload = null, uploadError = s.reason)
+                            }
+                        }
+                        null -> { /* idle */ }
                     }
-                    null -> { /* idle */ }
                 }
             }
         }
