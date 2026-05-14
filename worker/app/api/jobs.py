@@ -54,7 +54,14 @@ async def get_job_log(
 
     settings = get_settings()
     scene_dir = settings.scenes_dir() / scene.id
-    log_path = _log_path_for_kind(job.kind, scene_dir)
+    # The extract step writes its log under the *capture* dir (it
+    # runs before a scene's pipeline starts — the video / image set
+    # is still being unpacked), so the path helper needs both
+    # roots. The scene-capture link is via ``scene.capture_id``,
+    # which is non-null for every scene the runner has dispatched
+    # against.
+    capture_dir = settings.captures_dir() / scene.capture_id
+    log_path = _log_path_for_kind(job.kind, scene_dir, capture_dir=capture_dir)
 
     if log_path is None or not log_path.exists():
         return {
@@ -244,12 +251,30 @@ async def _reset_scene_status_for_canceled_job(
             await events.publish_scene(scene.id, "scene.mesh_cleared")
 
 
-def _log_path_for_kind(kind: JobKind, scene_dir: Path) -> Path | None:
+def _log_path_for_kind(
+    kind: JobKind,
+    scene_dir: Path,
+    *,
+    capture_dir: Path | None = None,
+) -> Path | None:
     """Map a JobKind to the log file the corresponding pipeline step
     writes. SfM has two backends; pick whichever exists, falling
     back to glomap.log if neither does so the caller still sees a
     deterministic path in the response.
+
+    Most kinds write under ``scene_dir``; ``extract`` is the
+    exception (runs against the capture before a scene's pipeline
+    starts, so its log lives under ``capture_dir``). The route
+    resolves both roots upfront and passes them in.
     """
+    if kind == JobKind.extract:
+        # ``capture_dir`` is None only when the caller forgot to
+        # supply it; degrade to "no log" rather than crashing.
+        # Every real-world route hits this branch with the kwarg
+        # set.
+        if capture_dir is None:
+            return None
+        return capture_dir / "extract.log"
     if kind == JobKind.sfm:
         for name in ("glomap.log", "colmap.log"):
             p = scene_dir / "sfm" / name
@@ -282,4 +307,12 @@ def _log_path_for_kind(kind: JobKind, scene_dir: Path) -> Path | None:
         # completed-with-empty-result and the failure mode is
         # invisible.
         return scene_dir / "thumbnail.log"
+    if kind == JobKind.orbit:
+        # ``pipeline/orbit.py`` writes scene_dir / orbit.log
+        # (same top-level pattern as thumbnail — orbit doesn't
+        # produce its own artifact dir, just an MP4 next to the
+        # other scene outputs). Without this branch, a failing
+        # ns-render / ffmpeg invocation has no diagnostic path
+        # from the UI's JobLogPanel.
+        return scene_dir / "orbit.log"
     return None

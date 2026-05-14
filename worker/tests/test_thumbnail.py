@@ -1008,6 +1008,47 @@ def test_log_path_for_thumbnail_kind(tmp_path: Path):
     )
 
 
+def test_log_path_for_orbit_kind(tmp_path: Path):
+    """Same regression shape as the thumbnail test above —
+    ``pipeline/orbit.py`` writes ``scene_dir/orbit.log`` and the
+    API route needs a branch to find it. Without this mapping,
+    ``GET /api/jobs/{id}/log`` for an orbit job always returns
+    ``available: false`` even though the file exists; an ns-render
+    / ffmpeg failure is invisible from the web JobLogPanel."""
+    from app.api.jobs import _log_path_for_kind
+
+    scene_dir = tmp_path / "scene-orbit"
+    resolved = _log_path_for_kind(JobKind.orbit, scene_dir)
+    assert resolved == scene_dir / "orbit.log", (
+        f"orbit log path must resolve to scene_dir/orbit.log; got {resolved}"
+    )
+
+
+def test_log_path_for_extract_kind(tmp_path: Path):
+    """Extract runs against the capture before the scene's
+    pipeline starts, so its log lives under the ``capture_dir``
+    root rather than the scene root. The route resolves both
+    roots upfront and passes ``capture_dir`` as a kwarg; without
+    the explicit kwarg the helper degrades to None (rather than
+    crash) so a hand-rolled caller that forgets the param sees
+    the same "no log" shape it'd get from any other unknown
+    kind."""
+    from app.api.jobs import _log_path_for_kind
+
+    scene_dir = tmp_path / "scene-extract"
+    capture_dir = tmp_path / "cap-extract"
+    resolved = _log_path_for_kind(
+        JobKind.extract, scene_dir, capture_dir=capture_dir,
+    )
+    assert resolved == capture_dir / "extract.log", (
+        f"extract log path must resolve to capture_dir/extract.log; got {resolved}"
+    )
+
+    # Defensive: degrade-to-None when the caller doesn't supply
+    # the capture_dir kwarg.
+    assert _log_path_for_kind(JobKind.extract, scene_dir) is None
+
+
 def test_backfill_skips_scenes_without_ply_path(
     isolated_store, tmp_path: Path
 ):
