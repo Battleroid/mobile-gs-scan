@@ -49,15 +49,12 @@ def test_validate_mesh_params_accepts_low_tier():
     assert out == {"tier": "low"}
 
 
-def test_validate_mesh_params_rejects_standard_tier():
-    """Standard tier is in the allowed-keys allowlist (so older
-    clients can submit it without 422'ing on the unknown-key
-    check) but the trigger endpoint refuses to enqueue it today.
-    Mirror the runtime behaviour in the validator."""
-    with pytest.raises(HTTPException) as exc:
-        _validate_mesh_params({"tier": "standard"})
-    assert exc.value.status_code == 422
-    assert "not yet implemented" in exc.value.detail
+def test_validate_mesh_params_accepts_standard_tier_now():
+    """``standard`` was added to the active set when the OpenMVS
+    backend landed. Validator must NOT 422 anymore — the broader
+    standard-tier behaviour is covered in ``test_mesh_mvs.py``."""
+    out = _validate_mesh_params({"tier": "standard"})
+    assert out == {"tier": "standard"}
 
 
 def test_validate_mesh_params_rejects_higher_tier():
@@ -160,16 +157,13 @@ def test_validate_mesh_params_accepts_legacy_poisson_keys_silently():
 # ─── dispatch: NotImplementedError on inactive tiers ─────────
 
 
-def test_run_mesh_raises_on_standard_tier(tmp_path: Path):
-    """A scene with mesh_params.tier=standard that reaches the
-    dispatcher (e.g. a queued job from before the API guard landed)
-    must surface NotImplementedError. The runner catches it and
-    writes ``mesh_error`` cleanly instead of leaving the row stuck
-    running."""
+def test_run_mesh_standard_tier_requires_transforms_json(tmp_path: Path):
+    """Standard tier is now a real dispatcher path (not a
+    NotImplementedError), but it needs ``sfm/transforms.json`` to
+    feed OpenMVS. When that's absent the dispatcher surfaces a
+    clear RuntimeError so the runner can write ``mesh_error``."""
     scene_dir = tmp_path / "scene_X"
     scene_dir.mkdir()
-    # Dummy src_ply that exists so the stub-fallback branch
-    # doesn't short-circuit before tier dispatch.
     src_ply = scene_dir / "scene.ply"
     src_ply.write_bytes(b"ply\nformat ascii 1.0\nelement vertex 0\nend_header\n")
 
@@ -177,7 +171,7 @@ def test_run_mesh_raises_on_standard_tier(tmp_path: Path):
         return None
 
     async def go():
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(RuntimeError, match="transforms.json"):
             await mesh_step.run_mesh(
                 scene_dir=scene_dir,
                 src_ply=src_ply,
@@ -234,30 +228,31 @@ def isolated_store(tmp_path: Path):
 
 
 def test_trigger_rejects_persisted_inactive_tier(isolated_store):
-    """A scene whose persisted ``mesh_params.tier`` is "standard"
-    or "higher" must NOT be allowed to queue a fresh job when the
-    incoming request omits ``tier``. Without this guard the runner
-    would dequeue the job and fail in the worker with
+    """A scene whose persisted ``mesh_params.tier`` is "higher"
+    (the remaining inactive tier) must NOT queue a fresh job when
+    the incoming request omits ``tier``. Without this guard the
+    runner would dequeue the job and fail in the worker with
     ``NotImplementedError``, polluting the pipeline list with
-    queued/failed churn — the exact case the API validator's tier
-    check exists to prevent."""
+    queued/failed churn — the exact case the API guard exists to
+    prevent. (``standard`` used to also be inactive; ``test_mesh_mvs``
+    covers its now-active path.)"""
 
     async def go():
         cap = await store.create_capture(name="t", source="upload")
         scene = await store.create_scene(cap.id)
         assert scene is not None
         # Force the scene into a state the trigger endpoint would
-        # accept (completed) and inject a forward-rolled tier into
+        # accept (completed) and inject a still-inactive tier into
         # the persisted row.
         await store.update_scene(
             scene.id,
             status=CaptureStatus.completed,
-            mesh_params={"tier": "standard"},
+            mesh_params={"tier": "higher"},
         )
 
         # Empty body — falls back to persisted mesh_params during
-        # job dispatch; the new guard must reject before the
-        # enqueue happens.
+        # job dispatch; the guard must reject before the enqueue
+        # happens.
         with pytest.raises(HTTPException) as exc:
             await trigger_mesh(scene.id, MeshRequest(params=None))
         assert exc.value.status_code == 422

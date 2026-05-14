@@ -92,6 +92,14 @@ export interface MeshParams {
   sdf_trunc_mult?: number;
   // Max ray depth to integrate, in multiples of scene extent. [1, 50].
   depth_trunc?: number;
+  // ─── standard-tier (OpenMVS) knobs ──────────────────────────
+  // Number of views fused per densification step. [2, 7].
+  mvs_dense_views?: number;
+  // Texture atlas page size (px). Must be one of
+  // {1024, 2048, 4096, 8192}; the worker rejects anything else.
+  mvs_texture_size?: number;
+  // RefineMesh iterations. 0 skips the refine pass entirely. [0, 4].
+  mvs_refine_iters?: number;
   // ─── legacy Poisson keys, accepted-but-ignored ──────────────
   // Older mesh_params rows persist these from before the TSDF
   // switch. The worker no longer reads them but the API still
@@ -154,6 +162,10 @@ export interface Scene {
   edit_recipe: EditRecipe | null;
   mesh_obj_url: string | null;
   mesh_glb_url: string | null;
+  // Standard-tier (OpenMVS) texture-atlas page URLs alongside the
+  // OBJ/MTL bundle. Null on low-tier meshes (vertex-colored OBJ
+  // alone) and on scenes without a completed mesh.
+  mesh_tex_urls: string[] | null;
   mesh_status: MeshStatus;
   mesh_error: string | null;
   mesh_params: MeshParams | null;

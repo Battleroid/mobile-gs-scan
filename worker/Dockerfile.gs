@@ -96,6 +96,44 @@ RUN (git clone --depth 1 --branch ${GLOMAP_TAG} https://github.com/colmap/glomap
     cmake --build /tmp/glomap/build --target install -j $(nproc) && \
     rm -rf /tmp/glomap
 
+# OpenMVS — the standard-tier mesh pipeline. Drives a sequence of
+# binaries (InterfaceCOLMAP → DensifyPointCloud → ReconstructMesh →
+# RefineMesh → TextureMesh) that produces a UV-mapped textured OBJ
+# + MTL + JPG bundle. Lands BELOW glomap so the COLMAP-as-library
+# linkage that glomap's ``FETCH_COLMAP=ON`` builds is already
+# resolved by the time we build OpenMVS against the same headers.
+#
+# CUDA densifier is DISABLED here (``-DOpenMVS_USE_CUDA=OFF``):
+#   * For 100–500 frame phone captures at ≤4K the CPU densifier
+#     completes in 5–15 min — within ~2–3× of CUDA but well inside
+#     the runtime budget the standard tier targets.
+#   * Avoids a second CUDA-arch matrix on the image (the OpenMVS
+#     CUDA build is finicky about Torch/cuDNN ABI overlap, which
+#     this worker image is already balancing for gsplat).
+#   * Reversible — flip the cmake flag if real-world dense times
+#     overrun what users tolerate.
+#
+# BREAKPAD is also disabled — it'd otherwise phone telemetry / crash
+# dumps home, which we don't want from a server worker.
+#
+# VCG is a header-only template library OpenMVS depends on; pinned
+# at the 2024.09 tag (the last verified stable interface before
+# the 2025 reorg). No build, just a clone-and-leave-on-disk.
+ARG VCGLIB_TAG=2024.09
+ARG OPENMVS_TAG=v2.3.0
+RUN (git clone --depth 1 --branch ${VCGLIB_TAG} https://github.com/cnr-isti-vclab/vcglib.git /opt/vcglib \
+        || git clone --depth 1 https://github.com/cnr-isti-vclab/vcglib.git /opt/vcglib) && \
+    (git clone --depth 1 --branch ${OPENMVS_TAG} https://github.com/cdcseacave/openMVS.git /tmp/openmvs \
+        || git clone --depth 1 https://github.com/cdcseacave/openMVS.git /tmp/openmvs) && \
+    cmake -S /tmp/openmvs -B /tmp/openmvs/build -GNinja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DOpenMVS_USE_CUDA=OFF \
+        -DOpenMVS_USE_BREAKPAD=OFF \
+        -DVCG_ROOT=/opt/vcglib \
+        -DCMAKE_INSTALL_PREFIX=/usr/local && \
+    cmake --build /tmp/openmvs/build --target install -j $(nproc) && \
+    rm -rf /tmp/openmvs
+
 # spz tooling — Niantic's compressed splat format. The Python bindings
 # are still fragile; we shell out to the upstream CLI instead.
 ARG SPZ_TAG=v1.0.1
