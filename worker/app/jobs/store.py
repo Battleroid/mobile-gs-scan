@@ -521,13 +521,26 @@ async def enqueue_retry_job(
     requests; the loser's INSERT sees the winner's row and writes
     zero rows.
 
+    "In-flight" matches ``delete_terminal_jobs_of_kind``'s inverse:
+    ``queued`` / ``claimed`` / ``running`` rows, plus ``canceled``
+    rows the worker hasn't acked yet (``completed_at IS NULL``). The
+    canceled-but-unacked window matters because
+    ``POST /api/jobs/{id}/cancel`` flips status to ``canceled``
+    synchronously but the worker only SIGKILLs the subprocess on its
+    next heartbeat (~5s). A retry slipped into that window would
+    enqueue a new job whose dispatch could race the still-executing
+    subprocess on shared artifact paths. The worker's
+    ``_ack_user_cancel`` sets ``completed_at`` once it's killed the
+    subprocess and unregistered it, which is the moment retry
+    becomes safe.
+
     Returns a 2-tuple of ``(job, reason)`` where reason is:
       * ``"ok"`` — job inserted, ``job`` is non-None.
       * ``"scene_missing"`` — the parent scene was cascaded away
         between the caller's ``get_job`` and this call. ``job`` is
         None.
-      * ``"in_flight"`` — another queued/claimed/running job of the
-        same kind already exists for the scene. ``job`` is None.
+      * ``"in_flight"`` — another in-flight job of the same kind
+        already exists for the scene. ``job`` is None.
 
     The reason distinction matters: scene_missing is a 404 (the
     capture-delete cascade won), in_flight is a 409 (caller should
@@ -536,11 +549,6 @@ async def enqueue_retry_job(
     job_id = _make_id()
     now = _utcnow()
     payload_json = json.dumps(payload or {})
-    in_flight_values = (
-        JobStatus.queued.value,
-        JobStatus.claimed.value,
-        JobStatus.running.value,
-    )
     async with session() as s:
         result = await s.execute(
             text(
@@ -557,7 +565,10 @@ async def enqueue_retry_job(
                     SELECT 1 FROM jobs
                     WHERE scene_id = :sid
                       AND kind = :kind
-                      AND status IN (:q, :c, :r)
+                      AND (
+                        status IN (:q, :c, :r)
+                        OR (status = :x AND completed_at IS NULL)
+                      )
                   )
                 """
             ),
@@ -567,9 +578,10 @@ async def enqueue_retry_job(
                 "kind": kind.value,
                 "payload": payload_json,
                 "now": now,
-                "q": in_flight_values[0],
-                "c": in_flight_values[1],
-                "r": in_flight_values[2],
+                "q": JobStatus.queued.value,
+                "c": JobStatus.claimed.value,
+                "r": JobStatus.running.value,
+                "x": JobStatus.canceled.value,
             },
         )
         await s.commit()
