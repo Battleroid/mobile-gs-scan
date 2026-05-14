@@ -6,6 +6,10 @@ the wrapper surfaces that DON'T need a GPU:
 
 * Param-validation contract on POST /api/scenes/{id}/mesh — tier,
   n_views, view_elevations, voxel_size, sdf_trunc_mult, depth_trunc.
+* The trigger endpoint's persisted-tier guard — if the user omits
+  ``tier`` and the persisted ``scene.mesh_params`` row carries an
+  inactive tier, the request must 422 rather than queue a doomed
+  job that fails in the worker.
 * Tier dispatch in ``mesh.run_mesh`` — standard / higher tiers must
   surface ``NotImplementedError`` so the runner writes a clean
   ``mesh_error`` rather than queuing a doomed subprocess.
@@ -25,7 +29,10 @@ import numpy as np
 import pytest
 from fastapi import HTTPException
 
-from app.api.scenes import _validate_mesh_params
+from app.api.scenes import _validate_mesh_params, trigger_mesh, MeshRequest
+from app.config import Settings
+from app.jobs import store
+from app.jobs.schema import CaptureStatus, MeshStatus
 from app.pipeline import mesh as mesh_step
 from app.pipeline import ply_render
 
@@ -202,6 +209,91 @@ def test_run_mesh_raises_on_higher_tier(tmp_path: Path):
             )
 
     _run(go())
+
+
+# ─── trigger endpoint: persisted-tier guard ──────────────────
+
+
+@pytest.fixture
+def isolated_store(tmp_path: Path):
+    """Per-test sqlite db (matches test_thumbnail.py pattern)."""
+    settings = Settings(
+        data_dir=tmp_path,
+        db_filename="test_mesh_tsdf.sqlite",
+    )
+
+    async def setup():
+        await store.init_store(settings)
+
+    async def teardown():
+        await store.shutdown_store()
+
+    asyncio.run(setup())
+    yield
+    asyncio.run(teardown())
+
+
+def test_trigger_rejects_persisted_inactive_tier(isolated_store):
+    """A scene whose persisted ``mesh_params.tier`` is "standard"
+    or "higher" must NOT be allowed to queue a fresh job when the
+    incoming request omits ``tier``. Without this guard the runner
+    would dequeue the job and fail in the worker with
+    ``NotImplementedError``, polluting the pipeline list with
+    queued/failed churn — the exact case the API validator's tier
+    check exists to prevent."""
+
+    async def go():
+        cap = await store.create_capture(name="t", source="upload")
+        scene = await store.create_scene(cap.id)
+        assert scene is not None
+        # Force the scene into a state the trigger endpoint would
+        # accept (completed) and inject a forward-rolled tier into
+        # the persisted row.
+        await store.update_scene(
+            scene.id,
+            status=CaptureStatus.completed,
+            mesh_params={"tier": "standard"},
+        )
+
+        # Empty body — falls back to persisted mesh_params during
+        # job dispatch; the new guard must reject before the
+        # enqueue happens.
+        with pytest.raises(HTTPException) as exc:
+            await trigger_mesh(scene.id, MeshRequest(params=None))
+        assert exc.value.status_code == 422
+        assert "not yet implemented" in exc.value.detail
+
+        # And no job should have queued.
+        jobs = await store.list_jobs_for_scene(scene.id)
+        assert all(j.kind.value != "mesh" or j.status.value != "queued"
+                   for j in jobs)
+
+    asyncio.run(go())
+
+
+def test_trigger_allows_persisted_inactive_tier_overridden_to_low(isolated_store):
+    """The persisted-tier guard must NOT fire when the incoming
+    request explicitly sets ``tier: low`` — that's the documented
+    escape hatch the 422 message points users at."""
+
+    async def go():
+        cap = await store.create_capture(name="t2", source="upload")
+        scene = await store.create_scene(cap.id)
+        assert scene is not None
+        await store.update_scene(
+            scene.id,
+            status=CaptureStatus.completed,
+            mesh_params={"tier": "higher"},
+        )
+
+        # Override tier in the request — should be accepted, scene
+        # update happens, job queues.
+        result = await trigger_mesh(
+            scene.id, MeshRequest(params={"tier": "low"}),
+        )
+        assert result.mesh_status == MeshStatus.queued
+
+    asyncio.run(go())
 
 
 # ─── numpy-only: extrinsic flip ──────────────────────────────

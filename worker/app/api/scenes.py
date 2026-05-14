@@ -581,6 +581,26 @@ async def trigger_mesh(scene_id: str, body: MeshRequest | None = None) -> SceneV
 
     params = _validate_mesh_params(body.params if body else None)
 
+    # If the request omits ``tier`` (or omits ``params`` entirely),
+    # the runner will fall back to the persisted ``scene.mesh_params``.
+    # That row may carry an inactive tier (forward-rolled by a future
+    # client, hand-edited via direct DB access, or persisted from a
+    # window where the tier surface changed). Catch that here so the
+    # job never queues — otherwise it'd run, fail in the worker with
+    # ``NotImplementedError``, and pollute the pipeline list with
+    # exactly the queued/running churn the validator is meant to
+    # prevent. Same 422 + message shape as the validator's tier
+    # check so the UI surface is uniform.
+    if "tier" not in params:
+        persisted_tier = (scene.mesh_params or {}).get("tier")
+        if persisted_tier and persisted_tier not in _ACTIVE_MESH_TIERS:
+            raise HTTPException(
+                422,
+                f"persisted mesh tier '{persisted_tier}' is not yet "
+                f"implemented; submit ``params: {{\"tier\": \"low\"}}`` "
+                f"to override. active tiers: {sorted(_ACTIVE_MESH_TIERS)}",
+            )
+
     for j in await store.list_jobs_for_scene(scene.id):
         if j.kind != JobKind.mesh:
             continue
