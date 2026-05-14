@@ -125,12 +125,28 @@ RUN (git clone --depth 1 --branch ${GLOMAP_TAG} https://github.com/colmap/glomap
 # BREAKPAD is also disabled — it'd otherwise phone telemetry / crash
 # dumps home, which we don't want from a server worker.
 #
-# VCG is a header-only template library OpenMVS depends on; pinned
-# at the 2024.09 tag (the last verified stable interface before
-# the 2025 reorg). No build, just a clone-and-leave-on-disk.
-ARG VCGLIB_TAG=2024.09
+# ``libopencv-dev`` is installed inline (not in Dockerfile.base) so
+# the API image doesn't pay for the ~150 MB of OpenCV-dev. OpenMVS's
+# CMake configure step looks for ``OpenCVConfig.cmake`` via
+# ``find_package(OpenCV)``; without the apt package the configure
+# fails with "Could not find a package configuration file provided
+# by OpenCV" partway through the layer.
+#
+# VCG is a header-only template library OpenMVS depends on. Pinned
+# at the ``2025.07`` upstream tag (the latest dated stable release;
+# the prior PR's ``2024.09`` pin didn't actually exist on the
+# remote). vcglib doesn't break interfaces frequently between dated
+# tags, but pinning beats "clone main" for reproducibility — same
+# argument the glomap/spz steps make.  ``||`` fallback to main on
+# retag mirrors the glomap / spz pattern: if upstream ever moves a
+# tag, the build degrades to "latest main" instead of failing the
+# whole image.
+ARG VCGLIB_TAG=2025.07
 ARG OPENMVS_TAG=v2.3.0
-RUN (git clone --depth 1 --branch ${VCGLIB_TAG} https://github.com/cnr-isti-vclab/vcglib.git /opt/vcglib \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libopencv-dev \
+    && rm -rf /var/lib/apt/lists/* && \
+    (git clone --depth 1 --branch ${VCGLIB_TAG} https://github.com/cnr-isti-vclab/vcglib.git /opt/vcglib \
         || git clone --depth 1 https://github.com/cnr-isti-vclab/vcglib.git /opt/vcglib) && \
     (git clone --depth 1 --branch ${OPENMVS_TAG} https://github.com/cdcseacave/openMVS.git /tmp/openmvs \
         || git clone --depth 1 https://github.com/cdcseacave/openMVS.git /tmp/openmvs) && \
