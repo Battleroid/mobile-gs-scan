@@ -279,6 +279,15 @@ def _train_2dgs(*, prepared, frames, intrinsics, n_iters: int):
             ).squeeze(0).permute(1, 2, 0)
 
         try:
+            # ``render_mode="RGB+ED"`` populates the per-pixel
+            # expected-depth + the depth-derived normal channel
+            # the normal-consistency loss compares against; without
+            # it the function returns RGB-only and the regularizers
+            # below silently skip (training collapses to plain RGB
+            # L1, which defeats the surface-aware retraining goal).
+            # ``distloss=True`` toggles gsplat to compute + return
+            # the depth-distortion regularizer with grad attached
+            # so the optimizer can drive it down.
             render = rasterization_2dgs(
                 means=means,
                 quats=quats / quats.norm(dim=-1, keepdim=True).clamp(min=1e-8),
@@ -289,6 +298,8 @@ def _train_2dgs(*, prepared, frames, intrinsics, n_iters: int):
                 Ks=K,
                 width=w,
                 height=h,
+                render_mode="RGB+ED",
+                distloss=True,
             )
         except Exception as exc:
             _log(f"ERROR: rasterization_2dgs call failed at it={it}: {exc}")
@@ -404,6 +415,13 @@ def _dome_render_and_tsdf(*, prepared, centroid, extent, params):
         c2w_opencv = c2w @ flip_yz
         viewmats = torch.linalg.inv(c2w_opencv)
         with torch.no_grad():
+            # ``render_mode="RGB+ED"`` is required to get the
+            # ``render_median`` channel we index at ret[5] below
+            # for TSDF integration. Without it gsplat returns an
+            # RGB-only tuple shape and the depth channel falls
+            # through to the 3DGS expected-depth fallback path —
+            # which works but loses the 2DGS surface-aware advantage
+            # the higher tier is meant to deliver.
             render = rasterization_2dgs(
                 means=prepared["means"],
                 quats=prepared["quats"],
@@ -414,6 +432,7 @@ def _dome_render_and_tsdf(*, prepared, centroid, extent, params):
                 Ks=K,
                 width=_DOME_W,
                 height=_DOME_H,
+                render_mode="RGB+ED",
             )
         ret = list(render)
         # gsplat 1.4.x ``rasterization_2dgs`` documented return
