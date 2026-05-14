@@ -1,13 +1,18 @@
 package dev.battleroid.mobilegsscan
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import dev.battleroid.mobilegsscan.ui.draft.DraftDetailScreen
 import dev.battleroid.mobilegsscan.ui.draft.DraftDetailUiState
@@ -54,6 +59,16 @@ class DraftDetailActivity : ComponentActivity() {
     private var draft: Draft? = null
     private var baseUrl: String = ""
     private var uploadJob: Job? = null
+    private var serviceCollector: Job? = null
+
+    // Android 13+ runtime permission. The OS shows the system
+    // sheet exactly once per uninstall; subsequent calls into
+    // launch() short-circuit. If the user denies, the upload
+    // still runs but they don't get the progress / completion
+    // notifications — we don't block the upload on it.
+    private val notifPermLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { _ -> /* fire-and-forget */ }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -94,6 +109,16 @@ class DraftDetailActivity : ComponentActivity() {
 
         if (autoUpload) {
             startUpload()
+        } else {
+            // Re-attach to a service-side run that may have been
+            // started before this activity instance was created
+            // (user uploaded, backgrounded, came back). Idempotent
+            // when nothing's running — the flow yields null and
+            // the UI keeps the idle state.
+            bindToUploadServiceState(
+                draftId = draftId,
+                totalSeed = draft?.meta?.frame_count ?: 0,
+            )
         }
     }
 
@@ -153,6 +178,11 @@ class DraftDetailActivity : ComponentActivity() {
         // instead of using Finish.
         if (!d.meta.finalized) d.finalize()
 
+        // Best-effort permission request. The upload itself goes
+        // ahead either way — the user just won't see progress /
+        // completion notifications if they decline.
+        maybeRequestNotificationPermission()
+
         state.update {
             it.copy(
                 upload = UploadProgress(sent = 0, total = d.meta.frame_count),
@@ -160,36 +190,72 @@ class DraftDetailActivity : ComponentActivity() {
             )
         }
 
-        val client = StudioClient(baseUrl)
-        val uploader = DraftUploader(this, baseUrl, client)
-        uploadJob = lifecycleScope.launch {
-            val result = uploader.upload(this, d) { sent, total ->
-                state.update {
-                    it.copy(upload = UploadProgress(sent = sent, total = total))
-                }
-            }
-            when (result) {
-                is DraftUploader.Result.Ok -> {
-                    Toast.makeText(
-                        this@DraftDetailActivity,
-                        getString(R.string.upload_succeeded),
-                        Toast.LENGTH_SHORT,
-                    ).show()
-                    routeToCaptureDetail(result.captureId)
-                }
-                is DraftUploader.Result.Failed -> {
-                    state.update {
-                        it.copy(upload = null, uploadError = result.reason)
+        // Hand the upload off to UploadService so it survives
+        // backgrounding / lock / dim / sleep. The activity stays
+        // bound to the service's state flow for live UI updates
+        // while it's in the foreground.
+        UploadService.start(this, baseUrl, d.id)
+        bindToUploadServiceState(d.id, totalSeed = d.meta.frame_count)
+    }
+
+    private fun cancelUpload() {
+        UploadService.cancel(this, draft?.id.orEmpty())
+        uploadJob?.cancel()
+        uploadJob = null
+        serviceCollector?.cancel()
+        serviceCollector = null
+        state.update { it.copy(upload = null) }
+    }
+
+    private fun bindToUploadServiceState(draftId: String, totalSeed: Int) {
+        // Collect from the service's per-draft state flow. The
+        // service updates it on every batch ack, and writes a
+        // terminal Done / Failed state when the run finishes. We
+        // route forward to CaptureDetail on Done and reset on
+        // Failed; if the user backgrounded the activity, this
+        // collector restarts on the next onCreate (the service
+        // keeps the latest state in a process-scoped Map).
+        serviceCollector?.cancel()
+        serviceCollector = lifecycleScope.launch {
+            UploadService.stateFlow(draftId).collect { s ->
+                when (s) {
+                    is UploadService.UploadState.Running -> {
+                        val total = if (s.total > 0) s.total else totalSeed
+                        state.update {
+                            it.copy(
+                                upload = UploadProgress(sent = s.sent, total = total),
+                                uploadError = null,
+                            )
+                        }
                     }
+                    is UploadService.UploadState.Done -> {
+                        state.update { it.copy(upload = null) }
+                        Toast.makeText(
+                            this@DraftDetailActivity,
+                            getString(R.string.upload_succeeded),
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                        routeToCaptureDetail(s.captureId)
+                    }
+                    is UploadService.UploadState.Failed -> {
+                        state.update {
+                            it.copy(upload = null, uploadError = s.reason)
+                        }
+                    }
+                    null -> { /* idle */ }
                 }
             }
         }
     }
 
-    private fun cancelUpload() {
-        uploadJob?.cancel()
-        uploadJob = null
-        state.update { it.copy(upload = null) }
+    private fun maybeRequestNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val granted = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            notifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
     }
 
     private fun routeToCaptureDetail(captureId: String) {
