@@ -717,12 +717,27 @@ function SplatScene({
           if (cancelled) return;
           // OBJLoader doesn't apply a default material when the .mtl
           // is missing — surfaces render black under our lighting.
-          // Drop a flat grey lambert so the mesh always shows up.
+          // Drop a standard material so the mesh always shows up.
+          //
+          // Vertex-color path: the TSDF-tier subprocess writes OBJs
+          // with per-vertex RGB after each `v` entry; OBJLoader
+          // parses those into a ``color`` BufferAttribute on the
+          // geometry. If we plant a flat-grey material here without
+          // ``vertexColors: true``, the integrated colors land in
+          // the GPU buffer but the shader ignores them. Detect the
+          // attribute and flip the material accordingly; fall back
+          // to flat grey only when the OBJ had no colors.
           obj.traverse((child) => {
             if ((child as THREE.Mesh).isMesh) {
               const m = child as THREE.Mesh;
+              const hasVertexColor = !!(
+                m.geometry &&
+                (m.geometry as THREE.BufferGeometry).getAttribute &&
+                (m.geometry as THREE.BufferGeometry).getAttribute("color")
+              );
               m.material = new THREE.MeshStandardMaterial({
-                color: 0xb8bcc2,
+                color: hasVertexColor ? 0xffffff : 0xb8bcc2,
+                vertexColors: hasVertexColor,
                 roughness: 0.85,
                 metalness: 0.05,
               });

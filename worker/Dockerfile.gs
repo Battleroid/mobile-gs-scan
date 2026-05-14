@@ -45,6 +45,37 @@ RUN python -m pip install --extra-index-url https://download.pytorch.org/whl/cu1
         nerfstudio==1.1.5 \
         gsplat==1.4.0
 
+# CUDA architectures for COLMAP + glomap below. Same arch set as
+# TORCH_CUDA_ARCH_LIST above, expressed in CMake's semicolon-list
+# format (no decimals: "8.9" → "89"). Override via
+# --build-arg CMAKE_CUDA_ARCHITECTURES=... when trimming for a
+# specific card class. Declared here (above both builds) so the
+# COLMAP step can share the same value without duplicating the ARG.
+ARG CMAKE_CUDA_ARCHITECTURES="80;86;89;90"
+
+# COLMAP CLI from source. The glomap build below uses
+# ``-DFETCH_COLMAP=ON`` to satisfy COLMAP-as-a-library, but that path
+# does not install the ``colmap`` binary on ``$PATH``. The current
+# pipeline doesn't need it directly, but future surfaces will:
+#   * OpenMVS-textured mesh tier — ``colmap model_converter`` to
+#     translate our ``sfm/transforms.json`` into a COLMAP workspace.
+#   * Ad-hoc debugging from inside the worker shell (manual SfM
+#     inspection, MVS workspace fixups, point-cloud sanity passes).
+# Pinned at 3.10 (the stable tag closest to the COLMAP that glomap
+# 1.0.0 already fetches internally, so the two installs agree on
+# library ABI). GUI off to avoid pulling Qt into the image. Built
+# BEFORE the glomap step so its layer caches independently — a
+# glomap retag doesn't invalidate this and vice-versa.
+ARG COLMAP_TAG=3.10
+RUN (git clone --depth 1 --branch ${COLMAP_TAG} https://github.com/colmap/colmap.git /tmp/colmap \
+        || git clone --depth 1 https://github.com/colmap/colmap.git /tmp/colmap) && \
+    cmake -S /tmp/colmap -B /tmp/colmap/build -GNinja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_CUDA_ARCHITECTURES="${CMAKE_CUDA_ARCHITECTURES}" \
+        -DGUI_ENABLED=OFF && \
+    cmake --build /tmp/colmap/build --target install -j $(nproc) && \
+    rm -rf /tmp/colmap
+
 # Glomap from source. Apt doesn't carry it; the nerfstudio docker image
 # uses the same approach. Try the pinned tag first, fall back to main
 # if the tag isn't there (colmap/glomap occasionally retags releases).
@@ -54,11 +85,6 @@ RUN python -m pip install --extra-index-url https://download.pytorch.org/whl/cu1
 # qtbase5-dev + libqt5opengl5-dev installed in the base image, which
 # we'd rather avoid.
 ARG GLOMAP_TAG=1.0.0
-# Same arch set as TORCH_CUDA_ARCH_LIST above, expressed in CMake's
-# semicolon-list format (no decimals: "8.9" → "89"). Override via
-# --build-arg CMAKE_CUDA_ARCHITECTURES=... when trimming for a
-# specific card class.
-ARG CMAKE_CUDA_ARCHITECTURES="80;86;89;90"
 RUN (git clone --depth 1 --branch ${GLOMAP_TAG} https://github.com/colmap/glomap.git /tmp/glomap \
         || git clone --depth 1 https://github.com/colmap/glomap.git /tmp/glomap) && \
     cmake -S /tmp/glomap -B /tmp/glomap/build -GNinja \
