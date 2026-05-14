@@ -523,16 +523,25 @@ async def enqueue_retry_job(
 
     "In-flight" matches ``delete_terminal_jobs_of_kind``'s inverse:
     ``queued`` / ``claimed`` / ``running`` rows, plus ``canceled``
-    rows the worker hasn't acked yet (``completed_at IS NULL``). The
-    canceled-but-unacked window matters because
+    rows where a worker claimed the row but hasn't yet acked the
+    cancel (``claimed_by IS NOT NULL AND completed_at IS NULL``).
+    The canceled-but-unacked window matters because
     ``POST /api/jobs/{id}/cancel`` flips status to ``canceled``
     synchronously but the worker only SIGKILLs the subprocess on its
-    next heartbeat (~5s). A retry slipped into that window would
+    next heartbeat (~5s); a retry slipped into that window would
     enqueue a new job whose dispatch could race the still-executing
     subprocess on shared artifact paths. The worker's
     ``_ack_user_cancel`` sets ``completed_at`` once it's killed the
     subprocess and unregistered it, which is the moment retry
     becomes safe.
+
+    Gating on ``claimed_by IS NOT NULL`` keeps the retry path
+    usable for queued-then-canceled rows: ``cancel_job`` only flips
+    ``status`` / ``updated_at`` and never touches ``completed_at``,
+    so a never-claimed cancel would otherwise keep
+    ``completed_at=NULL`` forever and block retry permanently. No
+    worker ever ran on a queued cancel, so there's no subprocess
+    race to guard against.
 
     Returns a 2-tuple of ``(job, reason)`` where reason is:
       * ``"ok"`` — job inserted, ``job`` is non-None.
@@ -567,7 +576,11 @@ async def enqueue_retry_job(
                       AND kind = :kind
                       AND (
                         status IN (:q, :c, :r)
-                        OR (status = :x AND completed_at IS NULL)
+                        OR (
+                          status = :x
+                          AND claimed_by IS NOT NULL
+                          AND completed_at IS NULL
+                        )
                       )
                   )
                 """
