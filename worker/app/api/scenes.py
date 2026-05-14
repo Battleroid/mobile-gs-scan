@@ -137,15 +137,20 @@ def _mesh_glb_url(scene: Scene) -> str | None:
 
 
 def _mesh_tex_urls(scene: Scene) -> list[str] | None:
-    """Enumerate ``scene_tex<N>.jpg`` siblings under the scene's
+    """Enumerate ``scene_tex<N>.<ext>`` siblings under the scene's
     mesh dir, returning their canonical bundle URLs.
 
     Null when:
       * The scene has no completed mesh on disk (low-tier scenes
         produce a vertex-colored OBJ with no JPG sidecars).
       * The latest mesh_params indicate the standard tier wasn't
-        the last run AND no JPGs exist (defensive — covers a
-        future tier that doesn't emit sidecars).
+        the last run AND no texture files exist (defensive —
+        covers a future tier that doesn't emit sidecars).
+
+    Globs both ``.jpg`` and ``.png`` since OpenMVS's TextureMesh
+    can emit either depending on its build config. The artifact-
+    route allowlist serves both extensions; this glob just feeds
+    the SceneView URL list.
 
     We glob the dir rather than reading a stored ``mesh_tex_path``
     column because OpenMVS emits a variable number of texture
@@ -159,7 +164,10 @@ def _mesh_tex_urls(scene: Scene) -> list[str] | None:
     mesh_dir = _scene_mesh_dir(scene)
     if not mesh_dir.exists():
         return None
-    tex_files = sorted(mesh_dir.glob("scene_tex*.jpg"))
+    tex_files = sorted(
+        list(mesh_dir.glob("scene_tex*.jpg"))
+        + list(mesh_dir.glob("scene_tex*.png"))
+    )
     if not tex_files:
         return None
     return [

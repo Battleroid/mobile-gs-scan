@@ -261,7 +261,15 @@ def _run_mvs(
     # signalling success to the parent.
     obj_path = staging_dir / "scene_textured.obj"
     mtl_path = staging_dir / "scene_textured.mtl"
-    tex_globs = sorted(staging_dir.glob("scene_textured*.jpg"))
+    # TextureMesh can emit either JPG or PNG texture pages
+    # depending on build config / scene content; accept both. The
+    # artifact-route allowlist regex (in ``scenes.py``) already
+    # serves both extensions, and the rename step below preserves
+    # whichever suffix OpenMVS picked.
+    tex_globs = sorted(
+        list(staging_dir.glob("scene_textured*.jpg"))
+        + list(staging_dir.glob("scene_textured*.png"))
+    )
     if not obj_path.exists() or not mtl_path.exists() or not tex_globs:
         raise RuntimeError(
             f"TextureMesh exited 0 but the bundle is incomplete: "
@@ -273,16 +281,21 @@ def _run_mvs(
     # atomic-swap doesn't need to learn OpenMVS's naming. The
     # MTL's internal ``map_Kd scene_textured0.jpg`` reference
     # also gets rewritten in-place so the relative-URL lookup
-    # from the web's MTLLoader resolves to ``scene_tex0.jpg``
+    # from the web's MTLLoader resolves to ``scene_tex0.<ext>``
     # (matching the artifact route's allowlist regex).
     _emit(0.93, "mvs: rename bundle")
     rename_map: dict[str, str] = {}
     for i, tex_src in enumerate(tex_globs):
-        # TextureMesh emits ``scene_textured0.jpg``, ``scene_textured1.jpg``,
-        # etc. Renaming to ``scene_tex0.jpg`` etc. matches the
-        # artifact route's allowlist + keeps the legacy single-
-        # texture naming readable.
-        tex_dst = staging_dir / f"scene_tex{i}.jpg"
+        # TextureMesh emits ``scene_textured0.jpg`` /
+        # ``scene_textured0.png`` etc. Renaming to
+        # ``scene_tex<N>.<ext>`` matches the artifact route's
+        # allowlist + keeps the legacy single-texture naming
+        # readable. Preserve the source extension verbatim so a
+        # PNG run doesn't get misnamed as .jpg (which would let
+        # the file serve but break the MTL's ``map_Kd`` line and
+        # any client that content-sniffs by suffix).
+        ext = tex_src.suffix.lower()
+        tex_dst = staging_dir / f"scene_tex{i}{ext}"
         tex_src.rename(tex_dst)
         rename_map[tex_src.name] = tex_dst.name
     final_obj = staging_dir / "scene.obj"

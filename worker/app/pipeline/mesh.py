@@ -427,14 +427,21 @@ async def _run_mvs(
 
     staged_obj = staging_dir / "scene.obj"
     staged_mtl = staging_dir / "scene.mtl"
-    staged_jpgs = sorted(staging_dir.glob("scene_tex*.jpg"))
+    # The subprocess emits texture pages with whichever extension
+    # OpenMVS's TextureMesh picked (JPG by default, PNG on some
+    # build configs). Glob both — the artifact-route allowlist
+    # already serves both extensions.
+    staged_tex = sorted(
+        list(staging_dir.glob("scene_tex*.jpg"))
+        + list(staging_dir.glob("scene_tex*.png"))
+    )
     staged_glb = staging_dir / "scene.glb"
-    if not staged_obj.exists() or not staged_mtl.exists() or not staged_jpgs:
+    if not staged_obj.exists() or not staged_mtl.exists() or not staged_tex:
         shutil.rmtree(staging_dir, ignore_errors=True)
         raise RuntimeError(
             "openmvs exited 0 but the bundle is incomplete: "
             f"obj={staged_obj.exists()} mtl={staged_mtl.exists()} "
-            f"tex_count={len(staged_jpgs)}"
+            f"tex_count={len(staged_tex)}"
         )
 
     # Clean any stale ``scene*`` files from mesh_dir before moving
@@ -454,9 +461,9 @@ async def _run_mvs(
     staged_obj.replace(mesh_dir / "scene.obj")
     staged_mtl.replace(mesh_dir / "scene.mtl")
     tex_paths: list[str] = []
-    for jpg in staged_jpgs:
-        dst = mesh_dir / jpg.name
-        jpg.replace(dst)
+    for tex in staged_tex:
+        dst = mesh_dir / tex.name
+        tex.replace(dst)
         tex_paths.append(str(dst))
     has_glb = False
     if staged_glb.exists():
