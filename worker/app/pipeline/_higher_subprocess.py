@@ -305,22 +305,33 @@ def _train_2dgs(*, prepared, frames, intrinsics, n_iters: int):
             _log(f"ERROR: rasterization_2dgs call failed at it={it}: {exc}")
             return None
 
-        # gsplat 1.4 ``rasterization_2dgs`` returns a variable-
-        # length tuple across versions:
-        #   (render_rgb, alphas, normals, normals_from_depth, render_distort, render_median, meta)
-        # is the most-common shape; some 1.4.x patch versions
-        # collapse the two normal-source outputs into a single
-        # ``normals`` plus a render_dict. Defensive unpack: pull
-        # the first 7 items if available, else degrade to the
-        # documented core (rgb, alphas, normals, distort).
+        # With ``render_mode="RGB+ED"`` + ``distloss=True`` the
+        # rasterizer's documented return tuple is exactly 7-wide:
+        #   (render_rgb, alphas, normals, normals_from_depth,
+        #    render_distort, render_median, meta)
+        # Earlier code tried to "defensively" unpack shorter
+        # variants, but for ``len(ret) < 7`` the positional
+        # indices misroute channels — ``distort`` would fall back
+        # to ret[3] which is actually ``normals_from_depth`` in
+        # the same ordering, silently optimizing normals as
+        # distortion. Be strict: require the 7-element shape,
+        # raise loudly otherwise. The kwargs above guarantee it on
+        # gsplat 1.4.x; a future API drift should fail visibly
+        # rather than corrupt training.
         ret = list(render)
+        if len(ret) < 7:
+            _log(
+                f"ERROR: rasterization_2dgs returned {len(ret)} "
+                f"elements; expected 7 with render_mode='RGB+ED' "
+                f"and distloss=True. gsplat API may have changed."
+            )
+            return None
         render_rgb = ret[0]
-        # Squeeze the leading batch dim if present.
         if render_rgb.ndim == 4:
             render_rgb = render_rgb[0]
-        normals = ret[2] if len(ret) > 2 else None
-        normals_depth = ret[3] if len(ret) > 6 else None
-        distort = ret[4] if len(ret) > 6 else (ret[3] if len(ret) > 3 else None)
+        normals = ret[2]
+        normals_depth = ret[3]
+        distort = ret[4]
 
         loss_rgb = (render_rgb - gt).abs().mean()
         loss = loss_rgb
@@ -544,10 +555,15 @@ def _bake_textures(*, mesh, staging_dir: Path):
     # atlas-vertex space.
 
     _emit(0.86, "bake texture page")
-    # Allocate the page + a coverage mask.
-    page_px = atlas.width
-    page = np.zeros((page_px, page_px, 3), dtype=np.uint8)
-    covered = np.zeros((page_px, page_px), dtype=bool)
+    # Allocate the page + a coverage mask. xatlas can pack into a
+    # non-square atlas (charts won't always fill the requested
+    # ``resolution`` evenly), so we read width / height
+    # separately. The raster bounds, page array shape, and UV
+    # normalisation below all use the per-axis dimension.
+    page_w = atlas.width
+    page_h = atlas.height
+    page = np.zeros((page_h, page_w, 3), dtype=np.uint8)
+    covered = np.zeros((page_h, page_w), dtype=bool)
 
     # Bake by rasterizing each triangle's barycentric color into
     # the atlas page. CPU-side numpy raster — slow but simple and
@@ -571,8 +587,8 @@ def _bake_textures(*, mesh, staging_dir: Path):
         col_c = vcols_u8[int(vmap[c_i])]
         x_min = max(0, int(np.floor(min(uv_a[0], uv_b[0], uv_c[0]))))
         y_min = max(0, int(np.floor(min(uv_a[1], uv_b[1], uv_c[1]))))
-        x_max = min(page_px - 1, int(np.ceil(max(uv_a[0], uv_b[0], uv_c[0]))))
-        y_max = min(page_px - 1, int(np.ceil(max(uv_a[1], uv_b[1], uv_c[1]))))
+        x_max = min(page_w - 1, int(np.ceil(max(uv_a[0], uv_b[0], uv_c[0]))))
+        y_max = min(page_h - 1, int(np.ceil(max(uv_a[1], uv_b[1], uv_c[1]))))
         if x_max < x_min or y_max < y_min:
             continue
         denom = (
@@ -641,8 +657,8 @@ def _bake_textures(*, mesh, staging_dir: Path):
         # OBJ wants normalised [0, 1] with V flipped (OpenGL
         # convention vs xatlas's top-down). Normalize + flip here.
         for uv in uvs:
-            u = float(uv[0]) / page_px
-            v = 1.0 - float(uv[1]) / page_px
+            u = float(uv[0]) / page_w
+            v = 1.0 - float(uv[1]) / page_h
             f.write(f"vt {u:.6f} {v:.6f}\n")
         # Faces — vt and v share the same index (1-based per OBJ).
         for tri in indices:
