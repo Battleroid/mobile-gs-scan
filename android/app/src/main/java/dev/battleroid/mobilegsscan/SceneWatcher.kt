@@ -100,13 +100,42 @@ object SceneWatcher {
         captureId: String,
         captureName: String,
     ) {
+        watchInternal(
+            ctx = ctx,
+            baseUrl = baseUrl,
+            sceneId = sceneId,
+            captureId = captureId,
+            captureName = captureName,
+            persistOnStart = true,
+        )
+    }
+
+    private fun watchInternal(
+        ctx: Context,
+        baseUrl: String,
+        sceneId: String,
+        captureId: String,
+        captureName: String,
+        persistOnStart: Boolean,
+    ) {
         if (sceneId.isBlank() || baseUrl.isBlank()) return
         val app = ctx.applicationContext as App
-        // Persist *before* we start the coroutine so a crash
-        // mid-connect leaves a recoverable entry behind for
-        // restorePending. Idempotent — repeated watches of the
-        // same scene id collapse into a single WS.
-        persist(ctx, sceneId, Pending(baseUrl, captureName, captureId))
+        if (persistOnStart) {
+            // Persist *before* we start the coroutine so a crash
+            // mid-connect leaves a recoverable entry behind for
+            // restorePending. ``commit()`` rather than ``apply()``
+            // — ``apply()`` schedules the disk write asynchronously,
+            // so a process kill in the window between ``watch()``
+            // returning and the SharedPreferences worker thread
+            // flushing would lose the entry entirely; the user
+            // would never get a notification for that scene.
+            // ``commit()`` is bounded (a few ms for our payload
+            // size) and we're only called from the FG service's
+            // IO coroutine on this path, so the brief block is
+            // fine. Idempotent — repeated watches of the same
+            // scene id overwrite the same entry.
+            persist(ctx, sceneId, Pending(baseUrl, captureName, captureId))
+        }
         if (watching.containsKey(sceneId)) return
         val job = app.appScope.launch {
             try {
@@ -131,7 +160,19 @@ object SceneWatcher {
     fun restorePending(ctx: Context) {
         val pending = loadPersisted(ctx)
         for ((sceneId, p) in pending) {
-            watch(ctx, p.baseUrl, sceneId, p.captureId, p.name)
+            // ``persistOnStart=false`` — the entry we're
+            // re-attaching is exactly what's already on disk;
+            // re-writing it would just churn the prefs file
+            // (and, on this path, do main-thread I/O from
+            // ``App.onCreate``).
+            watchInternal(
+                ctx = ctx,
+                baseUrl = p.baseUrl,
+                sceneId = sceneId,
+                captureId = p.captureId,
+                captureName = p.name,
+                persistOnStart = false,
+            )
         }
     }
 
@@ -173,6 +214,18 @@ object SceneWatcher {
     /**
      * Opens one WS, returns the terminal state or null on
      * disconnect-without-terminal (caller retries).
+     *
+     * Classifies handshake failures: a 4xx response is treated
+     * as terminal (Canceled) so we stop the retry loop —
+     * common case is the server's WS endpoint returning 4404
+     * "scene not found" after the user / cleanup job deletes
+     * the scene. Without this classification ``onFailure``
+     * always returned null and ``runScene`` reconnected forever,
+     * keeping an app-scoped retry loop alive across process
+     * suspensions and racking up wakeups for a scene that will
+     * never resolve. 408 / 425 / 429 are retried — they're
+     * transient by definition. 5xx and pure network failures
+     * fall through to the retry path.
      */
     private suspend fun connectOnce(baseUrl: String, sceneId: String): Terminal? {
         val wsUrl = baseUrl
@@ -200,12 +253,33 @@ object SceneWatcher {
                     t: Throwable,
                     response: Response?,
                 ) {
+                    val code = response?.code
                     response?.close()
-                    if (cont.isActive) cont.resume(null)
+                    val terminal: Terminal? = if (code != null && isNonRetryable(code)) {
+                        // Stop watching; user will not get a
+                        // ready notification for this scene
+                        // (it doesn't exist or auth was
+                        // rejected). Canceled rather than Failed
+                        // because we don't want to fire the
+                        // "Processing failed" notification on a
+                        // 404 — the scene was already deleted,
+                        // the user knows.
+                        Terminal.Canceled
+                    } else {
+                        null
+                    }
+                    if (cont.isActive) cont.resume(terminal)
                 }
             })
             cont.invokeOnCancellation { ws.cancel() }
         }
+    }
+
+    private fun isNonRetryable(code: Int): Boolean {
+        // 4xx, minus the three retryable codes (request timeout,
+        // too early, too many requests).
+        if (code !in 400..499) return false
+        return code != 408 && code != 425 && code != 429
     }
 
     private fun parseTerminal(text: String): Terminal? {
@@ -325,7 +399,15 @@ object SceneWatcher {
             )
             val current = loadPersisted(ctx).toMutableMap()
             current[sceneId] = p
-            prefs.edit().putString(KEY_PENDING, encode(current)).apply()
+            // ``commit()`` rather than ``apply()`` — see watch()
+            // for why durability matters here. Cleared writes
+            // (clearPersisted) stay on apply(): a clear that
+            // doesn't make it to disk just means restorePending
+            // re-attaches a watcher that's already terminal,
+            // which is benign (the WS reconnects, reads the
+            // current snapshot status, fires the right
+            // notification, and clears itself again).
+            prefs.edit().putString(KEY_PENDING, encode(current)).commit()
         }
     }
 
