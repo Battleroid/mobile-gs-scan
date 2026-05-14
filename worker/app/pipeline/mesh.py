@@ -117,8 +117,11 @@ DEFAULT_PARAMS: dict = {
     # Voxel edge length as a *fraction of scene extent*. The
     # subprocess scales by the splat's robust extent so the same
     # value gives a sensible voxel grid across captures of wildly
-    # different physical scales. Clamped at extent/64 to keep
-    # marching cubes within memory.
+    # different physical scales. The default ~ 1/200 of extent
+    # ≈ 200 voxels per side, a sensible mid-density mesh. Smaller
+    # values (down to the API's (0, 0.1] range) give more detail at
+    # higher memory cost; the subprocess clamps absurdly small
+    # values (< 1/2048 of extent) only as a memory safety net.
     "voxel_size": 0.005,
     # SDF truncation distance, expressed as a multiple of the
     # (already extent-scaled) voxel size. 4 voxels of margin is

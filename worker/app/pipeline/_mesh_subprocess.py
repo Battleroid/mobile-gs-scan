@@ -156,15 +156,30 @@ def _run_tsdf(*, src_ply: Path, staging_dir: Path, params: dict) -> int:
     # Scale voxel size by the scene extent so the same default works
     # across captures of wildly different physical scales (a tree
     # stump and a building both produce reasonable voxel grids).
-    # Clamp the minimum at extent/64 to keep marching cubes within
-    # memory — the user's "voxel_size" knob is therefore a "detail
-    # level" rather than a literal mm value.
-    voxel = max(voxel_size_frac, 1.0 / 64.0) * extent
+    #
+    # We honor the user's ``voxel_size`` directly. The API validator
+    # already restricts the value to ``(0, 0.1]``; the default 0.005
+    # (i.e. 1/200 of extent) gives ~200 voxels per side which is a
+    # sensible mid-density mesh. The floor below is a permissive
+    # safety net — only fires for absurdly small fractions
+    # (< 1/2048 of extent, ~5000 voxels per side dense, far past
+    # what marching cubes can hold even with ScalableTSDFVolume's
+    # sparse hashing). When it does fire we log loudly so the
+    # operator notices the override rather than wondering why their
+    # detail knob was ignored.
+    safe_voxel_frac = voxel_size_frac
+    if safe_voxel_frac < 1.0 / 2048.0:
+        _log(
+            f"voxel_size={voxel_size_frac} too small; clamping to "
+            f"1/2048 of extent to avoid marching-cubes OOM"
+        )
+        safe_voxel_frac = 1.0 / 2048.0
+    voxel = safe_voxel_frac * extent
     sdf_trunc = sdf_trunc_mult * voxel
     depth_trunc = depth_trunc_mult * extent
     _log(
-        f"voxel_size={voxel:.5f} sdf_trunc={sdf_trunc:.5f} "
-        f"depth_trunc={depth_trunc:.4f}"
+        f"voxel_size={voxel:.5f} (frac={safe_voxel_frac}) "
+        f"sdf_trunc={sdf_trunc:.5f} depth_trunc={depth_trunc:.4f}"
     )
 
     tsdf = o3d.pipelines.integration.ScalableTSDFVolume(
