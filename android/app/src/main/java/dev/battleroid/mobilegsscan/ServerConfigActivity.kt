@@ -131,8 +131,25 @@ class ServerConfigActivity : ComponentActivity() {
                 }
                 return@launch
             }
-            state.update {
-                it.copy(
+            state.update { prev ->
+                // A previously saved key may no longer exist in the
+                // device's supported set (OS upgrade, ARCore version
+                // change, different filter outcome). Without this
+                // reset the chip row would show nothing selected
+                // *and* the freeform fps slider would still be
+                // hidden (the visibility gate is "key == CUSTOM"),
+                // leaving the user with no visible control. Normalize
+                // stale keys to Custom so the slider reappears.
+                val normalizedKey =
+                    if (prev.cameraConfigKey == ServerConfig.CAMERA_CONFIG_CUSTOM ||
+                        configs.any { it.key == prev.cameraConfigKey }
+                    ) {
+                        prev.cameraConfigKey
+                    } else {
+                        ServerConfig.CAMERA_CONFIG_CUSTOM
+                    }
+                prev.copy(
+                    cameraConfigKey = normalizedKey,
                     cameraConfigs = configs,
                     cameraProbeStatus = CameraProbeStatus.Ok,
                 )
