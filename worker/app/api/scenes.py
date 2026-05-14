@@ -143,9 +143,12 @@ def _mesh_tex_urls(scene: Scene) -> list[str] | None:
     Null when:
       * The scene has no completed mesh on disk (low-tier scenes
         produce a vertex-colored OBJ with no JPG sidecars).
-      * The latest mesh_params indicate the standard tier wasn't
-        the last run AND no texture files exist (defensive —
-        covers a future tier that doesn't emit sidecars).
+      * The latest run was a tier other than ``standard``. Older
+        low-tier extractions clean stale standard-tier sidecars on
+        replace (see ``_run_low_tier``), but the explicit tier gate
+        here is the belt-and-suspenders defence: if a future tier
+        accidentally leaves orphaned ``scene_tex*`` files behind,
+        we don't surface them to the web as if they were live.
 
     Globs both ``.jpg`` and ``.png`` since OpenMVS's TextureMesh
     can emit either depending on its build config. The artifact-
@@ -156,10 +159,19 @@ def _mesh_tex_urls(scene: Scene) -> list[str] | None:
     column because OpenMVS emits a variable number of texture
     pages (1 for small subjects, more for buildings); a persisted
     array would need migration each time we change the bundle
-    shape. The glob is cheap (<10 files per mesh) and runs only on
-    single-scene GETs / WS snapshots, not the home list path.
+    shape. The glob is cheap (<10 files per mesh on average) and
+    runs only on single-scene GETs / WS snapshots, not the home
+    list path.
     """
     if not scene.mesh_obj_path:
+        return None
+    # Only the standard tier produces a texture-page bundle. A
+    # low-tier vertex-colored OBJ from a scene that previously ran
+    # standard tier would otherwise still pick up the cleaned-up
+    # sidecars; this gate prevents the API from advertising
+    # textures the new low-tier OBJ doesn't reference.
+    tier = (scene.mesh_params or {}).get("tier")
+    if tier != "standard":
         return None
     mesh_dir = _scene_mesh_dir(scene)
     if not mesh_dir.exists():
@@ -266,8 +278,14 @@ async def get_scene(scene_id: str) -> SceneView:
 # impossible and only canonical bundle pieces leak — the orchestrator's
 # intermediates (``mesh.log``, ``.staging-*/``, ``colmap/``) stay
 # scene-private.
+#
+# Texture-page index ``\d+`` not ``\d{1,2}`` — OpenMVS atlases a
+# very large scene into 100+ pages and the OBJ's ``mtllib`` /
+# MTL's ``map_Kd`` references span the full range. Capping at 2
+# digits would 400 those higher-index fetches and break textured
+# rendering for big captures.
 _MESH_ASSET_RE = re.compile(
-    r"^scene(\.obj|\.mtl|\.glb|_tex\d{1,2}\.(jpg|png))$"
+    r"^scene(\.obj|\.mtl|\.glb|_tex\d+\.(jpg|png))$"
 )
 
 

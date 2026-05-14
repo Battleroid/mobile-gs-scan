@@ -342,6 +342,11 @@ def test_colmap_writer_axis_round_trip(tmp_path: Path):
     "scene_tex9.jpg",
     "scene_tex10.jpg",
     "scene_tex0.png",
+    # OpenMVS atlases large captures into many pages — the
+    # allowlist must not cap the index width, otherwise references
+    # to higher-index pages 400 and textured rendering breaks.
+    "scene_tex100.jpg",
+    "scene_tex999.png",
 ])
 def test_mesh_asset_regex_accepts_canonical_names(good):
     assert _MESH_ASSET_RE.match(good)
@@ -354,7 +359,6 @@ def test_mesh_asset_regex_accepts_canonical_names(good):
     "scene_tex.jpg",       # no number
     "scene_texabc.jpg",    # non-numeric
     "scenex.obj",          # not exactly "scene"
-    "scene_tex999.jpg",    # too many digits (allowlist caps at 2)
     "scene.obj/..",        # traversal
     "scene.OBJ",           # case mismatch (be strict)
     "",

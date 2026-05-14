@@ -326,6 +326,27 @@ async def _run_low_tier(
                 glb_dst.unlink()
             except OSError:
                 pass
+        # Standard-tier sidecars (scene.mtl + scene_tex*.{jpg,png})
+        # from a prior extraction would otherwise sit next to the
+        # new low-tier vertex-colored OBJ. The MTLLoader pre-pass on
+        # the web client probes ``scene.mtl`` first and applies it
+        # whenever the fetch returns 200 — leaving stale textures
+        # would paint the new geometry with the old run's atlas.
+        # Clean them defensively; the low-tier output has no MTL
+        # reference of its own, so dropping these is always safe.
+        stale_mtl = mesh_dir / "scene.mtl"
+        if stale_mtl.exists():
+            try:
+                stale_mtl.unlink()
+            except OSError:
+                pass
+        for stale_tex in list(mesh_dir.glob("scene_tex*.jpg")) + list(
+            mesh_dir.glob("scene_tex*.png")
+        ):
+            try:
+                stale_tex.unlink()
+            except OSError:
+                pass
     finally:
         shutil.rmtree(staging_dir, ignore_errors=True)
 
