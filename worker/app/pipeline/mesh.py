@@ -699,12 +699,28 @@ async def _stream_progress(
 
     Throttles callback invocations to ~1% increments so a chatty
     subprocess can't flood the WS layer.
+
+    Mirrors every line verbatim to the worker's own stdout so a
+    plain ``docker logs worker-gs`` (or journalctl on a bare-metal
+    worker) shows live mesh activity — without this, OpenMVS's
+    "DensifyPointCloud: image 23 of 187" / 2DGS's per-iter loss
+    output is invisible from outside the container until the run
+    completes and someone tails ``mesh.log``. The PROGRESS lines
+    ride along through the tee too; operators can ``grep -v``
+    them out if they're noisy.
     """
     last_pct = -1.0
     with log_path.open("wb") as logf:
         assert proc.stdout is not None
         async for raw in proc.stdout:
             logf.write(raw)
+            try:
+                sys.stdout.buffer.write(raw)
+                sys.stdout.buffer.flush()
+            except (BlockingIOError, BrokenPipeError):
+                # Worker container is shutting down or stdout pipe
+                # is full; don't take the mesh job down with us.
+                pass
             line = raw.decode("utf-8", errors="replace").strip()
             if not line.startswith("PROGRESS "):
                 continue

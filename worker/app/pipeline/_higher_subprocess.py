@@ -329,6 +329,16 @@ def _train_2dgs(*, prepared, frames, intrinsics, n_iters: int):
         render_rgb = ret[0]
         if render_rgb.ndim == 4:
             render_rgb = render_rgb[0]
+        # ``render_mode="RGB+ED"`` packs the per-pixel expected
+        # depth as a 4th channel of ``render_colors``, so the
+        # tensor that comes back is (H, W, 4) — RGB in [..., :3]
+        # and ED in [..., 3:4]. Slicing off the depth channel
+        # before the RGB L1 loss prevents the "tensor a (4) must
+        # match tensor b (3)" crash we hit on a real higher-tier
+        # run (the ED is also exposed separately via ret[5] for
+        # the dome / TSDF integration downstream).
+        if render_rgb.shape[-1] == 4:
+            render_rgb = render_rgb[..., :3]
         normals = ret[2]
         normals_depth = ret[3]
         distort = ret[4]
@@ -468,6 +478,14 @@ def _dome_render_and_tsdf(*, prepared, centroid, extent, params):
         rgb_t = ret[0]
         if rgb_t.ndim == 4:
             rgb_t = rgb_t[0]
+        # See the retrain-loop comment: ``render_mode="RGB+ED"``
+        # gives a 4-channel render_colors output with depth in the
+        # last channel. Strip to RGB-only for the TSDF
+        # ``Image(rgb)`` packaging (the integration's depth comes
+        # from ``render_median`` at ret[5] below, not from this
+        # tensor).
+        if rgb_t.shape[-1] == 4:
+            rgb_t = rgb_t[..., :3]
         depth_t = None
         if len(ret) >= 6 and torch.is_tensor(ret[5]):
             cand = ret[5]
