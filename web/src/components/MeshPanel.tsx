@@ -6,14 +6,16 @@
 // filter pattern). The mesh is VIEWED in the main SplatViewer via
 // the "mesh" view-mode — this panel only owns the controls.
 //
-// Tiered: the user picks a fidelity tier (low / standard / higher);
-// only the **low** tier is implemented today (TSDF fusion of
-// gsplat-rendered RGB+depth views from the trained splatfacto
-// checkpoint, output = vertex-colored OBJ + GLB). Standard
-// (OpenMVS textured) and higher (2DGS / SuGaR retrain) are
-// scaffolded but show a "coming soon" treatment until their
-// backends land. Picking either disabled tier is impossible at
-// the UI level and rejected at the API level too.
+// Tiered: the user picks a fidelity tier (low / standard / higher).
+// **Low** is TSDF fusion of gsplat-rendered RGB+depth views from
+// the trained splatfacto checkpoint — output is a vertex-colored
+// OBJ + GLB, fast.
+// **Standard** is the OpenMVS classical photogrammetry pipeline
+// (InterfaceCOLMAP → DensifyPointCloud → ReconstructMesh →
+// RefineMesh → TextureMesh) — output is a UV-mapped textured OBJ
+// + MTL + JPG bundle, slower but visually crisp.
+// **Higher** (2DGS / SuGaR retrain) is still scaffolded for a
+// future PR and renders as a "coming soon" chip.
 //
 // Independent of the edit pipeline: you can mesh + filter in
 // either order, and discarding the edit doesn't touch the mesh.
@@ -24,11 +26,19 @@ import { BigButton, Eyebrow } from "@/components/pebble";
 
 type MeshTier = "low" | "standard" | "higher";
 
+type MvsTextureSize = 1024 | 2048 | 4096 | 8192;
+const MVS_TEXTURE_SIZES: MvsTextureSize[] = [1024, 2048, 4096, 8192];
+
 interface ParamsState {
   tier: MeshTier;
+  // Low-tier (TSDF) knobs.
   n_views: number;
   remove_outliers: boolean;
   use_bounding_box: boolean;
+  // Standard-tier (OpenMVS) knobs.
+  mvs_dense_views: number;
+  mvs_texture_size: MvsTextureSize;
+  mvs_refine_iters: number;
 }
 
 const DEFAULT_PARAMS: ParamsState = {
@@ -36,6 +46,9 @@ const DEFAULT_PARAMS: ParamsState = {
   n_views: 96,
   remove_outliers: true,
   use_bounding_box: false,
+  mvs_dense_views: 3,
+  mvs_texture_size: 4096,
+  mvs_refine_iters: 2,
 };
 
 // Tier labels keyed to the API enum. ``active=false`` flips the
@@ -50,7 +63,7 @@ const TIER_INFO: Record<MeshTier, { label: string; sub: string; active: boolean 
   standard: {
     label: "Standard",
     sub: "textured · UV mapped",
-    active: false,
+    active: true,
   },
   higher: {
     label: "Higher",
@@ -67,6 +80,11 @@ function paramsFromScene(scene: Scene): ParamsState {
   const tier: MeshTier = rawTier === "standard" || rawTier === "higher" || rawTier === "low"
     ? (rawTier as MeshTier)
     : DEFAULT_PARAMS.tier;
+  const rawTexSize = p.mvs_texture_size;
+  const mvs_texture_size: MvsTextureSize =
+    rawTexSize === 1024 || rawTexSize === 2048 || rawTexSize === 4096 || rawTexSize === 8192
+      ? rawTexSize
+      : DEFAULT_PARAMS.mvs_texture_size;
   return {
     tier: TIER_INFO[tier].active ? tier : DEFAULT_PARAMS.tier,
     n_views: typeof p.n_views === "number" && p.n_views >= 24
@@ -74,6 +92,13 @@ function paramsFromScene(scene: Scene): ParamsState {
       : DEFAULT_PARAMS.n_views,
     remove_outliers: p.remove_outliers ?? DEFAULT_PARAMS.remove_outliers,
     use_bounding_box: p.use_bounding_box ?? DEFAULT_PARAMS.use_bounding_box,
+    mvs_dense_views: typeof p.mvs_dense_views === "number" && p.mvs_dense_views >= 2 && p.mvs_dense_views <= 7
+      ? p.mvs_dense_views
+      : DEFAULT_PARAMS.mvs_dense_views,
+    mvs_texture_size,
+    mvs_refine_iters: typeof p.mvs_refine_iters === "number" && p.mvs_refine_iters >= 0 && p.mvs_refine_iters <= 4
+      ? p.mvs_refine_iters
+      : DEFAULT_PARAMS.mvs_refine_iters,
   };
 }
 
@@ -250,60 +275,141 @@ export function MeshPanel({ scene, meshProgress }: Props) {
         </p>
       )}
 
+      {/* Tier-specific knob sets. The fieldset stays mounted so its
+          ``disabled`` prop reliably gates inputs while a job is in
+          flight; we just swap which controls render. */}
       <fieldset
         className="grid grid-cols-1 gap-3 sm:grid-cols-3"
         disabled={isRunning || submitting}
       >
-        <label
-          className="flex flex-col gap-1"
-          title="How many camera viewpoints are rendered from the trained splat and fused into the TSDF volume. More views = more complete surface coverage + cleaner color, longer extraction time. 96 is dense enough for most subjects."
-        >
-          <Eyebrow className="!text-[10px] !tracking-[0.08em]">
-            viewpoint density · low only
-          </Eyebrow>
-          <input
-            type="number"
-            value={params.n_views}
-            min={24}
-            max={360}
-            step={12}
-            onChange={(e) => {
-              const n = parseInt(e.target.value, 10);
-              if (Number.isFinite(n) && n >= 24 && n <= 360) {
-                setParams((s) => ({ ...s, n_views: n }));
-              }
-            }}
-            className="rounded-sm border border-rule bg-bg px-3 py-2 font-mono text-sm text-fg focus:border-accent focus:outline-none disabled:opacity-60"
-          />
-        </label>
-        <label
-          className="flex cursor-pointer items-center gap-2 self-end pb-2 text-sm"
-          title="Drop small disconnected triangle clusters (< 1% of the largest cluster's size) after marching cubes. Cleans floaters from silhouette-edge depth noise. DOES NOT close holes — partial-surface output is intentional. Turn off if a legitimate isolated island of geometry gets dropped."
-        >
-          <input
-            type="checkbox"
-            checked={params.remove_outliers}
-            onChange={(e) =>
-              setParams((s) => ({ ...s, remove_outliers: e.target.checked }))
-            }
-            className="accent-accent"
-          />
-          remove floaters
-        </label>
-        <label
-          className="flex cursor-pointer items-center gap-2 self-end pb-2 text-sm"
-          title="Crop the extracted mesh to the splat's robust 1st/99th percentile bounding box. Helpful when stray gaussians dragged the mesh into empty space; leave off to keep the full extent."
-        >
-          <input
-            type="checkbox"
-            checked={params.use_bounding_box}
-            onChange={(e) =>
-              setParams((s) => ({ ...s, use_bounding_box: e.target.checked }))
-            }
-            className="accent-accent"
-          />
-          crop to bounding box
-        </label>
+        {params.tier === "low" ? (
+          <>
+            <label
+              className="flex flex-col gap-1"
+              title="How many camera viewpoints are rendered from the trained splat and fused into the TSDF volume. More views = more complete surface coverage + cleaner color, longer extraction time. 96 is dense enough for most subjects."
+            >
+              <Eyebrow className="!text-[10px] !tracking-[0.08em]">
+                viewpoint density
+              </Eyebrow>
+              <input
+                type="number"
+                value={params.n_views}
+                min={24}
+                max={360}
+                step={12}
+                onChange={(e) => {
+                  const n = parseInt(e.target.value, 10);
+                  if (Number.isFinite(n) && n >= 24 && n <= 360) {
+                    setParams((s) => ({ ...s, n_views: n }));
+                  }
+                }}
+                className="rounded-sm border border-rule bg-bg px-3 py-2 font-mono text-sm text-fg focus:border-accent focus:outline-none disabled:opacity-60"
+              />
+            </label>
+            <label
+              className="flex cursor-pointer items-center gap-2 self-end pb-2 text-sm"
+              title="Drop small disconnected triangle clusters (< 1% of the largest cluster's size) after marching cubes. Cleans floaters from silhouette-edge depth noise. DOES NOT close holes — partial-surface output is intentional. Turn off if a legitimate isolated island of geometry gets dropped."
+            >
+              <input
+                type="checkbox"
+                checked={params.remove_outliers}
+                onChange={(e) =>
+                  setParams((s) => ({ ...s, remove_outliers: e.target.checked }))
+                }
+                className="accent-accent"
+              />
+              remove floaters
+            </label>
+            <label
+              className="flex cursor-pointer items-center gap-2 self-end pb-2 text-sm"
+              title="Crop the extracted mesh to the splat's robust 1st/99th percentile bounding box. Helpful when stray gaussians dragged the mesh into empty space; leave off to keep the full extent."
+            >
+              <input
+                type="checkbox"
+                checked={params.use_bounding_box}
+                onChange={(e) =>
+                  setParams((s) => ({ ...s, use_bounding_box: e.target.checked }))
+                }
+                className="accent-accent"
+              />
+              crop to bounding box
+            </label>
+          </>
+        ) : (
+          // Standard-tier (OpenMVS) knob set. Same three-column
+          // grid as low tier so the panel doesn't reflow on tier
+          // switch; the controls are independent of each other.
+          <>
+            <label
+              className="flex flex-col gap-1"
+              title="Number of views fused at each densification step. Higher = cleaner dense cloud but more expensive. OpenMVS recommends 3–5 for typical photogrammetry workloads."
+            >
+              <Eyebrow className="!text-[10px] !tracking-[0.08em]">
+                dense views (fuse)
+              </Eyebrow>
+              <input
+                type="number"
+                value={params.mvs_dense_views}
+                min={2}
+                max={7}
+                step={1}
+                onChange={(e) => {
+                  const n = parseInt(e.target.value, 10);
+                  if (Number.isFinite(n) && n >= 2 && n <= 7) {
+                    setParams((s) => ({ ...s, mvs_dense_views: n }));
+                  }
+                }}
+                className="rounded-sm border border-rule bg-bg px-3 py-2 font-mono text-sm text-fg focus:border-accent focus:outline-none disabled:opacity-60"
+              />
+            </label>
+            <label
+              className="flex flex-col gap-1"
+              title="Texture atlas page size in pixels. Power of 2. 4096 hits a reasonable sharpness / download balance for phone-resolution captures; 8192 starts giving diminishing returns above 4K input."
+            >
+              <Eyebrow className="!text-[10px] !tracking-[0.08em]">
+                texture page size
+              </Eyebrow>
+              <select
+                value={params.mvs_texture_size}
+                onChange={(e) => {
+                  const v = parseInt(e.target.value, 10) as MvsTextureSize;
+                  if (MVS_TEXTURE_SIZES.includes(v)) {
+                    setParams((s) => ({ ...s, mvs_texture_size: v }));
+                  }
+                }}
+                className="rounded-sm border border-rule bg-bg px-3 py-2 font-mono text-sm text-fg focus:border-accent focus:outline-none disabled:opacity-60"
+              >
+                {MVS_TEXTURE_SIZES.map((sz) => (
+                  <option key={sz} value={sz}>
+                    {sz}px
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label
+              className="flex flex-col gap-1"
+              title="RefineMesh iterations. 0 skips refine entirely (use for RAM-constrained hosts; mesh remains usable, just less detailed). Higher values polish surface detail at the cost of wall time and memory."
+            >
+              <Eyebrow className="!text-[10px] !tracking-[0.08em]">
+                refine iters (0 skips)
+              </Eyebrow>
+              <input
+                type="number"
+                value={params.mvs_refine_iters}
+                min={0}
+                max={4}
+                step={1}
+                onChange={(e) => {
+                  const n = parseInt(e.target.value, 10);
+                  if (Number.isFinite(n) && n >= 0 && n <= 4) {
+                    setParams((s) => ({ ...s, mvs_refine_iters: n }));
+                  }
+                }}
+                className="rounded-sm border border-rule bg-bg px-3 py-2 font-mono text-sm text-fg focus:border-accent focus:outline-none disabled:opacity-60"
+              />
+            </label>
+          </>
+        )}
       </fieldset>
 
       <div className="flex flex-wrap items-center gap-3">
@@ -331,6 +437,61 @@ export function MeshPanel({ scene, meshProgress }: Props) {
           <span className="font-mono text-[11px] text-danger">{error}</span>
         )}
       </div>
+
+      {/* Standard-tier downloads. The OBJ + MTL + per-page JPGs
+          have to travel together for a Blender / Cinema-4D import
+          to find the textures; surface them as individual links
+          so the user can grab the whole set. Low-tier (vertex-
+          colored OBJ alone) doesn't render this block — its
+          single download is the implicit "switch viewer to mesh"
+          path. */}
+      {hasMesh && scene.mesh_tex_urls && scene.mesh_tex_urls.length > 0 && (
+        <div className="space-y-2 border-t border-rule pt-3">
+          <Eyebrow className="!text-[10px] !tracking-[0.08em]">
+            textured bundle downloads
+          </Eyebrow>
+          <div className="flex flex-wrap gap-2 text-[11px]">
+            {scene.mesh_obj_url && (
+              <a
+                href={scene.mesh_obj_url}
+                download="scene.obj"
+                className="rounded-sm border border-rule px-2 py-1 font-mono text-fg hover:border-accent"
+              >
+                scene.obj
+              </a>
+            )}
+            <a
+              href={scene.mesh_obj_url?.replace(/scene\.obj$/, "scene.mtl")}
+              download="scene.mtl"
+              className="rounded-sm border border-rule px-2 py-1 font-mono text-fg hover:border-accent"
+            >
+              scene.mtl
+            </a>
+            {scene.mesh_tex_urls.map((u, i) => {
+              const name = u.split("/").pop() ?? `scene_tex${i}.jpg`;
+              return (
+                <a
+                  key={u}
+                  href={u}
+                  download={name}
+                  className="rounded-sm border border-rule px-2 py-1 font-mono text-fg hover:border-accent"
+                >
+                  {name}
+                </a>
+              );
+            })}
+            {scene.mesh_glb_url && (
+              <a
+                href={scene.mesh_glb_url}
+                download="scene.glb"
+                className="rounded-sm border border-rule px-2 py-1 font-mono text-fg hover:border-accent"
+              >
+                scene.glb
+              </a>
+            )}
+          </div>
+        </div>
+      )}
     </section>
   );
 }

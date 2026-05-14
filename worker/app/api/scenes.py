@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,14 @@ class SceneView(BaseModel):
     edit_recipe: dict | None
     mesh_obj_url: str | None
     mesh_glb_url: str | None
+    # Sibling texture URLs for the standard-tier (OpenMVS) bundle.
+    # ``mesh_obj_url`` references the textures by relative URL via
+    # the MTL's ``map_Kd`` directive; the SceneView exposes the
+    # absolute URLs separately so the web UI can offer per-file
+    # download links and so a future native consumer can fetch the
+    # bundle eagerly. Null on low-tier meshes (vertex-colored OBJ
+    # alone, no MTL / JPGs) and on scenes without a mesh yet.
+    mesh_tex_urls: list[str] | None
     mesh_status: str
     mesh_error: str | None
     mesh_params: dict | None
@@ -103,6 +112,62 @@ def _collapse_thumb_orbit_history(jobs: list) -> list:
     return out
 
 
+def _scene_mesh_dir(scene: Scene) -> Path:
+    """Resolve the on-disk mesh dir for a scene. Used by the URL
+    builders below to enumerate texture-atlas pages without reading
+    a stored path column (the standard tier's texture URLs are
+    derived at serialization time, not persisted)."""
+    settings = get_settings()
+    return settings.scenes_dir() / scene.id / "mesh"
+
+
+def _mesh_obj_url(scene: Scene) -> str | None:
+    if not scene.mesh_obj_path:
+        return None
+    # Always serve via the bundle route. Low-tier OBJs work fine
+    # via this route too (single-file lookup; the MTL allowlist
+    # entry just 404s when the low-tier didn't write one).
+    return f"/api/scenes/{scene.id}/artifacts/mesh_assets/scene.obj"
+
+
+def _mesh_glb_url(scene: Scene) -> str | None:
+    if not scene.mesh_glb_path:
+        return None
+    return f"/api/scenes/{scene.id}/artifacts/mesh_assets/scene.glb"
+
+
+def _mesh_tex_urls(scene: Scene) -> list[str] | None:
+    """Enumerate ``scene_tex<N>.jpg`` siblings under the scene's
+    mesh dir, returning their canonical bundle URLs.
+
+    Null when:
+      * The scene has no completed mesh on disk (low-tier scenes
+        produce a vertex-colored OBJ with no JPG sidecars).
+      * The latest mesh_params indicate the standard tier wasn't
+        the last run AND no JPGs exist (defensive — covers a
+        future tier that doesn't emit sidecars).
+
+    We glob the dir rather than reading a stored ``mesh_tex_path``
+    column because OpenMVS emits a variable number of texture
+    pages (1 for small subjects, more for buildings); a persisted
+    array would need migration each time we change the bundle
+    shape. The glob is cheap (<10 files per mesh) and runs only on
+    single-scene GETs / WS snapshots, not the home list path.
+    """
+    if not scene.mesh_obj_path:
+        return None
+    mesh_dir = _scene_mesh_dir(scene)
+    if not mesh_dir.exists():
+        return None
+    tex_files = sorted(mesh_dir.glob("scene_tex*.jpg"))
+    if not tex_files:
+        return None
+    return [
+        f"/api/scenes/{scene.id}/artifacts/mesh_assets/{f.name}"
+        for f in tex_files
+    ]
+
+
 async def _to_view(scene: Scene) -> SceneView:
     jobs = await store.list_jobs_for_scene(scene.id)
     jobs = _collapse_thumb_orbit_history(jobs)
@@ -136,16 +201,19 @@ async def _to_view(scene: Scene) -> SceneView:
         edit_status=edit_status,
         edit_error=scene.edit_error,
         edit_recipe=scene.edit_recipe,
-        mesh_obj_url=(
-            f"/api/scenes/{scene.id}/artifacts/obj"
-            if scene.mesh_obj_path
-            else None
-        ),
-        mesh_glb_url=(
-            f"/api/scenes/{scene.id}/artifacts/glb"
-            if scene.mesh_glb_path
-            else None
-        ),
+        # The OBJ URL flips between the legacy ``/artifacts/obj``
+        # (single-file FileResponse) and the new
+        # ``/artifacts/mesh_assets/scene.obj`` (multi-file bundle
+        # route) based on whether the latest mesh is standard-tier.
+        # Standard-tier OBJs declare ``mtllib scene.mtl`` which the
+        # browser resolves relative to the OBJ's URL — only the
+        # bundle path puts MTL + JPGs at sibling URLs. Low-tier
+        # vertex-colored OBJs have no MTL so either path works,
+        # but we use the bundle path uniformly to simplify the web
+        # client's URL handling.
+        mesh_obj_url=_mesh_obj_url(scene),
+        mesh_glb_url=_mesh_glb_url(scene),
+        mesh_tex_urls=_mesh_tex_urls(scene),
         mesh_status=mesh_status,
         mesh_error=scene.mesh_error,
         mesh_params=scene.mesh_params,
@@ -181,6 +249,58 @@ async def get_scene(scene_id: str) -> SceneView:
     if scene is None:
         raise HTTPException(404, "scene not found")
     return await _to_view(scene)
+
+
+# Bundle file-name allowlist for the standard-tier mesh route below.
+# OpenMVS emits ``scene.obj`` + ``scene.mtl`` + one or more
+# ``scene_tex<N>.jpg`` texture atlas pages. The trimesh GLB pack adds
+# ``scene.glb``. Restrict to that exact set so directory traversal is
+# impossible and only canonical bundle pieces leak — the orchestrator's
+# intermediates (``mesh.log``, ``.staging-*/``, ``colmap/``) stay
+# scene-private.
+_MESH_ASSET_RE = re.compile(
+    r"^scene(\.obj|\.mtl|\.glb|_tex\d{1,2}\.(jpg|png))$"
+)
+
+
+@router.get("/{scene_id}/artifacts/mesh_assets/{filename}")
+async def download_mesh_asset(scene_id: str, filename: str) -> Any:
+    """Serve a file from the canonical ``scene_dir/mesh/`` bundle.
+
+    The standard-tier (OpenMVS) mesh is a multi-file bundle (OBJ +
+    MTL + N texture JPGs). Browsers resolve the MTL's ``map_Kd``
+    references and the OBJ's ``mtllib`` directive relative to the
+    request URL, so as long as every bundle file is served from the
+    same path prefix the loader stitches them back together.
+
+    Allowlist regex below blocks anything other than the canonical
+    bundle filenames (``mesh.log``, ``.staging-*`` etc never leak).
+    """
+    scene = await store.get_scene(scene_id)
+    if scene is None:
+        raise HTTPException(404, "scene not found")
+    if not _MESH_ASSET_RE.match(filename):
+        raise HTTPException(400, f"unknown mesh asset {filename!r}")
+    settings = get_settings()
+    asset = settings.scenes_dir() / scene.id / "mesh" / filename
+    if not asset.exists():
+        raise HTTPException(404, f"mesh asset {filename!r} not yet produced")
+    # Media type is mostly cosmetic — three.js loaders content-sniff
+    # by URL suffix. Set a sensible one anyway so curl + browser
+    # extension show the right preview.
+    if filename.endswith(".obj"):
+        media_type = "model/obj"
+    elif filename.endswith(".mtl"):
+        media_type = "text/plain"
+    elif filename.endswith(".glb"):
+        media_type = "model/gltf-binary"
+    elif filename.endswith(".jpg"):
+        media_type = "image/jpeg"
+    elif filename.endswith(".png"):
+        media_type = "image/png"
+    else:
+        media_type = "application/octet-stream"
+    return FileResponse(asset, media_type=media_type, filename=filename)
 
 
 @router.get("/{scene_id}/artifacts/{kind}")
@@ -416,7 +536,12 @@ _ALLOWED_MESH_TIERS = {"low", "standard", "higher"}
 # Tiers we'll actually accept at the trigger endpoint today.
 # Anything else returns 422 with a clear message rather than
 # silently downgrading.
-_ACTIVE_MESH_TIERS = {"low"}
+_ACTIVE_MESH_TIERS = {"low", "standard"}
+# OpenMVS's TextureMesh accepts the texture-atlas page size as a
+# power of 2. Constraining the API set to these four values keeps
+# the UI's chip-row tractable and avoids feeding a non-power-of-2
+# down to a binary that may round it silently.
+_ALLOWED_MVS_TEXTURE_SIZES = {1024, 2048, 4096, 8192}
 
 
 def _validate_mesh_params(raw: dict | None) -> dict:
@@ -557,6 +682,35 @@ def _validate_mesh_params(raw: dict | None) -> dict:
         if v < 1 or v > 50:
             raise HTTPException(422, "depth_trunc must be in [1, 50]")
         out["depth_trunc"] = float(v)
+    # ─── standard-tier (OpenMVS) knobs ──────────────────────────
+    if "mvs_dense_views" in raw:
+        v = raw["mvs_dense_views"]
+        if isinstance(v, bool) or not isinstance(v, int) or v < 2 or v > 7:
+            raise HTTPException(
+                422, "mvs_dense_views must be an integer in [2, 7]",
+            )
+        out["mvs_dense_views"] = v
+    if "mvs_texture_size" in raw:
+        v = raw["mvs_texture_size"]
+        # Restrict to powers-of-2 OpenMVS actually accepts; allow
+        # int input but not bool.
+        if isinstance(v, bool) or not isinstance(v, int):
+            raise HTTPException(422, "mvs_texture_size must be an integer")
+        if v not in _ALLOWED_MVS_TEXTURE_SIZES:
+            raise HTTPException(
+                422,
+                f"mvs_texture_size must be one of "
+                f"{sorted(_ALLOWED_MVS_TEXTURE_SIZES)}",
+            )
+        out["mvs_texture_size"] = v
+    if "mvs_refine_iters" in raw:
+        v = raw["mvs_refine_iters"]
+        # 0 is the documented opt-out (skip RefineMesh entirely).
+        if isinstance(v, bool) or not isinstance(v, int) or v < 0 or v > 4:
+            raise HTTPException(
+                422, "mvs_refine_iters must be an integer in [0, 4]",
+            )
+        out["mvs_refine_iters"] = v
     return out
 
 

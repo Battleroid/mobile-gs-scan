@@ -143,6 +143,23 @@ DEFAULT_PARAMS: dict = {
     # AABB. Off by default; flip on for scenes where a few far-out
     # gaussians dragged the mesh into empty space.
     "use_bounding_box": False,
+    # ─── standard-tier (OpenMVS) knobs ─────────────────────────
+    # Number of views fused at each densification step. Higher =
+    # cleaner dense cloud but more expensive. OpenMVS recommends
+    # 3–5 for typical photogrammetry workloads.
+    "mvs_dense_views": 3,
+    # Square texture-atlas page size in pixels. Power of 2; OpenMVS
+    # picks the smallest power of 2 ≥ this value internally.
+    # 4096 hits a reasonable sharpness / download-size balance for
+    # phone-resolution captures; 8192 starts giving diminishing
+    # returns above 4K input.
+    "mvs_texture_size": 4096,
+    # Number of RefineMesh iterations. 0 skips the photo-consistency
+    # refinement pass entirely (the documented opt-out for RAM-
+    # constrained hosts; the mesh remains usable, just less
+    # detailed). 2 is the documented default — comfortable for the
+    # 1080p / 4K capture ceiling this pipeline targets.
+    "mvs_refine_iters": 2,
     # ─── legacy keys, accepted-but-ignored ──────────────────────
     # These were the Poisson-tier knobs. Persisted on scenes
     # extracted before the TSDF switch; we accept them so older
@@ -197,15 +214,24 @@ async def run_mesh(
             progress=progress,
             job_id=job_id,
         )
-    if tier in ("standard", "higher"):
-        # Surfaced as a RuntimeError below — the runner catches
-        # any exception out of run_mesh and writes ``mesh_error``.
-        # The API also rejects these tiers at validation time so
-        # this branch only fires for jobs already in flight when a
-        # tier was just added.
+    if tier == "standard":
+        return await _run_mvs(
+            scene_dir=scene_dir,
+            mesh_dir=mesh_dir,
+            params=merged,
+            progress=progress,
+            job_id=job_id,
+        )
+    if tier == "higher":
+        # Surfaced as a RuntimeError-shaped exception below — the
+        # runner catches any exception out of run_mesh and writes
+        # ``mesh_error``. The API also rejects this tier at
+        # validation time so this branch only fires for jobs
+        # already in flight when a future tier is added.
         raise NotImplementedError(
             f"mesh tier '{tier}' is not yet implemented; "
-            f"only 'low' (TSDF fusion) is available today."
+            f"active tiers: 'low' (TSDF fusion), 'standard' "
+            f"(OpenMVS textured)."
         )
     raise ValueError(f"unknown mesh tier '{tier}'")
 
@@ -306,6 +332,146 @@ async def _run_low_tier(
     result: dict[str, str | int] = {"obj": str(obj_dst)}
     if has_glb:
         result["glb"] = str(glb_dst)
+    await progress(1.0, "mesh: done")
+    return result
+
+
+async def _run_mvs(
+    *,
+    scene_dir: Path,
+    mesh_dir: Path,
+    params: dict,
+    progress: ProgressCb,
+    job_id: str | None,
+) -> dict:
+    """Dispatch the OpenMVS textured-mesh orchestrator. The parent
+    owns staging + atomic-swap hygiene and the subprocess SIGKILL
+    contract via the process-group cancel path; the child shells
+    out to the OpenMVS binaries in sequence.
+
+    Differences from ``_run_low_tier``:
+      * The subprocess takes ``--transforms-json`` + ``--images-src-dir``
+        instead of ``--src-ply``. OpenMVS works from the SfM step's
+        outputs directly, not the trained splat.
+      * The subprocess is spawned with ``start_new_session=True`` so
+        ``proc.pid`` is also its process-group id. ``_running.register``
+        is told to use ``pgid=True`` so ``os.killpg`` reaches every
+        OpenMVS grandchild on cancel (without this a user cancel
+        leaves a multi-GB ``DensifyPointCloud`` running for minutes).
+      * The bundle output is N files (OBJ + MTL + 1+ JPGs + optional
+        GLB), not 2; the swap is per-file with explicit cleanup of
+        stale ``scene*`` siblings under ``mesh_dir`` before move.
+        Brief multi-file inconsistency window during the swap is
+        acceptable — the WS-driven UI doesn't request artifacts
+        mid-swap, and any HTTP request that lands in the gap gets a
+        clean 404 from the new mesh_assets route.
+    """
+    # Sibling staging so the subprocess can freely create whatever
+    # intermediate workspace files it wants (colmap/, scene.mvs,
+    # scene_dense.mvs, ...) without polluting mesh_dir. The
+    # subprocess GCs its intermediates before exiting; only the
+    # canonical bundle (obj/mtl/jpg/glb) lands here.
+    staging_dir = scene_dir / f".mesh-staging-{job_id or 'anon'}"
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir, ignore_errors=True)
+    staging_dir.mkdir(parents=True)
+
+    mesh_dir.mkdir(parents=True, exist_ok=True)
+    log_path = mesh_dir / "mesh.log"
+    log_path.write_text("")
+
+    transforms_path = scene_dir / "sfm" / "transforms.json"
+    images_src_dir = scene_dir / "sfm" / "images"
+    if not transforms_path.exists():
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise RuntimeError(
+            f"standard-tier mesh requires {transforms_path}; "
+            f"SfM step has not run or produced no transforms.json"
+        )
+
+    cmd = [
+        sys.executable, "-m", "app.pipeline._mvs_subprocess",
+        "--transforms-json", str(transforms_path),
+        "--images-src-dir", str(images_src_dir),
+        "--staging-dir", str(staging_dir),
+        "--params", json.dumps(params),
+    ]
+
+    await progress(0.0, "spawn openmvs worker")
+
+    # ``start_new_session=True`` makes proc.pid the leader of a new
+    # process group; the OpenMVS binaries the orchestrator spawns
+    # inherit that pgid, so a single ``os.killpg`` from the
+    # heartbeat reaches every grandchild on cancel.
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        start_new_session=True,
+    )
+    if job_id is not None:
+        _running.register(job_id, proc, pgid=True)
+
+    try:
+        rc = await _stream_progress(proc, log_path, progress)
+    finally:
+        if job_id is not None:
+            _running.unregister(job_id)
+
+    if rc != 0:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        tail = tail_file(log_path)
+        raise RuntimeError(
+            format_subprocess_error("openmvs", rc, log_path, tail)
+        )
+
+    staged_obj = staging_dir / "scene.obj"
+    staged_mtl = staging_dir / "scene.mtl"
+    staged_jpgs = sorted(staging_dir.glob("scene_tex*.jpg"))
+    staged_glb = staging_dir / "scene.glb"
+    if not staged_obj.exists() or not staged_mtl.exists() or not staged_jpgs:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise RuntimeError(
+            "openmvs exited 0 but the bundle is incomplete: "
+            f"obj={staged_obj.exists()} mtl={staged_mtl.exists()} "
+            f"tex_count={len(staged_jpgs)}"
+        )
+
+    # Clean any stale ``scene*`` files from mesh_dir before moving
+    # the new bundle in. Stale textures from a prior run (e.g. the
+    # previous mesh atlas had 3 pages and the new one has 1) would
+    # otherwise sit alongside the new MTL forever, never referenced
+    # but consuming disk. Preserve ``mesh.log`` and any non-scene
+    # files. The new bundle's content is verified above so this
+    # cleanup is safe — we have something to move in.
+    for old in mesh_dir.iterdir():
+        if old.is_file() and old.name.startswith("scene"):
+            try:
+                old.unlink()
+            except OSError:
+                pass
+
+    staged_obj.replace(mesh_dir / "scene.obj")
+    staged_mtl.replace(mesh_dir / "scene.mtl")
+    tex_paths: list[str] = []
+    for jpg in staged_jpgs:
+        dst = mesh_dir / jpg.name
+        jpg.replace(dst)
+        tex_paths.append(str(dst))
+    has_glb = False
+    if staged_glb.exists():
+        staged_glb.replace(mesh_dir / "scene.glb")
+        has_glb = True
+
+    shutil.rmtree(staging_dir, ignore_errors=True)
+
+    result: dict = {
+        "obj": str(mesh_dir / "scene.obj"),
+        "mtl": str(mesh_dir / "scene.mtl"),
+        "tex": tex_paths,
+    }
+    if has_glb:
+        result["glb"] = str(mesh_dir / "scene.glb")
     await progress(1.0, "mesh: done")
     return result
 

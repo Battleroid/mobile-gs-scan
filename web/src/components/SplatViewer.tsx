@@ -713,36 +713,82 @@ function SplatScene({
           const { OBJLoader } = await import(
             "three/examples/jsm/loaders/OBJLoader.js"
           );
-          const obj = await new OBJLoader().loadAsync(meshUrl);
-          if (cancelled) return;
-          // OBJLoader doesn't apply a default material when the .mtl
-          // is missing — surfaces render black under our lighting.
-          // Drop a standard material so the mesh always shows up.
-          //
-          // Vertex-color path: the TSDF-tier subprocess writes OBJs
-          // with per-vertex RGB after each `v` entry; OBJLoader
-          // parses those into a ``color`` BufferAttribute on the
-          // geometry. If we plant a flat-grey material here without
-          // ``vertexColors: true``, the integrated colors land in
-          // the GPU buffer but the shader ignores them. Detect the
-          // attribute and flip the material accordingly; fall back
-          // to flat grey only when the OBJ had no colors.
-          obj.traverse((child) => {
-            if ((child as THREE.Mesh).isMesh) {
-              const m = child as THREE.Mesh;
-              const hasVertexColor = !!(
-                m.geometry &&
-                (m.geometry as THREE.BufferGeometry).getAttribute &&
-                (m.geometry as THREE.BufferGeometry).getAttribute("color")
-              );
-              m.material = new THREE.MeshStandardMaterial({
-                color: hasVertexColor ? 0xffffff : 0xb8bcc2,
-                vertexColors: hasVertexColor,
-                roughness: 0.85,
-                metalness: 0.05,
-              });
+          // Three paths the OBJ branch handles:
+          //   1. Standard tier (OpenMVS) — OBJ has a sibling MTL
+          //      that references one or more JPG texture pages.
+          //      Try MTLLoader first; on 200 set materials before
+          //      loading the OBJ so the geometry inherits proper
+          //      UV-mapped textures.
+          //   2. Low tier (TSDF) — OBJ carries per-vertex RGB and
+          //      no MTL sidecar. MTL probe 404s; OBJLoader's
+          //      vertex-color BufferAttribute is the only color
+          //      source — flip MeshStandardMaterial.vertexColors=true.
+          //   3. Synthetic stub — OBJ with neither MTL nor vertex
+          //      colors. Fall back to a flat grey so the geometry
+          //      doesn't render pitch-black under our lighting.
+          // The MTL is at ``scene.mtl`` next to the OBJ; the
+          // artifact route's allowlist serves it under the same
+          // path prefix so the relative URL resolves correctly.
+          let materials: unknown = null;
+          if (meshUrl.endsWith(".obj")) {
+            const mtlUrl = meshUrl.replace(/scene\.obj$/, "scene.mtl");
+            if (mtlUrl !== meshUrl) {
+              try {
+                const { MTLLoader } = await import(
+                  "three/examples/jsm/loaders/MTLLoader.js"
+                );
+                const loader = new MTLLoader();
+                const slash = mtlUrl.lastIndexOf("/");
+                if (slash > -1) {
+                  // Textures referenced inside the MTL resolve
+                  // against this prefix; pointing at the OBJ's
+                  // directory keeps everything in the bundle
+                  // path under /artifacts/mesh_assets/.
+                  loader.setResourcePath(mtlUrl.slice(0, slash + 1));
+                }
+                const mat = await loader.loadAsync(mtlUrl);
+                if (cancelled) return;
+                mat.preload();
+                materials = mat;
+              } catch {
+                // MTL not present (low tier) or fetch failed. Fall
+                // through to the vertex-color / flat-grey paths.
+              }
             }
-          });
+          }
+          const objLoader = new OBJLoader();
+          if (materials) {
+            (objLoader as unknown as {
+              setMaterials: (m: unknown) => unknown;
+            }).setMaterials(materials);
+          }
+          const obj = await objLoader.loadAsync(meshUrl);
+          if (cancelled) return;
+          if (!materials) {
+            // No MTL — apply per-mesh fallback. Vertex-color path:
+            // the TSDF-tier subprocess writes OBJs with per-vertex
+            // RGB after each `v` entry; OBJLoader parses those
+            // into a ``color`` BufferAttribute on the geometry.
+            // If we plant a flat-grey material here without
+            // ``vertexColors: true``, the integrated colors land
+            // in the GPU buffer but the shader ignores them.
+            obj.traverse((child) => {
+              if ((child as THREE.Mesh).isMesh) {
+                const m = child as THREE.Mesh;
+                const hasVertexColor = !!(
+                  m.geometry &&
+                  (m.geometry as THREE.BufferGeometry).getAttribute &&
+                  (m.geometry as THREE.BufferGeometry).getAttribute("color")
+                );
+                m.material = new THREE.MeshStandardMaterial({
+                  color: hasVertexColor ? 0xffffff : 0xb8bcc2,
+                  vertexColors: hasVertexColor,
+                  roughness: 0.85,
+                  metalness: 0.05,
+                });
+              }
+            });
+          }
           added = obj;
         }
         if (added && groupAtMount) {
