@@ -168,6 +168,116 @@ def render_one(
     return out
 
 
+def render_one_rgbd(
+    prepared,
+    c2w_opengl: Sequence[float],
+    *,
+    fov_deg: float,
+    width: int,
+    height: int,
+):
+    """Render a single frame producing aligned RGB + depth.
+
+    Returns ``(rgb_uint8, depth_float32)``:
+      * ``rgb_uint8`` — ``(H, W, 3)`` uint8 in [0, 255], same shape +
+        convention as ``render_one``.
+      * ``depth_float32`` — ``(H, W)`` float32 in scene units. Each
+        pixel is the alpha-weighted expected ray depth (gsplat's
+        ``ED`` mode) — well-defined at silhouette edges, no NaNs,
+        zero where no gaussians integrate. Suitable as a depth
+        channel for ``o3d.geometry.RGBDImage.create_from_color_and_depth``.
+
+    Uses ``rasterization(..., render_mode="RGB+ED")`` which returns a
+    ``(B, H, W, 4)`` tensor in a single forward pass — the 4th
+    channel is the expected depth. Falls back to two separate passes
+    (``RGB`` + ``ED``) if the combined mode rejects the kwarg on the
+    installed gsplat version. The two-pass path roughly doubles the
+    cost but keeps the contract identical.
+
+    Why "ED" and not "D": gsplat's bare ``D`` mode is alpha-weighted
+    accumulated depth (Σ αᵢ zᵢ) which underestimates at silhouette
+    edges where the total transmittance is below 1.0. ``ED`` divides
+    by accumulated alpha, giving the *expected* depth which is the
+    moment the TSDF integration actually wants (the ray's most
+    likely surface intersection, not the splat's contribution).
+    """
+    import numpy as np
+    import torch
+    from gsplat.rendering import rasterization
+
+    device = prepared["device"]
+    flip_yz = prepared["flip_yz"]
+
+    c2w = torch.tensor(
+        list(c2w_opengl), device=device, dtype=torch.float32,
+    ).view(1, 4, 4)
+    c2w_opencv = c2w @ flip_yz
+    viewmats = torch.linalg.inv(c2w_opencv)
+
+    fov_rad = math.radians(fov_deg)
+    fy = height / (2.0 * math.tan(fov_rad / 2.0))
+    fx = fy
+    K = torch.tensor(
+        [[fx, 0.0, width / 2.0], [0.0, fy, height / 2.0], [0.0, 0.0, 1.0]],
+        device=device,
+        dtype=torch.float32,
+    ).unsqueeze(0)
+
+    kwargs = dict(
+        means=prepared["means"],
+        quats=prepared["quats"],
+        scales=prepared["scales"],
+        opacities=prepared["opacities"],
+        colors=prepared["rgb"],
+        viewmats=viewmats,
+        Ks=K,
+        width=width,
+        height=height,
+        sh_degree=None,
+    )
+    try:
+        render_colors, _alphas, _meta = rasterization(
+            **kwargs, render_mode="RGB+ED",
+        )
+        # Combined mode: (1, H, W, 4) — RGB in [:, :, :, :3], ED in
+        # [:, :, :, 3].
+        rgb_t = render_colors[0, :, :, :3].clamp(0.0, 1.0)
+        depth_t = render_colors[0, :, :, 3]
+    except (TypeError, ValueError):  # pragma: no cover — older gsplat
+        # Older gsplat versions might not accept ``render_mode``;
+        # fall back to two passes. Same kwargs, no render_mode for
+        # RGB; explicit render_mode="ED" for depth.
+        rgb_only, _a, _m = rasterization(**kwargs)
+        depth_only, _a2, _m2 = rasterization(**kwargs, render_mode="ED")
+        rgb_t = rgb_only[0].clamp(0.0, 1.0)
+        depth_t = depth_only[0, :, :, 0] if depth_only.ndim == 4 else depth_only[0]
+
+    rgb = (rgb_t * 255.0).to(torch.uint8).cpu().numpy()
+    depth = depth_t.to(torch.float32).cpu().numpy().astype(np.float32, copy=False)
+    return rgb, depth
+
+
+def opencv_extrinsic_from_opengl(c2w_opengl: Sequence[float]):
+    """Convert an OpenGL camera-to-world matrix (16-float row-major)
+    to a world-to-camera extrinsic in OpenCV convention as a 4×4
+    numpy float32 array.
+
+    Open3D's ``ScalableTSDFVolume.integrate(rgbd, intrinsic,
+    extrinsic)`` expects this shape: an OpenCV-axis world→camera
+    matrix where +X = right, +Y = down, +Z = forward (into the
+    scene). The renderer's internal pipeline goes
+    OpenGL c2w → OpenCV c2w (via the YZ flip) → invert to get the
+    viewmat; this helper exposes the same flip + invert for callers
+    that need the extrinsic separately (e.g. the TSDF subprocess).
+    """
+    import numpy as np
+
+    c2w = np.asarray(list(c2w_opengl), dtype=np.float32).reshape(4, 4)
+    flip = np.diag(np.array([1.0, -1.0, -1.0, 1.0], dtype=np.float32))
+    c2w_cv = c2w @ flip
+    return np.linalg.inv(c2w_cv).astype(np.float32, copy=False)
+
+
 def render_frames(
     *,
     ply_path: Path,

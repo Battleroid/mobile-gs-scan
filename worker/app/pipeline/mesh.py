@@ -1,53 +1,76 @@
-"""Poisson mesh extraction from a trained Gaussian-splatting scene.
+"""Mesh extraction from a trained Gaussian-splatting scene.
+
+Tiered: the user's ``mesh_params.tier`` field picks between
+implementations. Only the **low** tier ships today; standard and
+higher are scaffolded so the UI + API can preview their existence
+without us needing to land OpenMVS / 2DGS / SuGaR in the same
+change.
+
+Low tier — TSDF fusion of rendered RGB+depth views
+==================================================
+
+The earlier Open3D-Poisson-from-splat-PLY path (now replaced) had
+two fundamental issues that made its output unusable: gaussian
+centers aren't on the surface (so PCA-normalled Poisson over them
+forms a blobby closed shell around the subject), and the SH-DC
+colors on the PLY were silently dropped (no vertex colors, no
+textures). The low tier replaces both:
+
+  1. Render a dome of orbital camera views from the trained
+     splatfacto checkpoint via ``gsplat.rasterization`` (RGB+ED
+     mode — alpha-weighted expected depth in a single forward pass).
+  2. Integrate each (color, depth) frame into an Open3D
+     ``ScalableTSDFVolume`` with ``RGB8`` color type, so per-voxel
+     RGB accumulates alongside the truncated signed distance.
+  3. Marching-cubes-extract a triangle mesh; vertices carry per-
+     vertex RGB integrated across the views.
+  4. Cluster-prune floaters (small disconnected components) without
+     attempting to close holes or simplify — the partial surface is
+     the design goal (see below).
+
+This makes the output *surface-faithful* (TSDF sees the true
+surface because rendered depth from many views converges on it)
+and *partial-by-design*: regions the camera never saw are left as
+open boundaries rather than invented as a closed back face.
+Downstream import into Blender / other 3D media tooling is the
+target workflow, where partial-but-correct beats whole-but-wrong.
 
 We DON'T use nerfstudio's ``ns-export poisson`` here. As of
 nerfstudio 1.1.5 that exporter asserts on a
 ``pipeline.datamanager.train_pixel_sampler`` that exists on the
-ray-based managers (vanilla nerf etc) but NOT on
-``FullImageDatamanager`` — which is what splatfacto uses. Result:
-``ns-export poisson`` against any splatfacto-trained scene crashes
-with ``AttributeError: 'FullImageDatamanager' object has no
-attribute 'train_pixel_sampler'``. There's no flag to opt out.
+ray-based managers but NOT on ``FullImageDatamanager`` (splatfacto).
+``ns-export tsdf`` shares the same datamanager-coupled bug. Driving
+``gsplat.rasterization`` directly bypasses both — same renderer
+the orbit/thumbnail steps already use.
 
-Instead, run Open3D's Poisson reconstruction against the gaussian-
-splat ``.ply`` the export step already produced. The splat PLY is
-a point cloud of gaussian centres + per-vertex attributes — exactly
-the input the surface reconstruction needs.
-
-The actual Open3D work runs in a CHILD PROCESS
+The actual Open3D + gsplat work runs in a CHILD PROCESS
 (``app.pipeline._mesh_subprocess``) so the heartbeat task can
-SIGKILL it via ``_running.kill_for_job``. Earlier versions ran the
-stages directly in the worker via ``asyncio.to_thread``: that fixed
-event-loop blocking but left the native C++ Poisson call running
-in a background thread on cancel, so cancel/replace flows could
-overlap multiple long reconstructions and starve the replacement
-job. The subprocess fork restores hard-kill semantics that the
-original (nerfstudio-based) implementation had.
+SIGKILL it via ``_running.kill_for_job``. Earlier versions ran
+stages directly via ``asyncio.to_thread``: that fixed event-loop
+blocking but left native C++ calls running on cancel, starving the
+replacement job. The subprocess fork keeps hard-kill semantics.
 
-Pipeline (executed inside the subprocess):
-  1. Load the splat PLY into an Open3D PointCloud (xyz + optional
-     normals + optional colours from the SH DC band).
-  2. Subsample / outlier-prune.
-  3. Estimate normals via PCA on the local k-NN. (An older
-     ``normal_method='model_output'`` option that trusted the PLY's
-     own nx/ny/nz was removed — splatfacto exports those as zero,
-     so trusting them silently degraded Poisson. The runner now
-     coerces any legacy persisted value back to ``open3d``.)
-  4. ``create_from_point_cloud_poisson(depth=…)`` for the surface.
-  5. Density-prune low-confidence triangles (default: drop the
-     bottom 1%) so the mesh isn't smeared out into the empty
-     space around the subject.
-  6. Export ``scene.obj`` + ``scene.glb`` via Open3D / trimesh.
+Standard tier — OpenMVS textured mesh (sketch, not implemented)
+===============================================================
 
-The parent (this module) handles:
-  - Per-job staging dir + atomic swap into the canonical mesh_dir
-    so a concurrent re-extract doesn't clobber the live artefacts.
-  - PROGRESS-line parsing from the subprocess's stdout.
-  - Subprocess registration with ``_running`` for cancel-via-kill.
+Bolt OpenMVS onto the SfM output: ``DensifyPointCloud →
+ReconstructMesh → RefineMesh → TextureMesh``. Produces a textured
+OBJ + MTL + JPG bundle. Requires Dockerfile additions (OpenMVS +
+VCG from source) and a new artifact-bundle serving route. Surfaces
+when ``mesh_params.tier == "standard"`` — currently raises
+``NotImplementedError`` from this module's dispatcher.
 
-Output:
+Higher tier — Mesh-aware splat retraining (sketch, not implemented)
+===================================================================
+
+2DGS or SuGaR — flatten / regularize the splat onto a surface,
+then export. Multi-minute retraining pass. Surfaces when
+``mesh_params.tier == "higher"`` — currently raises
+``NotImplementedError``.
+
+Output (all tiers, same contract):
   scene_dir/mesh/scene.obj    — canonical Wavefront mesh
-  scene_dir/mesh/scene.glb    — gltf binary (when trimesh's writer
+  scene_dir/mesh/scene.glb    — glTF binary (when trimesh's writer
                                 succeeds); rendered directly by
                                 three.js's GLTFLoader on the web.
   scene_dir/mesh/mesh.log     — per-step trace surfaced via
@@ -74,33 +97,58 @@ ProgressCb = Callable[[float, str], Awaitable[None]]
 # (~1M splats, 5–10 m extent). The user can override any of these
 # via POST /api/scenes/{id}/mesh's ``params`` body.
 DEFAULT_PARAMS: dict = {
-    # Target sample count after subsampling. Open3D's Poisson scales
-    # roughly linearly with input size up to ~1M points; beyond
-    # that the marginal density gain is dwarfed by runtime.
-    "num_points": 1_000_000,
-    # Statistical-outlier removal pass before normal estimation.
-    # Splatfacto's gaussians sometimes drift outside the subject;
-    # outlier removal stops them from polluting the surface.
+    # Which tier to run. "low" = TSDF-fusion (this PR). "standard"
+    # = OpenMVS textured (future). "higher" = 2DGS/SuGaR retrain
+    # (future). The dispatcher raises NotImplementedError for the
+    # unimplemented tiers; the API validation surfaces a clean 400
+    # before the job even queues.
+    "tier": "low",
+    # ─── low-tier (TSDF) knobs ──────────────────────────────────
+    # Dome-camera view count. Spread evenly across
+    # ``view_elevations`` rings; 96 views with two rings ≈ 48
+    # azimuths per ring, dense enough to fill the TSDF for typical
+    # scene coverage without taking minutes to render.
+    "n_views": 96,
+    # Normalized elevation angles in [-1, 1] mapped to [-π/2, π/2].
+    # 0.2 ≈ 18°, 0.6 ≈ 54° — a low ring near the equator plus an
+    # overhead ring gives reasonable dome coverage of a subject
+    # the user captured by walking around it at chest height.
+    "view_elevations": [0.2, 0.6],
+    # Voxel edge length as a *fraction of scene extent*. The
+    # subprocess scales by the splat's robust extent so the same
+    # value gives a sensible voxel grid across captures of wildly
+    # different physical scales. Clamped at extent/64 to keep
+    # marching cubes within memory.
+    "voxel_size": 0.005,
+    # SDF truncation distance, expressed as a multiple of the
+    # (already extent-scaled) voxel size. 4 voxels of margin is
+    # the Open3D / KinectFusion default and works well across
+    # camera-distance regimes.
+    "sdf_trunc_mult": 4.0,
+    # Maximum depth to integrate, expressed as a multiple of scene
+    # extent. Anything farther than this from a camera is treated
+    # as "no surface" and skipped — avoids integrating background
+    # gaussians far behind the subject.
+    "depth_trunc": 8.0,
+    # Floater removal pass after marching cubes: drop connected
+    # components smaller than 1% of the largest cluster's triangle
+    # count. DOES NOT close holes — partial-surface output is the
+    # design goal. Turn off if a legitimate isolated island of
+    # geometry < 1% of the main body gets dropped.
     "remove_outliers": True,
-    # Normal estimation method. Only ``open3d`` (PCA on each
-    # point's k-nearest neighbours) is supported end-to-end; the
-    # old ``model_output`` value was removed because splatfacto's
-    # PLY normals are zero. _run_poisson coerces any legacy
-    # persisted value back to "open3d" before dispatching to the
-    # subprocess.
-    "normal_method": "open3d",
-    # Whether to crop input to a tight bounding box derived from
-    # the point cloud's robust 1st/99th percentile range. Helps
-    # when stray gaussians sit far from the subject; turn off to
-    # keep the full extent.
+    # Crop final mesh to the splat's robust 1st/99th percentile
+    # AABB. Off by default; flip on for scenes where a few far-out
+    # gaussians dragged the mesh into empty space.
     "use_bounding_box": False,
-    # Octree depth for the Poisson solver. Higher = finer detail
-    # but quadratic memory. 9 is a good balance for 1M points.
+    # ─── legacy keys, accepted-but-ignored ──────────────────────
+    # These were the Poisson-tier knobs. Persisted on scenes
+    # extracted before the TSDF switch; we accept them so older
+    # mesh_params rows don't 422 on the next extract, but the
+    # subprocess no longer reads them.
+    "num_points": 1_000_000,
     "depth": 9,
-    # Quantile threshold for density-based vertex pruning after
-    # reconstruction. Drops the lowest-density triangles (typically
-    # spurious surfaces in empty space). 0 disables pruning.
     "density_quantile": 0.01,
+    "normal_method": "open3d",
 }
 
 
@@ -137,16 +185,29 @@ async def run_mesh(
             ),
         )
 
-    return await _run_poisson(
-        src_ply=src_ply,
-        mesh_dir=mesh_dir,
-        params=merged,
-        progress=progress,
-        job_id=job_id,
-    )
+    tier = merged.get("tier") or "low"
+    if tier == "low":
+        return await _run_low_tier(
+            src_ply=src_ply,
+            mesh_dir=mesh_dir,
+            params=merged,
+            progress=progress,
+            job_id=job_id,
+        )
+    if tier in ("standard", "higher"):
+        # Surfaced as a RuntimeError below — the runner catches
+        # any exception out of run_mesh and writes ``mesh_error``.
+        # The API also rejects these tiers at validation time so
+        # this branch only fires for jobs already in flight when a
+        # tier was just added.
+        raise NotImplementedError(
+            f"mesh tier '{tier}' is not yet implemented; "
+            f"only 'low' (TSDF fusion) is available today."
+        )
+    raise ValueError(f"unknown mesh tier '{tier}'")
 
 
-async def _run_poisson(
+async def _run_low_tier(
     *,
     src_ply: Path,
     mesh_dir: Path,
@@ -154,6 +215,10 @@ async def _run_poisson(
     progress: ProgressCb,
     job_id: str | None,
 ) -> dict:
+    """Dispatch the TSDF subprocess. The parent owns staging-dir +
+    atomic-swap hygiene and the subprocess SIGKILL contract; the
+    child does all the actual gsplat + Open3D work.
+    """
     # Per-job staging dir + atomic swap on success. Same pattern as
     # the filter step — old mesh stays addressable until the new
     # one is fully written, and a crash mid-run can't half-overwrite
@@ -166,18 +231,7 @@ async def _run_poisson(
     log_path = mesh_dir / "mesh.log"
     log_path.write_text("")
 
-    # Normalize legacy normal_method here so the subprocess only
-    # ever sees a supported value. _ALLOWED_NORMAL_METHODS in the
-    # API rejects anything else on new requests, but the runner
-    # uses scene.mesh_params verbatim when no overrides are
-    # provided — bypassing that allowlist for legacy persisted
-    # rows. See the equivalent guard in PR #67's review history.
-    normalized = dict(params)
-    nm = normalized.get("normal_method") or "open3d"
-    if nm != "open3d":
-        normalized["normal_method"] = "open3d"
-
-    # Spawn the Open3D pipeline as a child process and register it
+    # Spawn the TSDF pipeline as a child process and register it
     # with _running so the heartbeat can SIGKILL it on cancel. Use
     # sys.executable (parent's interpreter) so we inherit the same
     # virtualenv / conda env / system Python.
@@ -185,10 +239,11 @@ async def _run_poisson(
         sys.executable, "-m", "app.pipeline._mesh_subprocess",
         "--src-ply", str(src_ply),
         "--staging-dir", str(staging_dir),
-        "--params", json.dumps(normalized),
+        "--params", json.dumps(params),
+        "--tier", "low",
     ]
 
-    await progress(0.0, "spawn open3d worker")
+    await progress(0.0, "spawn tsdf worker")
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -212,7 +267,7 @@ async def _run_poisson(
         shutil.rmtree(staging_dir, ignore_errors=True)
         tail = tail_file(log_path)
         raise RuntimeError(
-            format_subprocess_error("open3d poisson", rc, log_path, tail)
+            format_subprocess_error("tsdf mesh", rc, log_path, tail)
         )
 
     # Atomic swap from staging into mesh_dir. Path.replace is
@@ -228,7 +283,7 @@ async def _run_poisson(
         staged_glb = staging_dir / "scene.glb"
         if not staged_obj.exists():
             raise RuntimeError(
-                "open3d poisson exited 0 but produced no scene.obj"
+                "tsdf mesh exited 0 but produced no scene.obj"
             )
         staged_obj.replace(obj_dst)
         if staged_glb.exists():

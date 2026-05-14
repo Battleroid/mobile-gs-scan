@@ -405,6 +405,18 @@ _ALLOWED_MESH_KEYS = set(MESH_DEFAULT_PARAMS.keys())
 # nx/ny/nz are written but always zero). Keeping a single value
 # here so the UI choice never silently no-ops.
 _ALLOWED_NORMAL_METHODS = {"open3d"}
+# Mesh tier selector. Only ``low`` (TSDF fusion) is implemented at
+# the API today; ``standard`` (OpenMVS textured) and ``higher``
+# (2DGS / SuGaR retrain) are reserved for future PRs. We accept
+# them in validation so a forward-rolled web client can submit the
+# parameter, but the worker dispatcher (mesh.py:_run_mesh) raises
+# ``NotImplementedError`` until those backends land. The UI shows
+# the latter two as "coming soon" non-clickable chips for now.
+_ALLOWED_MESH_TIERS = {"low", "standard", "higher"}
+# Tiers we'll actually accept at the trigger endpoint today.
+# Anything else returns 422 with a clear message rather than
+# silently downgrading.
+_ACTIVE_MESH_TIERS = {"low"}
 
 
 def _validate_mesh_params(raw: dict | None) -> dict:
@@ -474,6 +486,77 @@ def _validate_mesh_params(raw: dict | None) -> dict:
         if v < 0 or v >= 1:
             raise HTTPException(422, "density_quantile must be in [0, 1)")
         out["density_quantile"] = float(v)
+    # ─── TSDF-tier knobs ────────────────────────────────────────
+    if "tier" in raw:
+        v = raw["tier"]
+        if not isinstance(v, str) or v not in _ALLOWED_MESH_TIERS:
+            raise HTTPException(
+                422,
+                f"tier must be one of {sorted(_ALLOWED_MESH_TIERS)}",
+            )
+        if v not in _ACTIVE_MESH_TIERS:
+            # Reject standard / higher at the trigger endpoint
+            # explicitly. The dispatcher raises the same way, but
+            # rejecting here keeps the queued/running churn out of
+            # the pipeline list — and gives the UI a clean 422 to
+            # surface.
+            raise HTTPException(
+                422,
+                f"mesh tier '{v}' is not yet implemented; "
+                f"active tiers: {sorted(_ACTIVE_MESH_TIERS)}",
+            )
+        out["tier"] = v
+    if "n_views" in raw:
+        v = raw["n_views"]
+        if isinstance(v, bool) or not isinstance(v, int) or v < 24 or v > 360:
+            raise HTTPException(
+                422, "n_views must be an integer in [24, 360]",
+            )
+        out["n_views"] = v
+    if "view_elevations" in raw:
+        v = raw["view_elevations"]
+        if not isinstance(v, list) or not (1 <= len(v) <= 4):
+            raise HTTPException(
+                422,
+                "view_elevations must be a list of 1–4 floats in [-1, 1]",
+            )
+        norm: list[float] = []
+        for x in v:
+            if isinstance(x, bool) or not isinstance(x, (int, float)):
+                raise HTTPException(
+                    422, "view_elevations entries must be numbers",
+                )
+            if x < -1 or x > 1:
+                raise HTTPException(
+                    422, "view_elevations entries must be in [-1, 1]",
+                )
+            norm.append(float(x))
+        out["view_elevations"] = norm
+    if "voxel_size" in raw:
+        v = raw["voxel_size"]
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise HTTPException(422, "voxel_size must be a number")
+        if v <= 0 or v > 0.1:
+            raise HTTPException(422, "voxel_size must be in (0, 0.1]")
+        out["voxel_size"] = float(v)
+    if "sdf_trunc_mult" in raw:
+        v = raw["sdf_trunc_mult"]
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise HTTPException(422, "sdf_trunc_mult must be a number")
+        if v < 1 or v > 8:
+            raise HTTPException(422, "sdf_trunc_mult must be in [1, 8]")
+        out["sdf_trunc_mult"] = float(v)
+    if "depth_trunc" in raw:
+        v = raw["depth_trunc"]
+        # ``depth`` (octree) and ``depth_trunc`` (scene-relative
+        # ray-depth cap) are different params with overlapping
+        # names; we check ``isinstance(v, float)`` below the int
+        # branch so an int ``depth_trunc`` accepts too.
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise HTTPException(422, "depth_trunc must be a number")
+        if v < 1 or v > 50:
+            raise HTTPException(422, "depth_trunc must be in [1, 50]")
+        out["depth_trunc"] = float(v)
     return out
 
 

@@ -72,18 +72,34 @@ export type MeshStatus =
   | "failed";
 
 export interface MeshParams {
-  num_points?: number;
+  // Fidelity tier. Only "low" is implemented today (TSDF fusion of
+  // rendered RGB+depth views from the splatfacto checkpoint).
+  // "standard" (OpenMVS-textured) and "higher" (2DGS/SuGaR retrain)
+  // are reserved for future PRs — submitted via the trigger
+  // endpoint they return 422.
+  tier?: "low" | "standard" | "higher";
   remove_outliers?: boolean;
-  normal_method?: "open3d";
   use_bounding_box?: boolean;
-  // Octree depth for the screened-Poisson solver. 5–12; the worker
-  // rejects anything outside that range. UI doesn't surface a
-  // control yet — the server defaults to 9 — but persisted values
-  // need to round-trip through the trigger payload spread in
-  // MeshPanel without an `as any` cast.
+  // ─── low-tier (TSDF) knobs ──────────────────────────────────
+  // Camera viewpoints rendered + fused into the TSDF volume. 24–360.
+  n_views?: number;
+  // Normalized elevation angles for the dome camera ring, mapped to
+  // [-π/2, π/2]. List of 1–4 floats in [-1, 1].
+  view_elevations?: number[];
+  // Voxel edge length as a fraction of scene extent. (0, 0.1].
+  voxel_size?: number;
+  // SDF truncation distance, in multiples of voxel edge. [1, 8].
+  sdf_trunc_mult?: number;
+  // Max ray depth to integrate, in multiples of scene extent. [1, 50].
+  depth_trunc?: number;
+  // ─── legacy Poisson keys, accepted-but-ignored ──────────────
+  // Older mesh_params rows persist these from before the TSDF
+  // switch. The worker no longer reads them but the API still
+  // accepts them so older clients don't 422. The UI strips them
+  // out of the trigger payload to keep the persisted row clean.
+  num_points?: number;
+  normal_method?: "open3d";
   depth?: number;
-  // Quantile threshold for density-based vertex pruning post-
-  // Poisson. 0 disables. Same UI/persistence note as `depth`.
   density_quantile?: number;
 }
 
