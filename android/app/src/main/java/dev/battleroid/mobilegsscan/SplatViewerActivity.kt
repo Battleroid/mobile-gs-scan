@@ -209,8 +209,28 @@ class SplatViewerActivity : ComponentActivity() {
                             }
                             // Atomic publish — Chromium watches the
                             // destination file and would otherwise
-                            // race the download.
-                            tmp.renameTo(cached)
+                            // race the download. ``renameTo`` returns
+                            // false on filesystem errors (target
+                            // locked, cross-volume on weird OEMs,
+                            // permission flap); without the explicit
+                            // check the activity would happily switch
+                            // to Ready and have the WebView 404 on
+                            // /splats/<id>.spz, leaving the user with
+                            // a permanently broken cache entry
+                            // (because next open also short-circuits
+                            // on a non-existent file and only retries
+                            // the download — but if a stale truncated
+                            // copy survives, that re-download path
+                            // skips it entirely thanks to the
+                            // ``exists() || length() == 0L`` guard).
+                            // Treat a failed rename as a download
+                            // failure: clean up the .part file and
+                            // raise so the runCatching path surfaces
+                            // a UI error.
+                            if (!tmp.renameTo(cached)) {
+                                tmp.delete()
+                                error("rename to ${cached.name} failed")
+                            }
                         }
                     true
                 }.getOrElse { e ->
