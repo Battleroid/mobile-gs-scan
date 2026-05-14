@@ -131,8 +131,14 @@ DEFAULT_PARAMS: dict = {
     # Maximum depth to integrate, expressed as a multiple of scene
     # extent. Anything farther than this from a camera is treated
     # as "no surface" and skipped — avoids integrating background
-    # gaussians far behind the subject.
-    "depth_trunc": 8.0,
+    # gaussians far behind the subject. Tightened from 8.0 → 3.0
+    # in the quality-knobs follow-up: 8× extent let every dome
+    # camera reach the far wall of room-scale captures, fusing
+    # background depth into the volume (the original "bubble"
+    # artifact). 3× extent comfortably exceeds the dome radius
+    # (~2× extent from centroid) without admitting room-far-wall
+    # depth. Users can override.
+    "depth_trunc": 3.0,
     # Floater removal pass after marching cubes: drop connected
     # components smaller than 1% of the largest cluster's triangle
     # count. DOES NOT close holes — partial-surface output is the
@@ -143,6 +149,35 @@ DEFAULT_PARAMS: dict = {
     # AABB. Off by default; flip on for scenes where a few far-out
     # gaussians dragged the mesh into empty space.
     "use_bounding_box": False,
+    # Prefer the filter-edited splat (``scene.edited_ply_path``)
+    # when available — without this, the mesh re-introduces every
+    # floater the user just cleaned up. Default-on; flip off to
+    # force the raw splatfacto export.
+    "use_edited_splat": True,
+    # Depth-validity gate. Pixels where the camera's accumulated
+    # alpha falls below this threshold have their depth zeroed out
+    # before TSDF integrate — the "expected depth" reported there
+    # is the weighted average of stray floaters, not a real
+    # surface. 0.5 is the empirical sweet spot for phone captures;
+    # 0 disables the gate.
+    "alpha_min": 0.5,
+    # Robust-bbox percentile range used for: the dome camera-path
+    # auto-fit, the depth_trunc reference extent, and the post-mesh
+    # bbox crop (when ``use_bounding_box`` is on). Tighter than the
+    # 5/95 default ``_ply_bbox`` uses for the orbit/thumbnail steps
+    # because mesh quality is more sensitive to far-out floaters
+    # being framed in.
+    "bbox_percentile_low": 10.0,
+    "bbox_percentile_high": 90.0,
+    # Pre-render floater prune. ``floater_opacity_min`` drops
+    # gaussians whose post-sigmoid opacity is below this value (the
+    # same threshold the splat editor treats as background noise).
+    # ``floater_scale_max_pct`` drops the top percentile of
+    # gaussians by their largest scale axis — the wildly stretched
+    # "sheet" gaussians that produce smeared depth. Set both to 0 /
+    # 100 to disable.
+    "floater_opacity_min": 0.05,
+    "floater_scale_max_pct": 95.0,
     # ─── standard-tier (OpenMVS) knobs ─────────────────────────
     # Number of views fused at each densification step. Higher =
     # cleaner dense cloud but more expensive. OpenMVS recommends

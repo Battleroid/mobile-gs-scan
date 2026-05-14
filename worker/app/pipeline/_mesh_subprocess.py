@@ -142,16 +142,62 @@ def _run_tsdf(*, src_ply: Path, staging_dir: Path, params: dict) -> int:
     view_elevations = list(params.get("view_elevations", [0.2, 0.6]))
     voxel_size_frac = float(params.get("voxel_size", 0.005))
     sdf_trunc_mult = float(params.get("sdf_trunc_mult", 4.0))
-    depth_trunc_mult = float(params.get("depth_trunc", 8.0))
+    # Tightened default from 8.0 → 3.0: at 8× extent every ray
+    # reached the far wall of room-scale captures and integrated
+    # depth that wasn't the subject (the "bubble" artifact). 3×
+    # extent keeps the cap comfortably past a dome camera's
+    # furthest legitimate surface (~2× extent from the centroid)
+    # without admitting room-far-wall depth. Users can override.
+    depth_trunc_mult = float(params.get("depth_trunc", 3.0))
     remove_outliers = bool(params.get("remove_outliers", True))
     use_bounding_box = bool(params.get("use_bounding_box", False))
+
+    # New quality knobs (see plan PR-E follow-up). The defaults are
+    # tuned for typical phone-capture splats with light editing.
+    # ``alpha_min`` gates depth integration on accumulated alpha so
+    # pixels where the camera mostly saw empty space don't
+    # contribute averaged depth to the volume (the secondary source
+    # of "bubble" artifacts). ``floater_*`` pre-renders prune
+    # gaussians the user's editor would otherwise have rejected.
+    alpha_min = float(params.get("alpha_min", 0.5))
+    floater_opacity_min = float(params.get("floater_opacity_min", 0.05))
+    floater_scale_max_pct = float(params.get("floater_scale_max_pct", 95.0))
+    bbox_percentile_low = float(params.get("bbox_percentile_low", 10.0))
+    bbox_percentile_high = float(params.get("bbox_percentile_high", 90.0))
 
     _log(f"tsdf fusion on {src_ply.name} params={params}")
 
     _emit(0.02, "prepare splat")
     prepared = ply_render.prepare_scene(src_ply)
-    centroid, extent = _ply_bbox(src_ply)
-    _log(f"centroid={centroid} extent={extent:.4f}")
+    # Pre-render floater prune: drop low-opacity gaussians + the
+    # top ``scale_max_pct`` percentile of oversize gaussians before
+    # the dome render. These are the training-noise floaters that
+    # poison the TSDF depth integration; removing them in-process
+    # (rather than relying on a prior editor pass) means the user
+    # gets a usable mesh without needing to remember to filter
+    # first. Set ``floater_opacity_min=0`` and
+    # ``floater_scale_max_pct=100`` to disable.
+    prepared = ply_render.filter_gaussians(
+        prepared,
+        opacity_min=floater_opacity_min,
+        scale_max_pct=floater_scale_max_pct,
+    )
+    kept = int(prepared["means"].shape[0])
+    _log(
+        f"floater prune: kept {kept} gaussians "
+        f"(opacity_min={floater_opacity_min}, "
+        f"scale_max_pct={floater_scale_max_pct})"
+    )
+
+    centroid, extent = _ply_bbox(
+        src_ply,
+        percentile_low=bbox_percentile_low,
+        percentile_high=bbox_percentile_high,
+    )
+    _log(
+        f"centroid={centroid} extent={extent:.4f} "
+        f"(bbox p={bbox_percentile_low}/{bbox_percentile_high})"
+    )
 
     # Scale voxel size by the scene extent so the same default works
     # across captures of wildly different physical scales (a tree
@@ -202,10 +248,25 @@ def _run_tsdf(*, src_ply: Path, staging_dir: Path, params: dict) -> int:
     # flooding stdout with 96 lines.
     tick_every = max(1, n // 20)
     for i, c2w in enumerate(poses):
-        rgb, depth = ply_render.render_one_rgbd(
+        rgb, depth, alpha = ply_render.render_one_rgbd(
             prepared, c2w,
             fov_deg=_FOV_DEG, width=_RENDER_W, height=_RENDER_H,
         )
+        # Alpha-validity gate. Pixels where the ray accumulated
+        # less than ``alpha_min`` total opacity are camera views of
+        # mostly empty space — their ED (expected depth) is the
+        # alpha-weighted average of whatever stray floaters sat
+        # along the ray, NOT a real surface. Open3D's TSDF
+        # integrate treats depth=0 as "no observation" and skips
+        # those rays, so we zero out the depth there instead of
+        # feeding bogus values into the volume. Set ``alpha_min=0``
+        # to disable the gate (every rendered pixel fuses; matches
+        # the pre-knob behaviour).
+        if alpha_min > 0.0:
+            mask = alpha < alpha_min
+            if bool(mask.any()):
+                depth = depth.copy()
+                depth[mask] = 0.0
         # Open3D wants a contiguous C-order array for the depth
         # image. ``render_one_rgbd`` returns float32 already.
         rgb_img = o3d.geometry.Image(np.ascontiguousarray(rgb))
@@ -263,12 +324,17 @@ def _run_tsdf(*, src_ply: Path, staging_dir: Path, params: dict) -> int:
         _emit(0.88, "crop bbox")
         verts = np.asarray(mesh.vertices)
         if verts.size > 0:
-            lo = np.percentile(verts, 1, axis=0)
-            hi = np.percentile(verts, 99, axis=0)
+            # Use the same percentile knobs the camera-path /
+            # depth-cap pre-pass uses so the user's "tighten the
+            # bbox" intent flows through every stage consistently
+            # rather than being a hidden constant.
+            lo = np.percentile(verts, bbox_percentile_low, axis=0)
+            hi = np.percentile(verts, bbox_percentile_high, axis=0)
             bbox = o3d.geometry.AxisAlignedBoundingBox(lo, hi)
             mesh = mesh.crop(bbox)
             _log(
-                f"bbox crop: kept {len(mesh.vertices)} verts, "
+                f"bbox crop p={bbox_percentile_low}/{bbox_percentile_high}: "
+                f"kept {len(mesh.vertices)} verts, "
                 f"{len(mesh.triangles)} tris"
             )
 

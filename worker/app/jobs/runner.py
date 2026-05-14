@@ -646,7 +646,19 @@ async def _run_mesh(*, job: Job, scene: Scene, settings: Settings) -> None:
     # SplatViewer renders from; the mesh is necessarily a
     # surface-from-points reconstruction, not a re-rendered
     # Gaussian model.
-    src_ply = scene.ply_path
+    #
+    # If the user has applied a filter recipe (cleanup, bbox crop,
+    # etc.) the scene's ``edited_ply_path`` holds that result. The
+    # low tier picks it up when ``mesh_params.use_edited_splat`` is
+    # truthy (the default in the UI) so the mesh inherits the
+    # cleanup; without this the mesh re-introduces the floaters the
+    # user just removed (the source of the "bubble with floating
+    # geometry" reproduced in QA). The fallback is still
+    # ``scene.ply_path`` so a freshly-trained scene with no edits
+    # works without ceremony.
+    params = scene.mesh_params or {}
+    use_edited = params.get("use_edited_splat", True) and bool(scene.edited_ply_path)
+    src_ply = scene.edited_ply_path if use_edited else scene.ply_path
     if not src_ply or not Path(src_ply).exists():
         msg = "scene has no .ply to mesh; export step hasn't completed yet"
         await store.update_scene(
@@ -654,8 +666,6 @@ async def _run_mesh(*, job: Job, scene: Scene, settings: Settings) -> None:
         )
         await events.publish_scene(scene.id, "scene.mesh_failed", error=msg)
         raise RuntimeError(msg)
-
-    params = scene.mesh_params or {}
 
     await store.update_scene(scene.id, mesh_status=MeshStatus.running, mesh_error=None)
     await events.publish_scene(scene.id, "scene.mesh_running")

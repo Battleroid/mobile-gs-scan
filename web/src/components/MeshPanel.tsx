@@ -35,6 +35,14 @@ interface ParamsState {
   n_views: number;
   remove_outliers: boolean;
   use_bounding_box: boolean;
+  // Low-tier quality knobs (the "advanced" section). Documented
+  // in worker/app/pipeline/mesh.py DEFAULT_PARAMS.
+  use_edited_splat: boolean;
+  alpha_min: number;
+  bbox_percentile_low: number;
+  bbox_percentile_high: number;
+  floater_opacity_min: number;
+  floater_scale_max_pct: number;
   // Standard-tier (OpenMVS) knobs.
   mvs_dense_views: number;
   mvs_texture_size: MvsTextureSize;
@@ -46,6 +54,12 @@ const DEFAULT_PARAMS: ParamsState = {
   n_views: 96,
   remove_outliers: true,
   use_bounding_box: false,
+  use_edited_splat: true,
+  alpha_min: 0.5,
+  bbox_percentile_low: 10,
+  bbox_percentile_high: 90,
+  floater_opacity_min: 0.05,
+  floater_scale_max_pct: 95,
   mvs_dense_views: 3,
   mvs_texture_size: 4096,
   mvs_refine_iters: 2,
@@ -85,6 +99,8 @@ function paramsFromScene(scene: Scene): ParamsState {
     rawTexSize === 1024 || rawTexSize === 2048 || rawTexSize === 4096 || rawTexSize === 8192
       ? rawTexSize
       : DEFAULT_PARAMS.mvs_texture_size;
+  const numIn = (v: unknown, lo: number, hi: number, fb: number): number =>
+    typeof v === "number" && v >= lo && v <= hi ? v : fb;
   return {
     tier: TIER_INFO[tier].active ? tier : DEFAULT_PARAMS.tier,
     n_views: typeof p.n_views === "number" && p.n_views >= 24
@@ -92,6 +108,12 @@ function paramsFromScene(scene: Scene): ParamsState {
       : DEFAULT_PARAMS.n_views,
     remove_outliers: p.remove_outliers ?? DEFAULT_PARAMS.remove_outliers,
     use_bounding_box: p.use_bounding_box ?? DEFAULT_PARAMS.use_bounding_box,
+    use_edited_splat: p.use_edited_splat ?? DEFAULT_PARAMS.use_edited_splat,
+    alpha_min: numIn(p.alpha_min, 0, 1, DEFAULT_PARAMS.alpha_min),
+    bbox_percentile_low: numIn(p.bbox_percentile_low, 0, 100, DEFAULT_PARAMS.bbox_percentile_low),
+    bbox_percentile_high: numIn(p.bbox_percentile_high, 0, 100, DEFAULT_PARAMS.bbox_percentile_high),
+    floater_opacity_min: numIn(p.floater_opacity_min, 0, 1, DEFAULT_PARAMS.floater_opacity_min),
+    floater_scale_max_pct: numIn(p.floater_scale_max_pct, 0, 100, DEFAULT_PARAMS.floater_scale_max_pct),
     mvs_dense_views: typeof p.mvs_dense_views === "number" && p.mvs_dense_views >= 2 && p.mvs_dense_views <= 7
       ? p.mvs_dense_views
       : DEFAULT_PARAMS.mvs_dense_views,
@@ -411,6 +433,149 @@ export function MeshPanel({ scene, meshProgress }: Props) {
           </>
         )}
       </fieldset>
+
+      {/* Advanced quality knobs — only meaningful for the low
+          tier (TSDF). Collapsed by default to keep the panel
+          uncluttered for the common case; power users open the
+          ``<details>`` to tune away "bubble" / floating-geometry
+          artifacts. Every knob is documented in
+          worker/app/pipeline/mesh.py:DEFAULT_PARAMS. */}
+      {params.tier === "low" && (
+        <details className="rounded-md border border-rule bg-bg/70 px-3 py-2 text-sm">
+          <summary className="cursor-pointer select-none font-mono text-[11px] uppercase tracking-wide text-inkSoft">
+            advanced · mesh quality
+          </summary>
+          <div className="space-y-3 pt-3">
+            <label
+              className="flex cursor-pointer items-center gap-2 text-sm"
+              title="When the splat editor has cleaned up floaters, use the edited PLY as the mesh source. Off forces the raw export — useful for debugging. Has no effect when no edit has been applied."
+            >
+              <input
+                type="checkbox"
+                checked={params.use_edited_splat}
+                onChange={(e) =>
+                  setParams((s) => ({ ...s, use_edited_splat: e.target.checked }))
+                }
+                disabled={isRunning || submitting}
+                className="accent-accent"
+              />
+              prefer edited splat (when available)
+            </label>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <label
+                className="flex flex-col gap-1"
+                title="Pixels with accumulated alpha below this threshold are treated as 'no observation' and skipped during TSDF integration. Raise to clip more background; lower (or 0) to integrate every rendered pixel. 0.5 is the sweet spot for typical phone captures."
+              >
+                <Eyebrow className="!text-[10px] !tracking-[0.08em]">
+                  alpha gate
+                </Eyebrow>
+                <input
+                  type="number"
+                  value={params.alpha_min}
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  disabled={isRunning || submitting}
+                  onChange={(e) => {
+                    const n = parseFloat(e.target.value);
+                    if (Number.isFinite(n) && n >= 0 && n <= 1) {
+                      setParams((s) => ({ ...s, alpha_min: n }));
+                    }
+                  }}
+                  className="rounded-sm border border-rule bg-bg px-3 py-2 font-mono text-sm text-fg focus:border-accent focus:outline-none disabled:opacity-60"
+                />
+              </label>
+              <label
+                className="flex flex-col gap-1"
+                title="Robust bbox percentile range (low / high) used to fit the dome camera path, cap depth integration distance, and crop the post-mesh AABB. Tighter (closer to 25/75) clips more floaters at the cost of dropping legitimate edge geometry; looser (closer to 0/100) keeps everything including outliers."
+              >
+                <Eyebrow className="!text-[10px] !tracking-[0.08em]">
+                  bbox percentile · low / high
+                </Eyebrow>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    value={params.bbox_percentile_low}
+                    min={0}
+                    max={100}
+                    step={1}
+                    disabled={isRunning || submitting}
+                    onChange={(e) => {
+                      const n = parseFloat(e.target.value);
+                      if (Number.isFinite(n) && n >= 0 && n < params.bbox_percentile_high) {
+                        setParams((s) => ({ ...s, bbox_percentile_low: n }));
+                      }
+                    }}
+                    className="w-full rounded-sm border border-rule bg-bg px-3 py-2 font-mono text-sm text-fg focus:border-accent focus:outline-none disabled:opacity-60"
+                  />
+                  <span className="font-mono text-[11px] text-inkSoft">/</span>
+                  <input
+                    type="number"
+                    value={params.bbox_percentile_high}
+                    min={0}
+                    max={100}
+                    step={1}
+                    disabled={isRunning || submitting}
+                    onChange={(e) => {
+                      const n = parseFloat(e.target.value);
+                      if (Number.isFinite(n) && n > params.bbox_percentile_low && n <= 100) {
+                        setParams((s) => ({ ...s, bbox_percentile_high: n }));
+                      }
+                    }}
+                    className="w-full rounded-sm border border-rule bg-bg px-3 py-2 font-mono text-sm text-fg focus:border-accent focus:outline-none disabled:opacity-60"
+                  />
+                </div>
+              </label>
+              <label
+                className="flex flex-col gap-1"
+                title="Drop gaussians with post-sigmoid opacity below this value before the dome render. Raise to be more aggressive (0.10 cleans most training noise; 0.20 starts cutting real geometry). 0 disables the prune entirely."
+              >
+                <Eyebrow className="!text-[10px] !tracking-[0.08em]">
+                  floater opacity_min
+                </Eyebrow>
+                <input
+                  type="number"
+                  value={params.floater_opacity_min}
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  disabled={isRunning || submitting}
+                  onChange={(e) => {
+                    const n = parseFloat(e.target.value);
+                    if (Number.isFinite(n) && n >= 0 && n <= 1) {
+                      setParams((s) => ({ ...s, floater_opacity_min: n }));
+                    }
+                  }}
+                  className="rounded-sm border border-rule bg-bg px-3 py-2 font-mono text-sm text-fg focus:border-accent focus:outline-none disabled:opacity-60"
+                />
+              </label>
+              <label
+                className="flex flex-col gap-1"
+                title="Drop the top percentile of gaussians by max-axis scale (the wildly-stretched 'sheet' gaussians that produce smeared depth). 95 = drop top 5%. 100 disables the prune entirely."
+              >
+                <Eyebrow className="!text-[10px] !tracking-[0.08em]">
+                  floater scale_max_pct
+                </Eyebrow>
+                <input
+                  type="number"
+                  value={params.floater_scale_max_pct}
+                  min={0}
+                  max={100}
+                  step={1}
+                  disabled={isRunning || submitting}
+                  onChange={(e) => {
+                    const n = parseFloat(e.target.value);
+                    if (Number.isFinite(n) && n >= 0 && n <= 100) {
+                      setParams((s) => ({ ...s, floater_scale_max_pct: n }));
+                    }
+                  }}
+                  className="rounded-sm border border-rule bg-bg px-3 py-2 font-mono text-sm text-fg focus:border-accent focus:outline-none disabled:opacity-60"
+                />
+              </label>
+            </div>
+          </div>
+        </details>
+      )}
 
       <div className="flex flex-wrap items-center gap-3">
         <BigButton

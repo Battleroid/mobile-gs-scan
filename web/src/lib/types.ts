@@ -92,6 +92,26 @@ export interface MeshParams {
   sdf_trunc_mult?: number;
   // Max ray depth to integrate, in multiples of scene extent. [1, 50].
   depth_trunc?: number;
+  // Prefer the filter-edited splat (``scene.edited_ply_path``)
+  // when present. Default true on the server when the field is
+  // absent. Falls back to the raw export if no edited PLY exists.
+  use_edited_splat?: boolean;
+  // Depth-validity gate for TSDF integration. Pixels whose
+  // accumulated alpha is below this value get their depth zeroed
+  // out (and are treated as "no observation" by Open3D). [0, 1];
+  // 0 disables.
+  alpha_min?: number;
+  // Robust-bbox percentile range (used for camera-path auto-fit,
+  // depth_trunc reference, and post-mesh bbox crop). [0, 100],
+  // low < high. Tighter than orbit/thumbnail's 5/95.
+  bbox_percentile_low?: number;
+  bbox_percentile_high?: number;
+  // Pre-render floater prune. ``floater_opacity_min`` drops
+  // gaussians below this post-sigmoid opacity; ``floater_scale_max_pct``
+  // drops the top percentile of gaussians by max-axis scale. Set
+  // both to 0 / 100 to disable.
+  floater_opacity_min?: number;
+  floater_scale_max_pct?: number;
   // ─── standard-tier (OpenMVS) knobs ──────────────────────────
   // Number of views fused per densification step. [2, 7].
   mvs_dense_views?: number;
