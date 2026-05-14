@@ -15,9 +15,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
 
@@ -255,6 +257,24 @@ class UploadService : Service() {
                 }
             }
             is DraftUploader.Result.Failed -> {
+                // Distinguish a genuine upload failure from a
+                // user-initiated cancel. ``DraftUploader.upload``
+                // wraps every step in a broad ``catch (e:
+                // Exception)`` block (lines 81 + 111 of
+                // ``DraftUploader.kt``), which swallows the
+                // ``CancellationException`` thrown by
+                // ``job.cancel()`` and reports it as a normal
+                // ``Result.Failed("upload failed: ...")``. Without
+                // this check, hitting Cancel from the notification
+                // action would overwrite the "canceled by user"
+                // state set in ``onStartCommand`` with a generic
+                // "failed" state AND post a misleading "Upload
+                // failed" notification.
+                if (!currentCoroutineContext().isActive) {
+                    // Cancel path: state already set, no
+                    // notification needed.
+                    return
+                }
                 setState(draftId, UploadState.Failed(result.reason))
                 postUploadFailedNotification(
                     draftId = draftId,
