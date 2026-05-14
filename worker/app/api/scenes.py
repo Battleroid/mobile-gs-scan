@@ -165,13 +165,14 @@ def _mesh_tex_urls(scene: Scene) -> list[str] | None:
     """
     if not scene.mesh_obj_path:
         return None
-    # Only the standard tier produces a texture-page bundle. A
-    # low-tier vertex-colored OBJ from a scene that previously ran
-    # standard tier would otherwise still pick up the cleaned-up
+    # Only textured-bundle tiers produce ``scene.mtl`` +
+    # ``scene_tex*`` sidecars. A low-tier vertex-colored OBJ from
+    # a scene that previously ran a bundle tier would otherwise
+    # still pick up the cleaned-up
     # sidecars; this gate prevents the API from advertising
     # textures the new low-tier OBJ doesn't reference.
     tier = (scene.mesh_params or {}).get("tier")
-    if tier != "standard":
+    if tier not in _TEXTURED_BUNDLE_TIERS:
         return None
     mesh_dir = _scene_mesh_dir(scene)
     if not mesh_dir.exists():
@@ -563,6 +564,14 @@ _ALLOWED_MESH_TIERS = {"low", "standard", "higher"}
 # Anything else returns 422 with a clear message rather than
 # silently downgrading.
 _ACTIVE_MESH_TIERS = {"low", "standard", "higher"}
+# Mesh tiers that emit a textured-bundle (OBJ + MTL + JPGs).
+# ``_mesh_tex_urls`` gates on this set so a future tier that
+# also produces a bundle gets its sidecars enumerated without
+# code churn here, AND a tier that emits a vertex-colored OBJ
+# only (low) doesn't leak stale standard/higher textures from a
+# prior extraction (the ``_run_low_tier`` cleanup unlinks them
+# on disk anyway, but the gate is the API-surface defence).
+_TEXTURED_BUNDLE_TIERS = {"standard", "higher"}
 # OpenMVS's TextureMesh accepts the texture-atlas page size as a
 # power of 2. Constraining the API set to these four values keeps
 # the UI's chip-row tractable and avoids feeding a non-power-of-2
