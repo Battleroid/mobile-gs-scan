@@ -27,12 +27,13 @@ import json
 import logging
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Awaitable, Callable
 
 import numpy as np
 
-from app.pipeline._logtail import format_subprocess_error, tail_text
+from app.pipeline._logtail import format_subprocess_error, tail_file
 
 log = logging.getLogger(__name__)
 
@@ -170,22 +171,54 @@ async def _run_glomap(*, sfm_dir: Path, progress: ProgressCb) -> dict:
 
 
 def _glomap_step(*, cmd: list[str], log_path: Path, step_name: str) -> None:
-    """Run one glomap-pipeline subprocess, appending to the shared log.
+    """Run one glomap-pipeline subprocess, appending to the shared
+    log line-by-line as the binary emits each line.
+
+    Streams via ``Popen`` with ``bufsize=1`` rather than collecting
+    the full output with ``subprocess.run(capture_output=True)``.
+    The latter holds every byte in memory until the child exits —
+    invisible for the short ``feature_extractor`` step, but
+    disastrous for ``glomap mapper`` (multi-minute on a real
+    scene). With the buffered version the user sees an empty
+    ``glomap.log`` and a frozen-looking JobLogPanel for the whole
+    SfM stage; with line-streaming each colmap PROGRESS line lands
+    in the log on the next poll.
+
+    The two streams are merged via ``stderr=STDOUT`` so the
+    chronology stays intact in the log; ``text=True`` decodes
+    once here rather than on each parent-side read.
 
     Raises RuntimeError with the log tail on non-zero exit so the
     caller can surface a single error to the job row regardless of
     which step bailed.
     """
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    with log_path.open("a") as f:
-        f.write(f"\n=== {step_name} ===\n")
-        f.write(proc.stdout)
-        f.write("\n")
-        f.write(proc.stderr)
-    if proc.returncode != 0:
-        tail = tail_text(proc.stdout + "\n" + proc.stderr)
+    with log_path.open("a", buffering=1) as logf:
+        logf.write(f"\n=== {step_name} ===\n")
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            logf.write(line)
+            # ``docker logs worker-gs`` (and journalctl on bare
+            # metal) shows live SfM activity without anyone having
+            # to tail glomap.log inside the container — same
+            # treatment the mesh pipeline gives the OpenMVS stages.
+            try:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+            except (BlockingIOError, BrokenPipeError):
+                pass
+        returncode = proc.wait()
+    if returncode != 0:
         raise RuntimeError(
-            format_subprocess_error(step_name, proc.returncode, log_path, tail)
+            format_subprocess_error(
+                step_name, returncode, log_path, tail_file(log_path),
+            )
         )
 
 
@@ -199,15 +232,15 @@ async def _run_colmap(*, sfm_dir: Path, progress: ProgressCb) -> dict:
         "--image_path", str(sfm_dir / "images"),
         "--quality", "medium",
     ]
-    await progress(0.1, "colmap: starting")
-    proc = subprocess.run(cmd, capture_output=True, text=True)
     log_path = sfm_dir / "colmap.log"
-    log_path.write_text(proc.stdout + "\n" + proc.stderr)
-    if proc.returncode != 0:
-        tail = tail_text(proc.stdout + "\n" + proc.stderr)
-        raise RuntimeError(
-            format_subprocess_error("colmap", proc.returncode, log_path, tail)
-        )
+    log_path.write_text("")
+    await progress(0.1, "colmap: starting")
+    # Stream output to the log file line-by-line — see ``_glomap_step``
+    # for the rationale. ``colmap automatic_reconstructor`` is a
+    # 30+ minute run on real scenes; buffered capture would leave
+    # ``colmap.log`` empty and the JobLogPanel frozen for the whole
+    # duration.
+    _glomap_step(cmd=cmd, log_path=log_path, step_name="colmap")
     await progress(0.95, "colmap: done")
     return {"backend": "colmap", "log": str(log_path), "database": str(db)}
 

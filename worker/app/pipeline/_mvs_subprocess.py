@@ -90,33 +90,56 @@ def _run_step(
     own stdout (so the parent's log file picks it up), and raise on
     non-zero exit.
 
-    Each step's full stdout is preserved verbatim under our PROGRESS
-    lines so ``mesh.log`` ends up with a chronological multi-stage
-    trace. The user can read it from ``JobLogPanel``.
+    Streams line-by-line via ``Popen`` rather than collecting the
+    full output with ``subprocess.run(stdout=PIPE)``. The latter
+    keeps every byte buffered in this process until the child
+    exits — which is invisible for the short steps (InterfaceCOLMAP,
+    ReconstructMesh) but disastrous for ``DensifyPointCloud``:
+    that step takes 30+ min on a real scene, and with buffered
+    capture the parent's ``mesh.log`` tee receives nothing for
+    the entire duration. The user sees the WebSocket pipeline
+    panel frozen at ``mvs: DensifyPointCloud`` progress 0.10 with
+    no log activity, even though the heartbeat is still ticking
+    and the subprocess is alive and doing work.
 
-    No PROGRESS lines are emitted from inside the OpenMVS binaries —
-    they're chatty but don't expose a structured progress hook
-    upstream-side. The orchestrator emits one PROGRESS at the
-    start and end of each step so the parent's WS subscriber sees
-    forward motion (see the milestones in ``main`` below).
+    Reading line-by-line forwards each chunk OpenMVS flushes (the
+    binaries use ``LOG(...)`` macros that flush after every line,
+    so ``--progress`` percentages reach the parent as they're
+    written). ``stderr=STDOUT`` keeps the two streams chronological
+    in the log; ``text=True`` decodes once here rather than once
+    per-write in the parent.
+
+    No PROGRESS lines are emitted from inside the OpenMVS binaries
+    themselves — they're chatty but don't expose a structured
+    progress hook upstream-side. The orchestrator emits one
+    PROGRESS at the start of each step so the parent's WS
+    subscriber sees coarse forward motion (see the milestones in
+    ``main`` below); fine-grained progress now reaches the user
+    via the streamed log tail.
     """
     _log(f"--- {name} ---")
     _log(f"$ {' '.join(cmd)}")
-    proc = subprocess.run(
+    proc = subprocess.Popen(
         cmd,
         cwd=cwd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        bufsize=1,
     )
-    if proc.stdout:
-        # Stream the captured output verbatim — preserves every
-        # OpenMVS warning / progress percentage / final stats line.
-        sys.stdout.write(proc.stdout)
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        # ``line`` includes its trailing newline; pass through
+        # verbatim. Flushing per-line is required for the parent's
+        # ``_stream_progress`` async-iter loop to see the byte
+        # without waiting on Python's default block-buffered
+        # stdout.
+        sys.stdout.write(line)
         sys.stdout.flush()
-    if proc.returncode != 0:
+    returncode = proc.wait()
+    if returncode != 0:
         raise RuntimeError(
-            f"{name} exited {proc.returncode} (cwd={cwd})"
+            f"{name} exited {returncode} (cwd={cwd})"
         )
 
 
