@@ -14,6 +14,19 @@ and commits the new section here. Until that first release PR is
 merged, the **Unreleased** section below is a hand-authored
 roll-up so a reader landing here today still has signal.
 
+## [1.2.0](https://github.com/Battleroid/mobile-gs-scan/compare/v1.1.0...v1.2.0) (2026-05-14)
+
+
+### Features
+
+* **android:** embedded Spark splat viewer (PR-D) ([aea60eb](https://github.com/Battleroid/mobile-gs-scan/commit/aea60eb0d0d5d945882cb1a536c046c628e91d4b))
+
+
+### Bug Fixes
+
+* **android:** preserve coroutine cancellation during .spz download ([41a5b08](https://github.com/Battleroid/mobile-gs-scan/commit/41a5b08c080dea80fa81b09ce6d23654c1c1268c))
+* **android:** treat failed rename as a download failure ([b04c727](https://github.com/Battleroid/mobile-gs-scan/commit/b04c727913a90ebf95c1b2fa2f59ebabee8db253))
+
 ## [1.1.0](https://github.com/Battleroid/mobile-gs-scan/compare/v1.0.1...v1.1.0) (2026-05-14)
 
 
