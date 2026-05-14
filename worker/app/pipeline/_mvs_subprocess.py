@@ -229,16 +229,50 @@ def _run_mvs(
         ],
         cwd=staging_dir,
     )
+    # OpenMVS 2.3.0's ``ReconstructMesh`` does NOT reliably write a
+    # ``.mvs`` workspace when given ``-o <name>.mvs`` — on real
+    # scenes the binary logs "Mesh saved: <N> vertices, <M>
+    # faces" and exits 0, but only a sibling ``.ply`` mesh file
+    # lands in the staging dir. The bare ``mesh_mvs.exists()``
+    # check that used to live here then mis-reported successful
+    # multi-hour runs as failures right at the finish line
+    # (field report 2026-05-14: 7feb8ade after 5m57s of mesh
+    # reconstruction). Look for any plausible output and fall
+    # through to the next step via ``--mesh-file`` when only a
+    # ``.ply`` shows up. Surface a directory listing in the
+    # final error so future drift is one log away from being
+    # diagnosed instead of another field round-trip.
+    mesh_ply: Path | None = None
     if not mesh_mvs.exists():
-        raise RuntimeError(
-            "ReconstructMesh exited 0 but produced no scene_mesh.mvs"
+        for candidate in (
+            staging_dir / "scene_mesh.ply",
+            staging_dir / "scene_dense_mesh.ply",
+        ):
+            if candidate.exists():
+                mesh_ply = candidate
+                break
+        if mesh_ply is None:
+            listing = sorted(p.name for p in staging_dir.iterdir())
+            raise RuntimeError(
+                "ReconstructMesh exited 0 but produced neither "
+                "scene_mesh.mvs nor a sibling .ply mesh; "
+                f"staging dir contents: {listing}"
+            )
+        _log(
+            f"ReconstructMesh produced {mesh_ply.name} only (no .mvs "
+            "workspace); downstream steps will use --mesh-file."
         )
 
     # 5. RefineMesh — multi-view photo-consistency refinement.
     # Skip entirely on ``mvs_refine_iters=0`` (the documented
     # opt-out for RAM-constrained hosts; the mesh remains usable
-    # without refine, just less detailed).
-    if refine_iters > 0:
+    # without refine, just less detailed). Also skip when
+    # ReconstructMesh only produced a .ply — RefineMesh requires
+    # an updated .mvs workspace as input and the dense .mvs
+    # alone doesn't carry the mesh; the cleanest path is to
+    # texture directly off the .ply via TextureMesh's
+    # ``--mesh-file`` override.
+    if refine_iters > 0 and mesh_ply is None:
         _emit(0.62, f"mvs: RefineMesh ({refine_iters} iters)")
         refined_mvs = staging_dir / "scene_refined.mvs"
         _run_step(
@@ -256,9 +290,19 @@ def _run_mvs(
                 "RefineMesh exited 0 but produced no scene_refined.mvs"
             )
         texture_in = refined_mvs
+        texture_mesh_override: Path | None = None
     else:
-        _log("RefineMesh: skipped (mvs_refine_iters=0)")
-        texture_in = mesh_mvs
+        if mesh_ply is not None:
+            _log(
+                "RefineMesh: skipped (ReconstructMesh produced .ply only; "
+                "no .mvs workspace to refine)."
+            )
+            texture_in = dense_mvs
+            texture_mesh_override = mesh_ply
+        else:
+            _log("RefineMesh: skipped (mvs_refine_iters=0)")
+            texture_in = mesh_mvs
+            texture_mesh_override = None
 
     # 6. TextureMesh — bake per-triangle UVs + atlas the input
     # frames into JPG texture pages. ``--export-type obj`` is
@@ -266,15 +310,24 @@ def _run_mvs(
     # carry UV mappings cleanly.
     _emit(0.85, f"mvs: TextureMesh ({texture_size}px)")
     final_mvs = staging_dir / "scene_textured.mvs"
+    texture_cmd = [
+        "TextureMesh",
+        str(texture_in),
+        "--texture-size", str(texture_size),
+        "--export-type", "obj",
+        "-o", str(final_mvs),
+    ]
+    # When we only have a sibling .ply from the ReconstructMesh
+    # path that didn't write a .mvs workspace, point TextureMesh
+    # at it explicitly. ``--mesh-file`` overrides the mesh stored
+    # inside the .mvs (the dense cloud workspace has none), so
+    # texturing runs against the real reconstructed geometry
+    # rather than an empty placeholder.
+    if texture_mesh_override is not None:
+        texture_cmd.extend(["--mesh-file", str(texture_mesh_override)])
     _run_step(
         "TextureMesh",
-        [
-            "TextureMesh",
-            str(texture_in),
-            "--texture-size", str(texture_size),
-            "--export-type", "obj",
-            "-o", str(final_mvs),
-        ],
+        texture_cmd,
         cwd=staging_dir,
     )
 
