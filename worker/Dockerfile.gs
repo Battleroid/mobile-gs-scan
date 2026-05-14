@@ -26,7 +26,15 @@ ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
 # Pinned to the tested combo as of early 2026:
 #   torch 2.4.1 + torchvision 0.19.1 (cu124 wheels)
 #   nerfstudio 1.1.5 (latest released)
-#   gsplat 1.4.0
+#   gsplat 1.4.0 — the 1.4 line is the first to expose 2DGS
+#     kernels (``rasterization_2dgs``) which the higher-tier
+#     mesh pipeline drives directly. Pure Apache-2.0 — none of
+#     the reference 2DGS / SuGaR / GOF repos can be vendored
+#     because every one of them inherits Inria's non-commercial
+#     Gaussian-Splatting license.
+#   xatlas 0.0.9 — UV atlas unwrap for the higher-tier texture
+#     bake. MIT, ~1 MB; only pulled in here so the standard-tier
+#     OpenMVS path remains unchanged.
 #
 # cu124 wheels run cleanly on a 12.8 toolkit (CUDA is forward-
 # compatible within 12.x), which is why the base image bump to
@@ -43,7 +51,8 @@ RUN python -m pip install --extra-index-url https://download.pytorch.org/whl/cu1
         tyro==0.9.5 \
         viser==0.2.7 \
         nerfstudio==1.1.5 \
-        gsplat==1.4.0
+        gsplat==1.4.0 \
+        xatlas==0.0.9
 
 # CUDA architectures for COLMAP + glomap below. Same arch set as
 # TORCH_CUDA_ARCH_LIST above, expressed in CMake's semicolon-list

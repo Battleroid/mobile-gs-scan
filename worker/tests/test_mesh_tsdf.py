@@ -57,10 +57,12 @@ def test_validate_mesh_params_accepts_standard_tier_now():
     assert out == {"tier": "standard"}
 
 
-def test_validate_mesh_params_rejects_higher_tier():
-    with pytest.raises(HTTPException) as exc:
-        _validate_mesh_params({"tier": "higher"})
-    assert exc.value.status_code == 422
+def test_validate_mesh_params_accepts_higher_tier_now():
+    """``higher`` was added to the active set when the 2DGS
+    backend landed. Validator must NOT 422 anymore — the broader
+    higher-tier behaviour is covered in ``test_mesh_higher.py``."""
+    out = _validate_mesh_params({"tier": "higher"})
+    assert out == {"tier": "higher"}
 
 
 def test_validate_mesh_params_rejects_unknown_tier():
@@ -253,7 +255,12 @@ def test_run_mesh_standard_tier_requires_transforms_json(tmp_path: Path):
     _run(go())
 
 
-def test_run_mesh_raises_on_higher_tier(tmp_path: Path):
+def test_run_mesh_higher_tier_requires_transforms_json(tmp_path: Path):
+    """Higher tier is now an active backend (2DGS retrain) — no
+    longer raises NotImplementedError. Like the standard tier, it
+    consumes the SfM workspace and surfaces a clean RuntimeError
+    when transforms.json is absent. Broader higher-tier coverage
+    is in test_mesh_higher.py."""
     scene_dir = tmp_path / "scene_X"
     scene_dir.mkdir()
     src_ply = scene_dir / "scene.ply"
@@ -263,7 +270,7 @@ def test_run_mesh_raises_on_higher_tier(tmp_path: Path):
         return None
 
     async def go():
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(RuntimeError, match="transforms.json"):
             await mesh_step.run_mesh(
                 scene_dir=scene_dir,
                 src_ply=src_ply,
@@ -297,27 +304,24 @@ def isolated_store(tmp_path: Path):
     asyncio.run(teardown())
 
 
-def test_trigger_rejects_persisted_inactive_tier(isolated_store):
-    """A scene whose persisted ``mesh_params.tier`` is "higher"
-    (the remaining inactive tier) must NOT queue a fresh job when
-    the incoming request omits ``tier``. Without this guard the
-    runner would dequeue the job and fail in the worker with
-    ``NotImplementedError``, polluting the pipeline list with
-    queued/failed churn — the exact case the API guard exists to
-    prevent. (``standard`` used to also be inactive; ``test_mesh_mvs``
-    covers its now-active path.)"""
+def test_trigger_rejects_persisted_unknown_tier(isolated_store):
+    """When a scene's persisted ``mesh_params.tier`` is something
+    the API doesn't recognise (forward-rolled by a future client,
+    hand-edited via direct DB access), the trigger endpoint must
+    refuse to queue the job — otherwise the runner would dequeue
+    and fail it in the worker, polluting the pipeline list with
+    queued/failed churn. All three tiers (low / standard / higher)
+    are active now, so the only way to land here is a typo /
+    unknown value; ``"bogus"`` exercises that path."""
 
     async def go():
         cap = await store.create_capture(name="t", source="upload")
         scene = await store.create_scene(cap.id)
         assert scene is not None
-        # Force the scene into a state the trigger endpoint would
-        # accept (completed) and inject a still-inactive tier into
-        # the persisted row.
         await store.update_scene(
             scene.id,
             status=CaptureStatus.completed,
-            mesh_params={"tier": "higher"},
+            mesh_params={"tier": "bogus"},
         )
 
         # Empty body — falls back to persisted mesh_params during
@@ -326,7 +330,6 @@ def test_trigger_rejects_persisted_inactive_tier(isolated_store):
         with pytest.raises(HTTPException) as exc:
             await trigger_mesh(scene.id, MeshRequest(params=None))
         assert exc.value.status_code == 422
-        assert "not yet implemented" in exc.value.detail
 
         # And no job should have queued.
         jobs = await store.list_jobs_for_scene(scene.id)
