@@ -85,5 +85,11 @@
             android:name=".JobDetailActivity"
             android:exported="false"
             android:parentActivityName=".CaptureDetailActivity" />
+
+        <activity
+            android:name=".SplatViewerActivity"
+            android:exported="false"
+            android:parentActivityName=".CaptureDetailActivity"
+            android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|smallestScreenSize" />
     </application>
 </manifest>

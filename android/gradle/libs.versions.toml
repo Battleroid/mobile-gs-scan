@@ -26,6 +26,12 @@ swiperefreshlayout = "1.1.0"
 # reuses the project's existing OkHttp dep for cache/timeout
 # behavior instead of pulling in a second HTTP client.
 coil = "2.7.0"
+# androidx.webkit ships WebViewAssetLoader, the modern shim that lets
+# the splat-viewer WebView load /android_asset/ pages + downloaded
+# .spz files through a single virtual https:// origin. That's the
+# escape hatch from `setAllowFileAccessFromFileURLs(true)`, which
+# Chromium has been removing piecemeal since API 30.
+androidxWebkit = "1.16.0"
 
 [libraries]
 core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -56,6 +62,7 @@ androidx-compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-toolin
 androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
 androidx-navigation-compose = { group = "androidx.navigation", name = "navigation-compose", version.ref = "navigationCompose" }
 coil-compose = { group = "io.coil-kt", name = "coil-compose", version.ref = "coil" }
+androidx-webkit = { group = "androidx.webkit", name = "webkit", version.ref = "androidxWebkit" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
