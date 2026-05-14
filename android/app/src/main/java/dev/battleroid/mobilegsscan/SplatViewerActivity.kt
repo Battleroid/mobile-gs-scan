@@ -47,13 +47,16 @@ import androidx.lifecycle.lifecycleScope
 import androidx.webkit.WebViewAssetLoader
 import dev.battleroid.mobilegsscan.ui.theme.PebbleTheme
 import dev.battleroid.mobilegsscan.ui.theme.pebble
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.coroutineContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -177,63 +180,76 @@ class SplatViewerActivity : ComponentActivity() {
 
         if (!cached.exists() || cached.length() == 0L) {
             val ok = withContext(Dispatchers.IO) {
-                runCatching {
-                    http.newCall(Request.Builder().url(url).build())
-                        .execute()
-                        .use { res ->
-                            if (!res.isSuccessful) {
-                                error("HTTP ${res.code}")
-                            }
-                            val body = res.body ?: error("empty body")
-                            val tmp = File(cacheDir, "$sceneId.spz.part")
-                            body.byteStream().use { input ->
-                                tmp.outputStream().use { output ->
-                                    val total = body.contentLength()
-                                    val buf = ByteArray(64 * 1024)
-                                    var read: Int
-                                    var done = 0L
-                                    while (input.read(buf).also { read = it } > 0) {
-                                        output.write(buf, 0, read)
-                                        done += read
-                                        if (total > 0) {
-                                            val p = (done.toDouble() / total)
-                                                .coerceIn(0.0, 1.0)
-                                            state.update {
-                                                SplatViewerUiState.Loading(
-                                                    progress = p.toFloat(),
-                                                )
-                                            }
+                val call = http.newCall(Request.Builder().url(url).build())
+                // Hook OkHttp's cancellation to the surrounding
+                // coroutine job. ``call.execute()`` is a blocking I/O
+                // call that the IO dispatcher won't interrupt on
+                // structured cancellation by itself, so back-press
+                // would otherwise leave the download running until
+                // the request body finished arriving (or the read
+                // timeout elapsed). ``invokeOnCompletion`` fires
+                // once the job terminates for any reason; calling
+                // ``call.cancel()`` on an already-completed Call is
+                // a no-op so the "happy path" overhead is zero.
+                coroutineContext[Job]?.invokeOnCompletion { call.cancel() }
+                try {
+                    call.execute().use { res ->
+                        if (!res.isSuccessful) {
+                            error("HTTP ${res.code}")
+                        }
+                        val body = res.body ?: error("empty body")
+                        val tmp = File(cacheDir, "$sceneId.spz.part")
+                        body.byteStream().use { input ->
+                            tmp.outputStream().use { output ->
+                                val total = body.contentLength()
+                                val buf = ByteArray(64 * 1024)
+                                var read: Int
+                                var done = 0L
+                                while (input.read(buf).also { read = it } > 0) {
+                                    output.write(buf, 0, read)
+                                    done += read
+                                    if (total > 0) {
+                                        val p = (done.toDouble() / total)
+                                            .coerceIn(0.0, 1.0)
+                                        state.update {
+                                            SplatViewerUiState.Loading(
+                                                progress = p.toFloat(),
+                                            )
                                         }
                                     }
                                 }
                             }
-                            // Atomic publish — Chromium watches the
-                            // destination file and would otherwise
-                            // race the download. ``renameTo`` returns
-                            // false on filesystem errors (target
-                            // locked, cross-volume on weird OEMs,
-                            // permission flap); without the explicit
-                            // check the activity would happily switch
-                            // to Ready and have the WebView 404 on
-                            // /splats/<id>.spz, leaving the user with
-                            // a permanently broken cache entry
-                            // (because next open also short-circuits
-                            // on a non-existent file and only retries
-                            // the download — but if a stale truncated
-                            // copy survives, that re-download path
-                            // skips it entirely thanks to the
-                            // ``exists() || length() == 0L`` guard).
-                            // Treat a failed rename as a download
-                            // failure: clean up the .part file and
-                            // raise so the runCatching path surfaces
-                            // a UI error.
-                            if (!tmp.renameTo(cached)) {
-                                tmp.delete()
-                                error("rename to ${cached.name} failed")
-                            }
                         }
+                        // Atomic publish — Chromium watches the
+                        // destination file and would otherwise race
+                        // the download. ``renameTo`` returns false
+                        // on filesystem errors (target locked,
+                        // cross-volume on weird OEMs, permission
+                        // flap); without the explicit check the
+                        // activity would happily switch to Ready and
+                        // have the WebView 404 on /splats/<id>.spz,
+                        // leaving the user with a permanently
+                        // broken cache entry (because next open also
+                        // short-circuits on the ``exists() ||
+                        // length() == 0L`` guard).
+                        if (!tmp.renameTo(cached)) {
+                            tmp.delete()
+                            error("rename to ${cached.name} failed")
+                        }
+                    }
                     true
-                }.getOrElse { e ->
+                } catch (ce: CancellationException) {
+                    // Back-press or activity finish() cancelled the
+                    // surrounding lifecycleScope; structured
+                    // cancellation must propagate so the dispatcher
+                    // unwinds the coroutine cleanly. The
+                    // invokeOnCompletion hook above already aborted
+                    // the OkHttp Call, but rethrow so any callers up
+                    // the chain (none today, but defensively) also
+                    // see the cancel rather than a fake "download
+                    // failed" UI state.
+                    throw ce
+                } catch (e: Throwable) {
                     state.update {
                         SplatViewerUiState.Failed(
                             message = e.message ?: "download failed",
