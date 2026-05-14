@@ -169,6 +169,24 @@ async def retry_job_endpoint(job_id: str) -> dict:
             409,
             f"only failed/canceled jobs can be retried (this one is {job.status.value})",
         )
+    # The original terminal row stays retriable, so a double-click on
+    # the web button — or two clients racing — would otherwise enqueue
+    # parallel runs of the same kind for the same scene. They'd then
+    # race on shared artifact paths (sfm/, train/, export/, etc.) with
+    # nondeterministic results. Refuse the retry if any in-flight job
+    # of the same kind already exists for the scene; the caller can
+    # cancel that one first if they really want a fresh run.
+    in_flight = (JobStatus.queued, JobStatus.claimed, JobStatus.running)
+    existing = [
+        j
+        for j in await store.list_jobs_for_scene(job.scene_id)
+        if j.kind == job.kind and j.status in in_flight
+    ]
+    if existing:
+        raise HTTPException(
+            409,
+            f"a {job.kind.value} job is already {existing[0].status.value} for this scene",
+        )
     new_job = await store.enqueue_job(
         job.scene_id, job.kind, payload=job.payload or {},
     )

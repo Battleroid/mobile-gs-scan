@@ -50,7 +50,7 @@ export default function CaptureDetailPage({ params }: PageProps) {
   const capture = live ?? initial ?? null;
 
   const sceneId = capture?.scene_id ?? null;
-  const { scene, editProgress, lastEditResult, meshProgress } =
+  const { scene, editProgress, lastEditResult, meshProgress, refresh: refreshScene } =
     useSceneEvents(sceneId);
 
   const [deleting, setDeleting] = useState(false);
@@ -164,7 +164,7 @@ export default function CaptureDetailPage({ params }: PageProps) {
       />
 
       <div className="mt-6">
-        <PipelineCard capture={capture} scene={scene} />
+        <PipelineCard capture={capture} scene={scene} onRetried={refreshScene} />
       </div>
 
       {scene &&
@@ -375,9 +375,11 @@ function ViewerPanel({
 function PipelineCard({
   capture: _capture,
   scene,
+  onRetried,
 }: {
   capture: Capture;
   scene: Scene | null;
+  onRetried: () => void;
 }) {
   const jobs = scene?.jobs ?? [];
   const completed = jobs.filter((j) => j.status === "completed").length;
@@ -396,13 +398,13 @@ function PipelineCard({
         </p>
       )}
       {jobs.map((j) => (
-        <PipelineJobRow key={j.id} job={j} />
+        <PipelineJobRow key={j.id} job={j} onRetried={onRetried} />
       ))}
     </div>
   );
 }
 
-function PipelineJobRow({ job }: { job: Job }) {
+function PipelineJobRow({ job, onRetried }: { job: Job; onRetried: () => void }) {
   const cancelable =
     job.status === "queued" ||
     job.status === "claimed" ||
@@ -439,6 +441,10 @@ function PipelineJobRow({ job }: { job: Job }) {
     setRetrying(true);
     try {
       await api.retryJob(job.id);
+      // The new job has a fresh id that wasn't in the WS-snapshot's
+      // jobs list, so no per-job events will reach this page until
+      // the snapshot is re-fetched.
+      onRetried();
     } catch (err) {
       window.alert(`retry failed: ${(err as Error).message}`);
     } finally {
