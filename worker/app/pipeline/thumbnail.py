@@ -304,14 +304,25 @@ def _camera_for_ply(src_ply: Path) -> list[float]:
     return _look_at(eye, target, up=(0.0, 1.0, 0.0))
 
 
-def _ply_bbox(src_ply: Path) -> tuple[tuple[float, float, float], float]:
+def _ply_bbox(
+    src_ply: Path,
+    *,
+    percentile_low: float = 5.0,
+    percentile_high: float = 95.0,
+) -> tuple[tuple[float, float, float], float]:
     """Return (centroid, max half-extent) of the .ply positions.
 
     Uses plyfile (already a worker dep for the filter pipeline) so
-    we don't pull in another reader. The 5th/95th-percentile bbox
+    we don't pull in another reader. The robust percentile bbox
     drops outlier gaussians that often sit far from the subject in
     splatfacto outputs — without it, a single floater can make the
     camera frame the empty space around the actual scene instead.
+
+    Defaults are 5/95 — same as the original orbit/thumbnail call
+    that needs to frame the subject permissively. The TSDF mesh
+    subprocess passes tighter percentiles (10/90 by default) so
+    the dome camera path and the depth-integration cap both ignore
+    edge floaters more aggressively.
     """
     from plyfile import PlyData
     import numpy as np
@@ -324,8 +335,8 @@ def _ply_bbox(src_ply: Path) -> tuple[tuple[float, float, float], float]:
     if xs.size == 0:
         return (0.0, 0.0, 0.0), 1.0
     pts = np.stack([xs, ys, zs], axis=-1)
-    lo = np.percentile(pts, 5, axis=0)
-    hi = np.percentile(pts, 95, axis=0)
+    lo = np.percentile(pts, percentile_low, axis=0)
+    hi = np.percentile(pts, percentile_high, axis=0)
     cx, cy, cz = ((lo + hi) * 0.5).tolist()
     half = float(((hi - lo) * 0.5).max())
     return (float(cx), float(cy), float(cz)), max(half, 0.1)

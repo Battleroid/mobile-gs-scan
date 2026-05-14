@@ -646,7 +646,30 @@ async def _run_mesh(*, job: Job, scene: Scene, settings: Settings) -> None:
     # SplatViewer renders from; the mesh is necessarily a
     # surface-from-points reconstruction, not a re-rendered
     # Gaussian model.
-    src_ply = scene.ply_path
+    #
+    # If the user has applied a filter recipe (cleanup, bbox crop,
+    # etc.) the scene's ``edited_ply_path`` holds that result. The
+    # low tier picks it up when ``mesh_params.use_edited_splat`` is
+    # truthy (the default in the UI) so the mesh inherits the
+    # cleanup; without this the mesh re-introduces the floaters the
+    # user just removed (the source of the "bubble with floating
+    # geometry" reproduced in QA).
+    #
+    # Require the edited file to also exist on disk — a stored DB
+    # path can outlive the file (manual cleanup, container volume
+    # reset, partial restore) and we don't want this preference to
+    # turn into a regression that fails mesh extraction on a scene
+    # whose raw ``ply_path`` is still perfectly valid. Fall back
+    # silently to ``scene.ply_path`` when the edited file is gone.
+    params = scene.mesh_params or {}
+    want_edited = bool(params.get("use_edited_splat", True))
+    edited_path = scene.edited_ply_path
+    use_edited = (
+        want_edited
+        and bool(edited_path)
+        and Path(edited_path).exists()
+    )
+    src_ply = edited_path if use_edited else scene.ply_path
     if not src_ply or not Path(src_ply).exists():
         msg = "scene has no .ply to mesh; export step hasn't completed yet"
         await store.update_scene(
@@ -654,8 +677,16 @@ async def _run_mesh(*, job: Job, scene: Scene, settings: Settings) -> None:
         )
         await events.publish_scene(scene.id, "scene.mesh_failed", error=msg)
         raise RuntimeError(msg)
-
-    params = scene.mesh_params or {}
+    if want_edited and edited_path and not use_edited:
+        # The user asked for the edited splat but the file's gone.
+        # Surface this in the job log via the runner's normal log
+        # piping so an operator can investigate without having to
+        # re-derive the fallback from the DB state.
+        log.info(
+            "mesh job %s: edited PLY at %s missing on disk; "
+            "falling back to raw scene.ply_path",
+            job.id, edited_path,
+        )
 
     await store.update_scene(scene.id, mesh_status=MeshStatus.running, mesh_error=None)
     await events.publish_scene(scene.id, "scene.mesh_running")

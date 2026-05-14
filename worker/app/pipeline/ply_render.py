@@ -176,9 +176,9 @@ def render_one_rgbd(
     width: int,
     height: int,
 ):
-    """Render a single frame producing aligned RGB + depth.
+    """Render a single frame producing aligned RGB + depth + alpha.
 
-    Returns ``(rgb_uint8, depth_float32)``:
+    Returns ``(rgb_uint8, depth_float32, alpha_float32)``:
       * ``rgb_uint8`` — ``(H, W, 3)`` uint8 in [0, 255], same shape +
         convention as ``render_one``.
       * ``depth_float32`` — ``(H, W)`` float32 in scene units. Each
@@ -186,13 +186,19 @@ def render_one_rgbd(
         ``ED`` mode) — well-defined at silhouette edges, no NaNs,
         zero where no gaussians integrate. Suitable as a depth
         channel for ``o3d.geometry.RGBDImage.create_from_color_and_depth``.
+      * ``alpha_float32`` — ``(H, W)`` float32 in [0, 1]. The total
+        accumulated opacity along each ray. Callers can use this as
+        a depth-validity gate: pixels with low alpha (background /
+        empty space) carry an averaged depth that's not a real
+        surface, so a TSDF integrator should treat them as missing
+        rather than fusing the average into a phantom surface.
 
     Uses ``rasterization(..., render_mode="RGB+ED")`` which returns a
     ``(B, H, W, 4)`` tensor in a single forward pass — the 4th
-    channel is the expected depth. Falls back to two separate passes
-    (``RGB`` + ``ED``) if the combined mode rejects the kwarg on the
-    installed gsplat version. The two-pass path roughly doubles the
-    cost but keeps the contract identical.
+    channel is the expected depth. Alphas come from the separate
+    return value the rasterizer already produces. Falls back to two
+    separate passes (``RGB`` + ``ED``) if the combined mode rejects
+    the kwarg on the installed gsplat version.
 
     Why "ED" and not "D": gsplat's bare ``D`` mode is alpha-weighted
     accumulated depth (Σ αᵢ zᵢ) which underestimates at silhouette
@@ -236,7 +242,7 @@ def render_one_rgbd(
         sh_degree=None,
     )
     try:
-        render_colors, _alphas, _meta = rasterization(
+        render_colors, alphas, _meta = rasterization(
             **kwargs, render_mode="RGB+ED",
         )
         # Combined mode: (1, H, W, 4) — RGB in [:, :, :, :3], ED in
@@ -247,14 +253,78 @@ def render_one_rgbd(
         # Older gsplat versions might not accept ``render_mode``;
         # fall back to two passes. Same kwargs, no render_mode for
         # RGB; explicit render_mode="ED" for depth.
-        rgb_only, _a, _m = rasterization(**kwargs)
+        rgb_only, alphas, _m = rasterization(**kwargs)
         depth_only, _a2, _m2 = rasterization(**kwargs, render_mode="ED")
         rgb_t = rgb_only[0].clamp(0.0, 1.0)
         depth_t = depth_only[0, :, :, 0] if depth_only.ndim == 4 else depth_only[0]
 
+    # ``alphas`` shape varies across gsplat versions: (1, H, W, 1) on
+    # the canonical path, (1, H, W) on older releases. Squeeze the
+    # singleton channel + take the first batch element so the caller
+    # always sees a 2D ndarray.
+    alpha_t = alphas[0]
+    while alpha_t.ndim > 2:
+        alpha_t = alpha_t.squeeze(-1)
+
     rgb = (rgb_t * 255.0).to(torch.uint8).cpu().numpy()
     depth = depth_t.to(torch.float32).cpu().numpy().astype(np.float32, copy=False)
-    return rgb, depth
+    alpha = alpha_t.to(torch.float32).clamp(0.0, 1.0).cpu().numpy().astype(np.float32, copy=False)
+    return rgb, depth, alpha
+
+
+def filter_gaussians(
+    prepared,
+    *,
+    opacity_min: float,
+    scale_max_pct: float,
+):
+    """Return a new ``prepared`` dict with low-opacity and oversized
+    gaussians dropped. Used by the TSDF mesh subprocess to clean
+    up training floaters before the depth-render pass — those
+    floaters are the primary source of the "bubble" mesh artifact
+    when TSDF integrates depth from a noisy splat.
+
+    Filters:
+      * Drop gaussians with ``opacity < opacity_min`` (post-sigmoid;
+        the input is already sigmoid-ed by ``prepare_scene``).
+        Default ``0.05`` matches the threshold the splat editor
+        treats as "background noise".
+      * Drop gaussians whose largest scale axis exceeds the given
+        percentile of the population. ``scale_max_pct=95`` keeps
+        the bottom 95% by max-axis-scale and drops the top 5% —
+        which are typically the wildly-stretched "sheet" gaussians
+        that train weakly and produce smeared depth.
+
+    Returns a NEW dict (the original ``prepared`` is untouched).
+    Both filters fall through to the unmodified scene when the
+    threshold doesn't drop anything.
+    """
+    import torch
+
+    means = prepared["means"]
+    if means.shape[0] == 0:
+        return prepared
+
+    # Opacity filter.
+    keep = prepared["opacities"] >= float(opacity_min)
+    # Scale filter (top-percentile drop on the largest axis).
+    if 0.0 < scale_max_pct < 100.0:
+        max_axis = prepared["scales"].max(dim=-1).values
+        # ``torch.quantile`` accepts a fraction in [0, 1].
+        q = torch.quantile(max_axis, float(scale_max_pct) / 100.0)
+        keep = keep & (max_axis <= q)
+
+    if bool(keep.all()):
+        return prepared
+
+    return {
+        **prepared,
+        "means": prepared["means"][keep],
+        "quats": prepared["quats"][keep],
+        "scales": prepared["scales"][keep],
+        "opacities": prepared["opacities"][keep],
+        "rgb": prepared["rgb"][keep],
+    }
 
 
 def opencv_extrinsic_from_opengl(c2w_opengl: Sequence[float]):

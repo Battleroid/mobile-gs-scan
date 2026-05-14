@@ -154,6 +154,76 @@ def test_validate_mesh_params_accepts_legacy_poisson_keys_silently():
     assert out["tier"] == "low"
 
 
+# ─── validation: TSDF quality knobs ──────────────────────────
+
+
+def test_validate_mesh_params_accepts_full_quality_knob_set():
+    out = _validate_mesh_params({
+        "use_edited_splat": False,
+        "alpha_min": 0.3,
+        "bbox_percentile_low": 5,
+        "bbox_percentile_high": 95,
+        "floater_opacity_min": 0.1,
+        "floater_scale_max_pct": 90,
+    })
+    assert out["use_edited_splat"] is False
+    assert out["alpha_min"] == pytest.approx(0.3)
+    assert out["bbox_percentile_low"] == pytest.approx(5.0)
+    assert out["bbox_percentile_high"] == pytest.approx(95.0)
+    assert out["floater_opacity_min"] == pytest.approx(0.1)
+    assert out["floater_scale_max_pct"] == pytest.approx(90.0)
+
+
+@pytest.mark.parametrize("bad", [-0.1, 1.5, True, "0.5"])
+def test_validate_mesh_params_rejects_bad_alpha_min(bad):
+    with pytest.raises(HTTPException) as exc:
+        _validate_mesh_params({"alpha_min": bad})
+    assert exc.value.status_code == 422
+
+
+def test_validate_mesh_params_rejects_inverted_bbox_percentiles():
+    """low >= high makes no sense; the validator must 422 rather
+    than letting the worker compute an empty / negative bbox."""
+    with pytest.raises(HTTPException) as exc:
+        _validate_mesh_params({
+            "bbox_percentile_low": 60,
+            "bbox_percentile_high": 60,
+        })
+    assert exc.value.status_code == 422
+    with pytest.raises(HTTPException):
+        _validate_mesh_params({
+            "bbox_percentile_low": 75,
+            "bbox_percentile_high": 25,
+        })
+
+
+@pytest.mark.parametrize("bad", [-1, 101, True, "0"])
+def test_validate_mesh_params_rejects_bad_bbox_percentile_low(bad):
+    with pytest.raises(HTTPException) as exc:
+        _validate_mesh_params({"bbox_percentile_low": bad})
+    assert exc.value.status_code == 422
+
+
+@pytest.mark.parametrize("bad", [-0.5, 2.0, True, "0.05"])
+def test_validate_mesh_params_rejects_bad_floater_opacity_min(bad):
+    with pytest.raises(HTTPException) as exc:
+        _validate_mesh_params({"floater_opacity_min": bad})
+    assert exc.value.status_code == 422
+
+
+@pytest.mark.parametrize("bad", [-1, 200, True, "95"])
+def test_validate_mesh_params_rejects_bad_floater_scale_max_pct(bad):
+    with pytest.raises(HTTPException) as exc:
+        _validate_mesh_params({"floater_scale_max_pct": bad})
+    assert exc.value.status_code == 422
+
+
+def test_validate_mesh_params_rejects_non_bool_use_edited_splat():
+    with pytest.raises(HTTPException) as exc:
+        _validate_mesh_params({"use_edited_splat": "yes"})
+    assert exc.value.status_code == 422
+
+
 # ─── dispatch: NotImplementedError on inactive tiers ─────────
 
 

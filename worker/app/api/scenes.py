@@ -737,6 +737,55 @@ def _validate_mesh_params(raw: dict | None) -> dict:
                 422, "mvs_refine_iters must be an integer in [0, 4]",
             )
         out["mvs_refine_iters"] = v
+    # ─── low-tier (TSDF) quality knobs ─────────────────────────
+    if "use_edited_splat" in raw:
+        v = raw["use_edited_splat"]
+        if not isinstance(v, bool):
+            raise HTTPException(422, "use_edited_splat must be a boolean")
+        out["use_edited_splat"] = v
+    if "alpha_min" in raw:
+        v = raw["alpha_min"]
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise HTTPException(422, "alpha_min must be a number")
+        if v < 0 or v > 1:
+            raise HTTPException(422, "alpha_min must be in [0, 1]")
+        out["alpha_min"] = float(v)
+    if "bbox_percentile_low" in raw or "bbox_percentile_high" in raw:
+        lo_v = raw.get("bbox_percentile_low", 10.0)
+        hi_v = raw.get("bbox_percentile_high", 90.0)
+        for label, val in (
+            ("bbox_percentile_low", lo_v),
+            ("bbox_percentile_high", hi_v),
+        ):
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                raise HTTPException(422, f"{label} must be a number")
+            if val < 0 or val > 100:
+                raise HTTPException(422, f"{label} must be in [0, 100]")
+        if float(lo_v) >= float(hi_v):
+            raise HTTPException(
+                422,
+                "bbox_percentile_low must be strictly less than bbox_percentile_high",
+            )
+        if "bbox_percentile_low" in raw:
+            out["bbox_percentile_low"] = float(lo_v)
+        if "bbox_percentile_high" in raw:
+            out["bbox_percentile_high"] = float(hi_v)
+    if "floater_opacity_min" in raw:
+        v = raw["floater_opacity_min"]
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise HTTPException(422, "floater_opacity_min must be a number")
+        if v < 0 or v > 1:
+            raise HTTPException(422, "floater_opacity_min must be in [0, 1]")
+        out["floater_opacity_min"] = float(v)
+    if "floater_scale_max_pct" in raw:
+        v = raw["floater_scale_max_pct"]
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise HTTPException(422, "floater_scale_max_pct must be a number")
+        if v < 0 or v > 100:
+            raise HTTPException(
+                422, "floater_scale_max_pct must be in [0, 100]",
+            )
+        out["floater_scale_max_pct"] = float(v)
     return out
 
 
