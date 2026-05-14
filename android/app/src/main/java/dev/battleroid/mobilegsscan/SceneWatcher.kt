@@ -82,6 +82,16 @@ object SceneWatcher {
     )
 
     private val watching = ConcurrentHashMap<String, Job>()
+    // Serializes the read-modify-write cycle on ``KEY_PENDING``.
+    // SharedPreferences itself is thread-safe per-op, but
+    // ``persist`` / ``clearPersisted`` each do a load → mutate →
+    // write sequence; two scene coroutines firing into that
+    // around the same time (one completes and clears while
+    // another upload starts and persists) would race the final
+    // ``apply()`` and silently drop one of the entries.
+    // ``restorePending`` would then miss the dropped scene on
+    // the next process start and never deliver its notification.
+    private val persistLock = Any()
 
     fun watch(
         ctx: Context,
@@ -309,21 +319,25 @@ object SceneWatcher {
     }
 
     private fun persist(ctx: Context, sceneId: String, p: Pending) {
-        val prefs = ctx.applicationContext.getSharedPreferences(
-            PREFS_FILE, Context.MODE_PRIVATE,
-        )
-        val current = loadPersisted(ctx).toMutableMap()
-        current[sceneId] = p
-        prefs.edit().putString(KEY_PENDING, encode(current)).apply()
+        synchronized(persistLock) {
+            val prefs = ctx.applicationContext.getSharedPreferences(
+                PREFS_FILE, Context.MODE_PRIVATE,
+            )
+            val current = loadPersisted(ctx).toMutableMap()
+            current[sceneId] = p
+            prefs.edit().putString(KEY_PENDING, encode(current)).apply()
+        }
     }
 
     private fun clearPersisted(ctx: Context, sceneId: String) {
-        val prefs = ctx.applicationContext.getSharedPreferences(
-            PREFS_FILE, Context.MODE_PRIVATE,
-        )
-        val current = loadPersisted(ctx).toMutableMap()
-        if (current.remove(sceneId) != null) {
-            prefs.edit().putString(KEY_PENDING, encode(current)).apply()
+        synchronized(persistLock) {
+            val prefs = ctx.applicationContext.getSharedPreferences(
+                PREFS_FILE, Context.MODE_PRIVATE,
+            )
+            val current = loadPersisted(ctx).toMutableMap()
+            if (current.remove(sceneId) != null) {
+                prefs.edit().putString(KEY_PENDING, encode(current)).apply()
+            }
         }
     }
 
