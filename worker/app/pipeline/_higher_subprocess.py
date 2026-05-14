@@ -416,25 +416,37 @@ def _dome_render_and_tsdf(*, prepared, centroid, extent, params):
                 height=_DOME_H,
             )
         ret = list(render)
-        # render_2dgs returns expected-depth at index ~4 (after
-        # alphas + normals). The shape varies; pull the first
-        # 1-channel HxW tensor we can find past index 0.
+        # gsplat 1.4.x ``rasterization_2dgs`` documented return
+        # order (verified against the gsplat 1.4 release notes and
+        # the rendering.py source):
+        #     (render_rgb, alphas, normals, normals_from_depth,
+        #      render_distort, render_median, meta)
+        # ``render_median`` (index 5) is the per-pixel median ray
+        # depth and is the channel TSDF wants. Indexing by
+        # position (rather than a first-match-on-shape scan)
+        # prevents picking up ``alphas`` (index 1, also a
+        # single-channel HxW tensor) which would feed opacity
+        # values into the TSDF as metric depth and produce
+        # severely distorted or empty meshes.
+        #
+        # The defensive fallback handles patch versions where the
+        # tuple gets reshuffled — we still need a depth signal to
+        # integrate, so we delegate to ``ply_render.render_one_rgbd``
+        # (3DGS expected-depth) rather than try to guess at a
+        # 2DGS-flavoured one. Quality drops to "low-tier-like" on
+        # the affected views, but the mesh still extracts.
         rgb_t = ret[0]
         if rgb_t.ndim == 4:
             rgb_t = rgb_t[0]
         depth_t = None
-        for cand in ret[1:]:
-            if torch.is_tensor(cand) and cand.ndim >= 3:
-                # Squeeze to (H, W) — pick the last single-channel
-                # HxW or HxWx1 / 1xHxW reasonable candidate.
-                sq = cand
-                if sq.ndim == 4:
-                    sq = sq[0]
-                if sq.ndim == 3 and sq.shape[-1] == 1:
-                    sq = sq[..., 0]
-                if sq.ndim == 2 and sq.shape == (_DOME_H, _DOME_W):
-                    depth_t = sq
-                    break
+        if len(ret) >= 6 and torch.is_tensor(ret[5]):
+            cand = ret[5]
+            if cand.ndim == 4:
+                cand = cand[0]
+            if cand.ndim == 3 and cand.shape[-1] == 1:
+                cand = cand[..., 0]
+            if cand.ndim == 2 and cand.shape == (_DOME_H, _DOME_W):
+                depth_t = cand
         if depth_t is None:
             _log("WARN: dome render produced no depth channel; "
                  "falling back to 3DGS expected-depth")
