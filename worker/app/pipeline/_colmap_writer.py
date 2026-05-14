@@ -43,11 +43,13 @@ def write_colmap_text(
     at ``out_dir``.
 
     ``out_dir`` must be a writable directory; the writer creates
-    ``cameras.txt``, ``images.txt``, ``points3D.txt`` directly
-    under it and an ``images/`` symlink tree containing each frame
-    referenced by ``transforms.json`` (resolved against
-    ``images_src_dir``, which is typically the scene's
-    ``sfm/images/`` symlink-to-capture-frames directory).
+    ``sparse/cameras.txt``, ``sparse/images.txt``,
+    ``sparse/points3D.txt`` (OpenMVS's ``InterfaceCOLMAP`` reads
+    the model from ``<workspace>/sparse/``, not the workspace
+    root) and an ``images/`` symlink tree at the workspace root
+    containing each frame referenced by ``transforms.json``
+    (resolved against ``images_src_dir``, which is typically the
+    scene's ``sfm/images/`` symlink-to-capture-frames directory).
 
     Returns a dict ``{"n_cameras": int, "n_images": int}`` for the
     caller's log line.
@@ -86,6 +88,17 @@ def write_colmap_text(
         params = f"{fx} {fy} {cx} {cy}"
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    # COLMAP / OpenMVS expect the sparse model under a ``sparse/``
+    # subdir of the workspace, not the workspace root. OpenMVS's
+    # ``InterfaceCOLMAP`` probes ``<workspace>/sparse/cameras.txt``
+    # (then ``.bin``) and exits 1 if neither resolves. Writing the
+    # three model files directly under ``out_dir`` produced a
+    # workspace that looked valid (the per-step log read "colmap
+    # workspace: 1 cameras, N images") but the very next OpenMVS
+    # invocation always failed with "unable to open file
+    # '.../colmap/sparse/cameras.txt'".
+    sparse_dir = out_dir / "sparse"
+    sparse_dir.mkdir(exist_ok=True)
     images_link_dir = out_dir / "images"
     images_link_dir.mkdir(exist_ok=True)
 
@@ -98,7 +111,7 @@ def write_colmap_text(
         "# Number of cameras: 1",
         f"1 {model} {width} {height} {params}",
     ]
-    (out_dir / "cameras.txt").write_text("\n".join(cam_lines) + "\n")
+    (sparse_dir / "cameras.txt").write_text("\n".join(cam_lines) + "\n")
 
     # images.txt — two text lines per image (pose + observations).
     img_lines = [
@@ -139,7 +152,7 @@ def write_colmap_text(
         # Empty observations line — OpenMVS doesn't require linked
         # 2D features.
         img_lines.append("")
-    (out_dir / "images.txt").write_text("\n".join(img_lines) + "\n")
+    (sparse_dir / "images.txt").write_text("\n".join(img_lines) + "\n")
 
     # points3D.txt — header only.
     pts_lines = [
@@ -147,7 +160,7 @@ def write_colmap_text(
         "#   POINT3D_ID, X, Y, Z, R, G, B, ERROR, TRACK[] as (IMAGE_ID, POINT2D_IDX)",
         "# Number of points: 0",
     ]
-    (out_dir / "points3D.txt").write_text("\n".join(pts_lines) + "\n")
+    (sparse_dir / "points3D.txt").write_text("\n".join(pts_lines) + "\n")
 
     return {"n_cameras": 1, "n_images": len(frames)}
 
