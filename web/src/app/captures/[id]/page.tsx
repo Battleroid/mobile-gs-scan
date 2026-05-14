@@ -50,7 +50,7 @@ export default function CaptureDetailPage({ params }: PageProps) {
   const capture = live ?? initial ?? null;
 
   const sceneId = capture?.scene_id ?? null;
-  const { scene, editProgress, lastEditResult, meshProgress } =
+  const { scene, editProgress, lastEditResult, meshProgress, refresh: refreshScene } =
     useSceneEvents(sceneId);
 
   const [deleting, setDeleting] = useState(false);
@@ -164,7 +164,7 @@ export default function CaptureDetailPage({ params }: PageProps) {
       />
 
       <div className="mt-6">
-        <PipelineCard capture={capture} scene={scene} />
+        <PipelineCard capture={capture} scene={scene} onRetried={refreshScene} />
       </div>
 
       {scene &&
@@ -375,9 +375,11 @@ function ViewerPanel({
 function PipelineCard({
   capture: _capture,
   scene,
+  onRetried,
 }: {
   capture: Capture;
   scene: Scene | null;
+  onRetried: () => void;
 }) {
   const jobs = scene?.jobs ?? [];
   const completed = jobs.filter((j) => j.status === "completed").length;
@@ -396,18 +398,24 @@ function PipelineCard({
         </p>
       )}
       {jobs.map((j) => (
-        <PipelineJobRow key={j.id} job={j} />
+        <PipelineJobRow key={j.id} job={j} onRetried={onRetried} />
       ))}
     </div>
   );
 }
 
-function PipelineJobRow({ job }: { job: Job }) {
+function PipelineJobRow({ job, onRetried }: { job: Job; onRetried: () => void }) {
   const cancelable =
     job.status === "queued" ||
     job.status === "claimed" ||
     job.status === "running";
   const [cancelling, setCancelling] = useState(false);
+  // Retry is offered on terminal-non-success rows. Server enforces
+  // the same gate (409 otherwise), but mirroring it on the client
+  // keeps the button out of the disabled-but-clickable trap.
+  const retryable =
+    job.status === "failed" || job.status === "canceled";
+  const [retrying, setRetrying] = useState(false);
   const dot =
     job.status === "completed"
       ? "bg-accent3"
@@ -426,6 +434,21 @@ function PipelineJobRow({ job }: { job: Job }) {
       window.alert(`cancel failed: ${(err as Error).message}`);
     } finally {
       setCancelling(false);
+    }
+  };
+
+  const onRetry = async () => {
+    setRetrying(true);
+    try {
+      await api.retryJob(job.id);
+      // The new job has a fresh id that wasn't in the WS-snapshot's
+      // jobs list, so no per-job events will reach this page until
+      // the snapshot is re-fetched.
+      onRetried();
+    } catch (err) {
+      window.alert(`retry failed: ${(err as Error).message}`);
+    } finally {
+      setRetrying(false);
     }
   };
 
@@ -456,6 +479,16 @@ function PipelineJobRow({ job }: { job: Job }) {
               className="font-mono text-[11px] text-danger underline hover:text-fg disabled:opacity-50"
             >
               {cancelling ? "…" : "cancel"}
+            </button>
+          )}
+          {retryable && (
+            <button
+              type="button"
+              onClick={onRetry}
+              disabled={retrying}
+              className="font-mono text-[11px] text-accent underline hover:text-fg disabled:opacity-50"
+            >
+              {retrying ? "…" : "retry"}
             </button>
           )}
         </div>

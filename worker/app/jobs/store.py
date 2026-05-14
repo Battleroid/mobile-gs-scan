@@ -508,6 +508,112 @@ async def enqueue_job(
         return await s.get(Job, job_id)
 
 
+async def enqueue_retry_job(
+    scene_id: str, kind: JobKind, payload: dict | None = None
+) -> tuple[Job | None, str]:
+    """Atomic retry-enqueue: insert only when no in-flight job of the
+    same ``(scene_id, kind)`` already exists.
+
+    Mirrors ``enqueue_job``'s ``INSERT ... SELECT ... WHERE EXISTS``
+    pattern but adds a ``NOT EXISTS`` clause on the in-flight set so
+    the existence check + insert run inside a single statement.
+    SQLite's single-writer lock then serializes concurrent retry
+    requests; the loser's INSERT sees the winner's row and writes
+    zero rows.
+
+    "In-flight" matches ``delete_terminal_jobs_of_kind``'s inverse:
+    ``queued`` / ``claimed`` / ``running`` rows, plus ``canceled``
+    rows where a worker claimed the row but hasn't yet acked the
+    cancel (``claimed_by IS NOT NULL AND completed_at IS NULL``).
+    The canceled-but-unacked window matters because
+    ``POST /api/jobs/{id}/cancel`` flips status to ``canceled``
+    synchronously but the worker only SIGKILLs the subprocess on its
+    next heartbeat (~5s); a retry slipped into that window would
+    enqueue a new job whose dispatch could race the still-executing
+    subprocess on shared artifact paths. The worker's
+    ``_ack_user_cancel`` sets ``completed_at`` once it's killed the
+    subprocess and unregistered it, which is the moment retry
+    becomes safe.
+
+    Gating on ``claimed_by IS NOT NULL`` keeps the retry path
+    usable for queued-then-canceled rows: ``cancel_job`` only flips
+    ``status`` / ``updated_at`` and never touches ``completed_at``,
+    so a never-claimed cancel would otherwise keep
+    ``completed_at=NULL`` forever and block retry permanently. No
+    worker ever ran on a queued cancel, so there's no subprocess
+    race to guard against.
+
+    Returns a 2-tuple of ``(job, reason)`` where reason is:
+      * ``"ok"`` — job inserted, ``job`` is non-None.
+      * ``"scene_missing"`` — the parent scene was cascaded away
+        between the caller's ``get_job`` and this call. ``job`` is
+        None.
+      * ``"in_flight"`` — another in-flight job of the same kind
+        already exists for the scene. ``job`` is None.
+
+    The reason distinction matters: scene_missing is a 404 (the
+    capture-delete cascade won), in_flight is a 409 (caller should
+    cancel the existing row first).
+    """
+    job_id = _make_id()
+    now = _utcnow()
+    payload_json = json.dumps(payload or {})
+    async with session() as s:
+        result = await s.execute(
+            text(
+                """
+                INSERT INTO jobs (
+                    id, scene_id, kind, status, progress,
+                    payload, result, created_at, updated_at
+                )
+                SELECT
+                    :jid, :sid, :kind, 'queued', 0.0,
+                    :payload, '{}', :now, :now
+                WHERE EXISTS (SELECT 1 FROM scenes WHERE id = :sid)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM jobs
+                    WHERE scene_id = :sid
+                      AND kind = :kind
+                      AND (
+                        status IN (:q, :c, :r)
+                        OR (
+                          status = :x
+                          AND claimed_by IS NOT NULL
+                          AND completed_at IS NULL
+                        )
+                      )
+                  )
+                """
+            ),
+            {
+                "jid": job_id,
+                "sid": scene_id,
+                "kind": kind.value,
+                "payload": payload_json,
+                "now": now,
+                "q": JobStatus.queued.value,
+                "c": JobStatus.claimed.value,
+                "r": JobStatus.running.value,
+                "x": JobStatus.canceled.value,
+            },
+        )
+        await s.commit()
+        if result.rowcount == 1:
+            inserted = await s.get(Job, job_id)
+            return (inserted, "ok") if inserted else (None, "scene_missing")
+        # rowcount=0 — figure out which predicate killed it so the
+        # caller can map it to the right HTTP status. Two SELECTs
+        # inside the same session so they observe the same snapshot
+        # as the failed INSERT.
+        scene_row = await s.execute(
+            text("SELECT 1 FROM scenes WHERE id = :sid"),
+            {"sid": scene_id},
+        )
+        if scene_row.first() is None:
+            return (None, "scene_missing")
+        return (None, "in_flight")
+
+
 async def list_jobs_for_scene(scene_id: str) -> list[Job]:
     async with session() as s:
         rows = await s.execute(

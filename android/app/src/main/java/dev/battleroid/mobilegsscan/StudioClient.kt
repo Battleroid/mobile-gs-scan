@@ -231,6 +231,26 @@ class StudioClient(private val baseUrl: String) {
         }
 
     /**
+     * Enqueue a fresh copy of a failed / canceled job. The server
+     * gates this to terminal-non-success states; this client method
+     * just relays the request and surfaces the response body on a
+     * non-2xx so the UI can show a meaningful error string. The
+     * caller (JobDetailScreen) is responsible for routing forward
+     * to the new job's detail page on success.
+     */
+    suspend fun retryJob(id: String): Unit = withContext(Dispatchers.IO) {
+        val req = Request.Builder()
+            .url("$baseUrl/api/jobs/$id/retry")
+            .post("".toRequestBody("application/json".toMediaType()))
+            .build()
+        http.newCall(req).execute().use { res ->
+            if (!res.isSuccessful) {
+                error("HTTP ${res.code}: ${res.body?.string().orEmpty()}")
+            }
+        }
+    }
+
+    /**
      * Create a new capture session. ``name`` is optional — pass
      * null to let the server assign a memorable random name
      * (`<adjective> <color> <noun>`). ``meta`` is a free-form bag

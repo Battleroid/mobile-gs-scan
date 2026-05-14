@@ -52,6 +52,14 @@ export function useSceneEvents(sceneId: string | null): {
   lastEditResult: EditResult | null;
   /** Same shape as editProgress, for the mesh job. */
   meshProgress: { progress: number; message: string | null } | null;
+  /**
+   * Imperative re-fetch of the canonical scene snapshot. Callers
+   * (e.g. the retry button on `PipelineJobRow`) use this when they
+   * enqueue a new job whose id wasn't in the scene's jobs list when
+   * the WS opened — without it, the new row never appears and no
+   * per-job WS events reach the client.
+   */
+  refresh: () => void;
 } {
   const [scene, setScene] = useState<Scene | null>(null);
   const [lastEvent, setLastEvent] = useState<ServerEvent | null>(null);
@@ -315,7 +323,15 @@ export function useSceneEvents(sceneId: string | null): {
     };
   }, [sceneId]);
 
-  return { scene, lastEvent, editProgress, lastEditResult, meshProgress };
+  const refresh = () => {
+    if (!sceneId) return;
+    const gen = ++refreshGen.current;
+    void refreshScene(sceneId).then((next) => {
+      if (next && gen === refreshGen.current) setScene(next);
+    });
+  };
+
+  return { scene, lastEvent, editProgress, lastEditResult, meshProgress, refresh };
 }
 
 function kindToStatus(kind: string, fallback: Scene["jobs"][number]["status"]) {

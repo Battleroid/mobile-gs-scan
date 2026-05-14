@@ -1,7 +1,5 @@
 package dev.battleroid.mobilegsscan.ui.detail
 
-import coil.compose.AsyncImage
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -72,6 +70,7 @@ fun JobDetailScreen(
     state: JobDetailUiState,
     onBackClick: () -> Unit,
     onToggleLog: () -> Unit,
+    onRetryClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val pebble = MaterialTheme.pebble
@@ -112,23 +111,6 @@ fun JobDetailScreen(
                 color = pebble.ink,
             )
 
-            // Scene thumbnail strip. Renders only when the activity
-            // has populated state.thumbAbsoluteUrl (one scene fetch
-            // on first poll). Soft-fail: a missing or pending
-            // thumbnail just hides the strip rather than dropping
-            // a placeholder into a tight metrics-focused layout.
-            if (state.thumbAbsoluteUrl != null) {
-                AsyncImage(
-                    model = state.thumbAbsoluteUrl,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(140.dp)
-                        .clip(RoundedCornerShape(12.dp)),
-                )
-            }
-
             if (job != null) {
                 ProgressCard(
                     progress = job.progress,
@@ -145,6 +127,16 @@ fun JobDetailScreen(
                 }
                 if (job.result != null) {
                     ResultBlock(job.result)
+                }
+                // Retry CTA — only on terminal-non-success rows.
+                // Server enforces the same gate (409 otherwise), but
+                // hiding the button on completed / in-flight rows
+                // keeps the action surface honest at a glance.
+                if (job.status == "failed" || job.status == "canceled") {
+                    RetryButton(
+                        retrying = state.retrying,
+                        onClick = onRetryClick,
+                    )
                 }
             }
 
@@ -316,6 +308,34 @@ private fun MetricsRow(label: String, value: String) {
             text = value,
             style = MaterialTheme.typography.labelMedium,
             color = pebble.inkSoft,
+        )
+    }
+}
+
+@Composable
+private fun RetryButton(retrying: Boolean, onClick: () -> Unit) {
+    // Tomato CTA pill. Mirrors the SaveButton on Settings — same
+    // pill silhouette, same accent color, same opacity-on-disabled
+    // treatment — so the action surface reads as the same family
+    // across the app. Disabled while a retry is in flight to keep
+    // double-taps from queueing two new jobs.
+    val pebble = MaterialTheme.pebble
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(999.dp))
+            .background(if (retrying) pebble.accent.copy(alpha = 0.5f) else pebble.accent)
+            .clickable(enabled = !retrying, onClick = onClick)
+            .padding(vertical = 12.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = if (retrying) "Retrying…" else "Retry",
+            style = MaterialTheme.typography.bodyLarge.copy(
+                fontWeight = FontWeight.SemiBold,
+            ),
+            color = pebble.bg,
         )
     }
 }
