@@ -228,7 +228,11 @@ def test_colmap_writer_emits_expected_files(tmp_path: Path):
     )
     assert info == {"n_cameras": 1, "n_images": 3}
 
-    cams = (out_dir / "cameras.txt").read_text().splitlines()
+    # The three model files live under ``out_dir/sparse/`` (the
+    # layout OpenMVS's ``InterfaceCOLMAP`` insists on); the
+    # ``images/`` symlink tree stays at the workspace root.
+    sparse_dir = out_dir / "sparse"
+    cams = (sparse_dir / "cameras.txt").read_text().splitlines()
     # Header comments + one data row.
     data_rows = [ln for ln in cams if ln and not ln.startswith("#")]
     assert len(data_rows) == 1
@@ -239,7 +243,7 @@ def test_colmap_writer_emits_expected_files(tmp_path: Path):
     assert fields[3] == "1080"
     assert pytest.approx(float(fields[4])) == 1500.0  # fl_x
 
-    imgs = (out_dir / "images.txt").read_text().splitlines()
+    imgs = (sparse_dir / "images.txt").read_text().splitlines()
     data_rows = [ln for ln in imgs if ln and not ln.startswith("#")]
     # Each image: pose line + empty observations line. 3 frames → 6 entries.
     # (The blank lines split() collapses, but our writer emits them so
@@ -251,14 +255,26 @@ def test_colmap_writer_emits_expected_files(tmp_path: Path):
     assert len(pose_rows) == 3
 
     # points3D.txt should be header-only.
-    pts = (out_dir / "points3D.txt").read_text().splitlines()
+    pts = (sparse_dir / "points3D.txt").read_text().splitlines()
     assert all(ln.startswith("#") or ln == "" for ln in pts)
 
-    # Image directory should have one symlink per frame.
+    # Image directory should have one symlink per frame (still at
+    # the workspace root — only the model files moved into
+    # ``sparse/``).
     staged = sorted((out_dir / "images").iterdir())
     assert [p.name for p in staged] == [
         "000000.jpg", "000001.jpg", "000002.jpg",
     ]
+    # Regression assertion for the InterfaceCOLMAP exit-1 incident
+    # (PROGRESS log read "colmap workspace: 1 cameras, N images"
+    # then "unable to open file '.../colmap/sparse/cameras.txt'"):
+    # the writer must never put model files at the workspace root.
+    assert not (out_dir / "cameras.txt").exists(), (
+        "model files must live under sparse/, not the workspace "
+        "root — OpenMVS InterfaceCOLMAP reads from sparse/ only"
+    )
+    assert not (out_dir / "images.txt").exists()
+    assert not (out_dir / "points3D.txt").exists()
 
 
 def test_colmap_writer_quaternions_are_unit_norm(tmp_path: Path):
@@ -279,7 +295,7 @@ def test_colmap_writer_quaternions_are_unit_norm(tmp_path: Path):
         out_dir=out_dir,
     )
 
-    img_lines = (out_dir / "images.txt").read_text().splitlines()
+    img_lines = (out_dir / "sparse" / "images.txt").read_text().splitlines()
     pose_rows = [
         ln for ln in img_lines
         if ln and not ln.startswith("#") and ln.split()[0].isdigit() and len(ln.split()) > 5
@@ -309,7 +325,7 @@ def test_colmap_writer_axis_round_trip(tmp_path: Path):
     )
 
     # Reconstruct w2c from the emitted quaternion + translation.
-    img_lines = (out_dir / "images.txt").read_text().splitlines()
+    img_lines = (out_dir / "sparse" / "images.txt").read_text().splitlines()
     pose_row = next(
         ln for ln in img_lines
         if ln and not ln.startswith("#") and ln.split()[0] == "1"
