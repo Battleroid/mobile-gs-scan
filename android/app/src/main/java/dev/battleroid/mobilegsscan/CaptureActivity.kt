@@ -9,6 +9,7 @@ import android.opengl.GLSurfaceView
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
@@ -126,6 +127,15 @@ class CaptureActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // Captures often run several minutes while the user
+        // slowly orbits an object; the default screen-off
+        // timeout would dim and then lock the phone mid-record,
+        // freezing the GL surface and dropping ARCore tracking.
+        // FLAG_KEEP_SCREEN_ON ties the screen-on guarantee to
+        // *this* activity's window — the moment the user
+        // backgrounds or finishes the capture, the flag detaches
+        // and the system timeout takes over again.
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         baseUrl = intent.getStringExtra(EXTRA_BASE_URL).orEmpty()
         draftId = intent.getStringExtra(EXTRA_DRAFT_ID).orEmpty()
