@@ -157,6 +157,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         -DVCG_ROOT=/opt/vcglib \
         -DCMAKE_INSTALL_PREFIX=/usr/local && \
     cmake --build /tmp/openmvs/build --target install -j $(nproc) && \
+    # OpenMVS installs its binaries under ``${CMAKE_INSTALL_PREFIX}/OpenMVS/bin``
+    # (its own subdir), not ``/usr/local/bin``. That keeps the
+    # OpenMVS install tidy but means a fresh worker-gs container
+    # can't find them via ``shutil.which()`` — the higher / standard
+    # tier subprocess fails at the binary-presence check with
+    # "OpenMVS binary 'InterfaceCOLMAP' not on $PATH". Symlink each
+    # required binary into ``/usr/local/bin`` after install.
+    # ``find`` over a bounded depth guards against future OpenMVS
+    # versions reshuffling the install layout — if it moves, the
+    # symlink still resolves as long as the binary lands somewhere
+    # under ``/usr/local``.
+    for b in InterfaceCOLMAP DensifyPointCloud ReconstructMesh RefineMesh TextureMesh; do \
+        found=$(find /usr/local -maxdepth 6 -name "$b" -type f -executable 2>/dev/null | head -1); \
+        if [ -n "$found" ]; then ln -sf "$found" /usr/local/bin/"$b"; fi; \
+    done && \
     rm -rf /tmp/openmvs
 
 # spz tooling — Niantic's compressed splat format. The Python bindings
