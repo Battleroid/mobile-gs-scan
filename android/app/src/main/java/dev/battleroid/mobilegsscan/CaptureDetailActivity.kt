@@ -163,6 +163,34 @@ class CaptureDetailActivity : ComponentActivity() {
     }
 
     private fun openSceneInBrowser() {
+        // Prefer the embedded native viewer when an .spz is available:
+        // the bundled Spark page in `SplatViewerActivity` renders the
+        // same way the web does, but in-process (no Chrome chrome, no
+        // network round-trip on re-open, works offline once cached).
+        //
+        // Fall back to the system browser at `/captures/{id}` if the
+        // scene either doesn't exist yet (the user tapped the hero
+        // while the export step hadn't completed) or didn't expose a
+        // ``spz_url`` (older worker, or pipeline still running). The
+        // web URL is the documented public landing page; native splat
+        // rendering is purely additive on top.
+        val current = state.value
+        val scene = current.scene
+        val spzRelative = scene?.spz_url
+        if (scene != null && !spzRelative.isNullOrBlank()) {
+            startActivity(
+                Intent(this, SplatViewerActivity::class.java).apply {
+                    putExtra(SplatViewerActivity.EXTRA_BASE_URL, baseUrl)
+                    putExtra(SplatViewerActivity.EXTRA_SCENE_ID, scene.id)
+                    putExtra(SplatViewerActivity.EXTRA_SPZ_URL, spzRelative)
+                    putExtra(
+                        SplatViewerActivity.EXTRA_CAPTURE_NAME,
+                        current.captureName,
+                    )
+                },
+            )
+            return
+        }
         // The web side has no /scenes/{id} route; the splat viewer
         // lives on /captures/{captureId}. The legacy URL was a
         // leftover from an earlier route shape and 404'd every time.

@@ -139,6 +139,12 @@ dependencies {
     // semantics so a flaky studio link doesn't manifest as torn
     // thumbnails.
     implementation(libs.coil.compose)
+    // androidx.webkit — WebViewAssetLoader for the embedded splat
+    // viewer (SplatViewerActivity). Hosts assets/splat/index.html
+    // and the cached .spz under a single https://appassets.androidplatform.net
+    // origin so Chrome's modern file:// restrictions don't break
+    // Spark's `fetch()` of the splat asset.
+    implementation(libs.androidx.webkit)
     // ui-tooling is the heavyweight @Preview runtime — stays in
     // debugImplementation so it doesn't bloat the release APK.
     debugImplementation(libs.androidx.compose.ui.tooling)
