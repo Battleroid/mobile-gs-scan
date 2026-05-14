@@ -173,28 +173,26 @@ async def retry_job_endpoint(job_id: str) -> dict:
     # the web button — or two clients racing — would otherwise enqueue
     # parallel runs of the same kind for the same scene. They'd then
     # race on shared artifact paths (sfm/, train/, export/, etc.) with
-    # nondeterministic results. Refuse the retry if any in-flight job
-    # of the same kind already exists for the scene; the caller can
-    # cancel that one first if they really want a fresh run.
-    in_flight = (JobStatus.queued, JobStatus.claimed, JobStatus.running)
-    existing = [
-        j
-        for j in await store.list_jobs_for_scene(job.scene_id)
-        if j.kind == job.kind and j.status in in_flight
-    ]
-    if existing:
-        raise HTTPException(
-            409,
-            f"a {job.kind.value} job is already {existing[0].status.value} for this scene",
-        )
-    new_job = await store.enqueue_job(
+    # nondeterministic results. ``enqueue_retry_job`` runs the
+    # in-flight check + insert in a single statement so SQLite's
+    # single-writer lock serializes concurrent retry POSTs — the
+    # loser sees zero rowcount and gets the 409 below. Plain
+    # check-then-``enqueue_job`` would be a TOCTOU race: two requests
+    # could both observe an empty in-flight set, then both insert.
+    new_job, reason = await store.enqueue_retry_job(
         job.scene_id, job.kind, payload=job.payload or {},
     )
-    if new_job is None:
+    if reason == "scene_missing":
         # Scene cascaded away between get_job and enqueue — the
         # capture-delete cascade just won. Surface 404 rather than
         # silently dropping the retry.
         raise HTTPException(404, "scene no longer exists")
+    if reason == "in_flight":
+        raise HTTPException(
+            409,
+            f"a {job.kind.value} job is already in flight for this scene",
+        )
+    assert new_job is not None  # reason == "ok"
     return {
         "ok": True,
         "job_id": new_job.id,
