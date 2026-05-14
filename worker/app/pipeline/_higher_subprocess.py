@@ -627,10 +627,31 @@ def _bake_textures(*, mesh, staging_dir: Path):
     # bleed background pixels into the atlas. Cheap np.roll-based
     # 4-neighbour dilation; one pass is plenty for the gaps xatlas
     # leaves at chart seams.
+    #
+    # ``np.roll`` is toroidal — pixels that wrap from one edge to
+    # the opposite edge would otherwise leak colors from charts
+    # touching one border into the unrelated opposite border. At
+    # high atlas-utilisation that produces visible streaks on
+    # distant triangles. After each roll we explicitly zero out
+    # the wrap-around strip on the rolled coverage mask so the
+    # subsequent ``fill`` calculation only considers genuine
+    # in-bounds neighbours.
     _emit(0.93, "seam dilate")
-    for shift in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-        rolled_cov = np.roll(covered, shift=shift, axis=(0, 1))
-        rolled_pg = np.roll(page, shift=(*shift, 0), axis=(0, 1, 2))[..., :3]
+    for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        rolled_cov = np.roll(covered, shift=(dy, dx), axis=(0, 1))
+        rolled_pg = np.roll(page, shift=(dy, dx, 0), axis=(0, 1, 2))
+        # Invalidate whichever edge strip wrapped around. ``dy=-1``
+        # rolled the array up by 1, so the last row now holds the
+        # original first row's data → mask the last row. Same
+        # logic for the other three directions.
+        if dy == -1:
+            rolled_cov[-1, :] = False
+        elif dy == 1:
+            rolled_cov[0, :] = False
+        if dx == -1:
+            rolled_cov[:, -1] = False
+        elif dx == 1:
+            rolled_cov[:, 0] = False
         fill = (~covered) & rolled_cov
         page[fill] = rolled_pg[fill]
 
