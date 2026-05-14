@@ -127,16 +127,25 @@ class UploadService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action
         if (action == ACTION_CANCEL) {
-            // Best-effort: cancel the in-flight job if it's the
-            // draft the user asked to cancel. Other draft ids hit
-            // here are no-ops — only one upload runs at a time
-            // anyway.
+            // Best-effort: cancel the in-flight job only if it
+            // matches the draft id the user asked to cancel. A
+            // cancel intent for a *different* draft (stale
+            // notification, race with a queued retry, etc.) must
+            // NOT tear down the active upload — calling
+            // ``stopSelf`` unconditionally here cancels the
+            // service scope in ``onDestroy`` and aborts whatever
+            // run was in flight. We only stop the service if
+            // there is no active run to protect.
             val draftId = intent.getStringExtra(EXTRA_DRAFT_ID).orEmpty()
             if (draftId.isNotEmpty() && draftId == activeDraftId) {
                 job?.cancel()
                 setState(draftId, UploadState.Failed("canceled by user"))
+                stopSelf()
+            } else if (activeDraftId == null) {
+                stopSelf()
             }
-            stopSelf()
+            // else: keep the service alive — the active upload
+            // is unrelated to this cancel intent.
             return START_NOT_STICKY
         }
 
@@ -150,8 +159,19 @@ class UploadService : Service() {
             // Don't run a second upload in parallel — the
             // foreground service contract is one progress
             // notification per service instance. The new request
-            // is dropped silently; the UI's existing upload row
-            // stays.
+            // is rejected; surface that to the UI as a terminal
+            // Failed state so the per-draft progress bar (which
+            // ``start`` seeded with Running(0, 0) before
+            // entering the service) doesn't get stuck pretending
+            // an upload is happening.
+            if (draftId != activeDraftId) {
+                setState(
+                    draftId,
+                    UploadState.Failed(
+                        "another upload is already running; try again when it finishes",
+                    ),
+                )
+            }
             return START_NOT_STICKY
         }
 
@@ -229,6 +249,7 @@ class UploadService : Service() {
                         ctx = applicationContext,
                         baseUrl = baseUrl,
                         sceneId = sid,
+                        captureId = result.captureId,
                         captureName = draft.meta.name.orEmpty(),
                     )
                 }

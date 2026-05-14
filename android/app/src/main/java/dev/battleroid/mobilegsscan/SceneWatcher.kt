@@ -73,22 +73,32 @@ object SceneWatcher {
         .readTimeout(0, TimeUnit.MILLISECONDS) // no read timeout — WS is long-lived
         .build()
 
-    private data class Pending(val baseUrl: String, val name: String)
+    private data class Pending(
+        val baseUrl: String,
+        val name: String,
+        val captureId: String,
+    )
 
     private val watching = ConcurrentHashMap<String, Job>()
 
-    fun watch(ctx: Context, baseUrl: String, sceneId: String, captureName: String) {
+    fun watch(
+        ctx: Context,
+        baseUrl: String,
+        sceneId: String,
+        captureId: String,
+        captureName: String,
+    ) {
         if (sceneId.isBlank() || baseUrl.isBlank()) return
         val app = ctx.applicationContext as App
         // Persist *before* we start the coroutine so a crash
         // mid-connect leaves a recoverable entry behind for
         // restorePending. Idempotent — repeated watches of the
         // same scene id collapse into a single WS.
-        persist(ctx, sceneId, Pending(baseUrl, captureName))
+        persist(ctx, sceneId, Pending(baseUrl, captureName, captureId))
         if (watching.containsKey(sceneId)) return
         val job = app.appScope.launch {
             try {
-                runScene(ctx.applicationContext, baseUrl, sceneId, captureName)
+                runScene(ctx.applicationContext, baseUrl, sceneId, captureId, captureName)
             } finally {
                 watching.remove(sceneId)
                 clearPersisted(ctx, sceneId)
@@ -109,7 +119,7 @@ object SceneWatcher {
     fun restorePending(ctx: Context) {
         val pending = loadPersisted(ctx)
         for ((sceneId, p) in pending) {
-            watch(ctx, p.baseUrl, sceneId, p.name)
+            watch(ctx, p.baseUrl, sceneId, p.captureId, p.name)
         }
     }
 
@@ -117,6 +127,7 @@ object SceneWatcher {
         ctx: Context,
         baseUrl: String,
         sceneId: String,
+        captureId: String,
         captureName: String,
     ) {
         var backoffMs = 5_000L
@@ -129,11 +140,11 @@ object SceneWatcher {
             }
             when (terminal) {
                 Terminal.Completed -> {
-                    postReady(ctx, baseUrl, sceneId, captureName)
+                    postReady(ctx, baseUrl, sceneId, captureId, captureName)
                     return
                 }
                 Terminal.Failed -> {
-                    postFailed(ctx, baseUrl, sceneId, captureName)
+                    postFailed(ctx, baseUrl, sceneId, captureId, captureName)
                     return
                 }
                 Terminal.Canceled -> return
@@ -219,6 +230,7 @@ object SceneWatcher {
         ctx: Context,
         baseUrl: String,
         sceneId: String,
+        captureId: String,
         captureName: String,
     ) {
         val nm = ctx.getSystemService(NotificationManager::class.java) ?: return
@@ -227,12 +239,16 @@ object SceneWatcher {
         // spz_url which isn't in the WS event payload — only the
         // status flip is. CaptureDetail re-fetches the scene and
         // surfaces the View button with the URL already resolved.
+        // ``CaptureDetail.onCreate`` finishes immediately when
+        // EXTRA_CAPTURE_ID is empty (line 59 of that file), so
+        // we must include the capture id we held onto from the
+        // upload result — passing only scene_id would no-op the
+        // notification tap and silently drop the user back to
+        // the launcher.
         val detail = Intent(ctx, CaptureDetailActivity::class.java).apply {
             putExtra(CaptureDetailActivity.EXTRA_BASE_URL, baseUrl)
+            putExtra(CaptureDetailActivity.EXTRA_CAPTURE_ID, captureId)
             putExtra(CaptureDetailActivity.EXTRA_CAPTURE_NAME, captureName)
-            // The detail screen accepts either capture_id or
-            // scene_id; we only have the scene id from the WS
-            // payload.
             putExtra("scene_id", sceneId)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
         }
@@ -257,20 +273,18 @@ object SceneWatcher {
         ctx: Context,
         baseUrl: String,
         sceneId: String,
+        captureId: String,
         captureName: String,
     ) {
         val nm = ctx.getSystemService(NotificationManager::class.java) ?: return
         // Failed → route to CaptureDetail so the user can see
-        // which job died and retry. The viewer would just show an
-        // error.
+        // which job died and retry. CaptureDetail bails on a
+        // missing capture id, so include it.
         val detail = Intent(ctx, CaptureDetailActivity::class.java).apply {
             putExtra(CaptureDetailActivity.EXTRA_BASE_URL, baseUrl)
-            // We persist sceneId, not captureId — CaptureDetail
-            // accepts either; the detail screen resolves by
-            // scene_id when capture_id is absent. Pass both in
-            // case the API surface tightens later.
-            putExtra("scene_id", sceneId)
+            putExtra(CaptureDetailActivity.EXTRA_CAPTURE_ID, captureId)
             putExtra(CaptureDetailActivity.EXTRA_CAPTURE_NAME, captureName)
+            putExtra("scene_id", sceneId)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
         }
         val pi = PendingIntent.getActivity(
@@ -323,6 +337,7 @@ object SceneWatcher {
                 sceneId to Pending(
                     baseUrl = o["baseUrl"]?.jsonPrimitive?.content.orEmpty(),
                     name = o["name"]?.jsonPrimitive?.content.orEmpty(),
+                    captureId = o["captureId"]?.jsonPrimitive?.content.orEmpty(),
                 )
             }
         } catch (_: Exception) {
@@ -340,6 +355,8 @@ object SceneWatcher {
                 .append(v.baseUrl.replace("\"", "\\\""))
                 .append("\",\"name\":\"")
                 .append(v.name.replace("\"", "\\\""))
+                .append("\",\"captureId\":\"")
+                .append(v.captureId.replace("\"", "\\\""))
                 .append("\"}")
         }
         sb.append('}')
