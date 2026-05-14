@@ -148,12 +148,20 @@ fun CaptureDetailScreen(
             // to a chip-palette gradient matching the home grid's
             // thumbnail style. orbit_url playback is deferred — the
             // still PNG is the canonical thumbnail and lands first.
+            //
+            // Hero tap mirrors the bottom CTA: tap → open the splat
+            // viewer when an artefact is ready, no-op otherwise.
+            // The hero is the most prominent surface on the screen,
+            // so users naturally reach for it before scrolling to
+            // the CTA — wiring both paths to the same handler keeps
+            // discovery cheap.
             HeroBlock(
                 paletteSeed = capture?.id ?: "loading",
                 frameCount = capture?.frame_count ?: 0,
                 thumbUrl = dev.battleroid.mobilegsscan.ui.home.absoluteUrl(
                     state.baseUrl, scene?.thumb_url,
                 ),
+                onClick = if (artifactReady) onOpenViewerClick else null,
             )
 
             if (!capture?.error.isNullOrBlank()) {
@@ -335,7 +343,12 @@ private fun TitleBlock(
 }
 
 @Composable
-private fun HeroBlock(paletteSeed: String, frameCount: Int, thumbUrl: String?) {
+private fun HeroBlock(
+    paletteSeed: String,
+    frameCount: Int,
+    thumbUrl: String?,
+    onClick: (() -> Unit)? = null,
+) {
     val pebble = MaterialTheme.pebble
     val palette = paletteFor(paletteSeed, pebble)
     Box(
@@ -343,7 +356,16 @@ private fun HeroBlock(paletteSeed: String, frameCount: Int, thumbUrl: String?) {
             .fillMaxWidth()
             .height(220.dp)
             .clip(RoundedCornerShape(18.dp))
-            .background(Brush.linearGradient(palette)),
+            .background(Brush.linearGradient(palette))
+            // Tap gated on ``onClick`` being non-null (the caller
+            // passes null when no artefact is ready yet, e.g. the
+            // splat is still training). Without the gate a tap on
+            // the gradient placeholder would surface a confusing
+            // no-op or a broken-link toast.
+            .then(
+                if (onClick != null) Modifier.clickable(onClick = onClick)
+                else Modifier
+            ),
     ) {
         if (thumbUrl != null) {
             AsyncImage(
