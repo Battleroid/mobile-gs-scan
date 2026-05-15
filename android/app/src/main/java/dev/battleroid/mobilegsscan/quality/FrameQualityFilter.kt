@@ -110,9 +110,18 @@ class FrameQualityFilter(private val cfg: Config) {
 
     // Per-session running stats; updated on accept only so they
     // don't drift toward the rejected frames' distribution.
+    //
+    // ``lumaEma`` tracks the EMA of the frame Y-plane *mean* across
+    // accepted frames. ``lumaMeanVarEma`` is the EMA of the squared
+    // deviation between each new yMean and the running mean — i.e.
+    // the *temporal* variance of the frame-mean signal. The
+    // exposure-jitter gate uses sqrt(lumaMeanVarEma) as its sigma,
+    // not the per-frame spatial pixel variance (which would be much
+    // larger in high-contrast scenes and make the gate effectively
+    // never fire).
     private var sharpnessEma: Double = 0.0
     private var lumaEma: Double = 0.0
-    private var lumaVarEma: Double = 0.0
+    private var lumaMeanVarEma: Double = 0.0
     private var warmupFrames: Int = 0
 
     private var lastAcceptedPose: Pose? = null
@@ -142,11 +151,12 @@ class FrameQualityFilter(private val cfg: Config) {
      * arms, and the user gets noisy post-resume frames in the
      * dataset.
      *
-     * Idempotent — calling with the current state is a no-op. Cost
-     * is one compare + one assign on every call; safe to drop
-     * into the GL render thread's hot path.
+     * No-op when the filter is disabled — a master-off filter
+     * shouldn't be incrementing drop counters or biasing the
+     * HUD's telemetry. Idempotent on the current state.
      */
     fun notifyTrackingState(trackingState: TrackingState) {
+        if (!cfg.enabled) return
         if (lastTrackingState == trackingState) return
         if (trackingState != TrackingState.TRACKING) {
             trackingCount.incrementAndGet()
@@ -257,8 +267,15 @@ class FrameQualityFilter(private val cfg: Config) {
 
         // Exposure jitter — only after warmup so the first few
         // accepts seed the EMA without rejecting themselves.
+        // Sigma is derived from the *temporal* mean-drift variance
+        // ``lumaMeanVarEma`` — the EMA of squared deviations of
+        // accepted-frame means from the running mean. Earlier
+        // versions of this filter pulled sigma from the per-frame
+        // *spatial* pixel variance, which in high-contrast scenes
+        // can sit at σ≈80 luma units even when the scene-mean is
+        // rock-steady — that made the gate effectively never fire.
         if (warmupFrames >= WARMUP_FRAMES) {
-            val sigma = sqrt(max(lumaVarEma, 1.0))
+            val sigma = sqrt(max(lumaMeanVarEma, 1.0))
             if (Math.abs(stats.yMean - lumaEma) > cfg.exposureSigma * sigma) {
                 exposureCount.incrementAndGet()
                 return Decision.Drop(DropReason.EXPOSURE)
@@ -280,9 +297,14 @@ class FrameQualityFilter(private val cfg: Config) {
 
         // Update running stats *only on accept* so the EMAs track
         // the distribution of kept frames, not the input stream.
+        // The mean-drift variance update uses the deviation
+        // computed against the *previous* lumaEma so the very
+        // first jitter sample isn't trivially zero — i.e. compute
+        // the squared error first, then advance the mean.
         sharpnessEma = ema(sharpnessEma, stats.laplacianVariance, EMA_ALPHA, warmupFrames)
+        val drift = stats.yMean - lumaEma
+        lumaMeanVarEma = ema(lumaMeanVarEma, drift * drift, EMA_ALPHA, warmupFrames)
         lumaEma = ema(lumaEma, stats.yMean, EMA_ALPHA, warmupFrames)
-        lumaVarEma = ema(lumaVarEma, stats.yVariance, EMA_ALPHA, warmupFrames)
 
         return acceptInternal(timestampNs, pose, accumulateStats = true)
     }
