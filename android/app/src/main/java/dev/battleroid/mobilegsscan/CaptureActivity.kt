@@ -150,6 +150,15 @@ class CaptureActivity : ComponentActivity() {
     // every accepted frame.
     private var captureStartMs: Long = 0L
 
+    // Latch so the on-finish quality-stats write happens exactly
+    // once per capture. ``onFinishTapped`` is bound to Back press,
+    // so the user can re-enter it any number of times while the
+    // finish prompt is open — without this guard each re-entry
+    // would rewrite ``recordQualityStats`` with the *frozen*
+    // accept count divided by an ever-growing elapsedSec, sliding
+    // ``effective_fps`` toward zero on every Back press.
+    private var qualityStatsRecorded: Boolean = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -405,6 +414,7 @@ class CaptureActivity : ComponentActivity() {
         if (captureGateActive) return
         captureGateActive = true
         captureStartMs = System.currentTimeMillis()
+        qualityStatsRecorded = false
         motionStreak = 0
         blurStreak = 0
         exposureStreak = 0
@@ -442,23 +452,31 @@ class CaptureActivity : ComponentActivity() {
     private fun onFinishTapped() {
         // Persist the on-device drop counters + effective fps
         // into the draft *before* routing to the Finish prompt /
-        // draft-detail screen. Without this, the meta would still
-        // carry the defaults (all zeros) when DraftUploader reads
-        // it on the Upload-Now path and the server would see no
-        // quality telemetry for the capture.
-        qualityFilter?.let { filter ->
-            val counts = filter.snapshot()
-            val elapsedSec = ((System.currentTimeMillis() - captureStartMs) / 1000.0)
-                .coerceAtLeast(0.1)
-            draft?.recordQualityStats(
-                blur = counts.blur,
-                motion = counts.motion,
-                exposure = counts.exposure,
-                tracking = counts.tracking,
-                preRoll = counts.preRoll,
-                rateLimit = counts.rateLimit,
-                effectiveFps = (counts.accepted / elapsedSec).toFloat(),
-            )
+        // draft-detail screen, and only on the *first* call —
+        // ``onFinishTapped`` is bound to Back press, so the user
+        // can re-enter it freely while the finish prompt is open.
+        // Re-running this block would freeze the accept count
+        // (capture is already gated off) but keep growing
+        // elapsedSec, sliding ``effective_fps`` toward zero with
+        // each re-entry and overwriting the telemetry. The latch
+        // guarantees a stable snapshot taken at the moment the
+        // gate first flipped.
+        if (!qualityStatsRecorded) {
+            qualityFilter?.let { filter ->
+                val counts = filter.snapshot()
+                val elapsedSec = ((System.currentTimeMillis() - captureStartMs) / 1000.0)
+                    .coerceAtLeast(0.1)
+                draft?.recordQualityStats(
+                    blur = counts.blur,
+                    motion = counts.motion,
+                    exposure = counts.exposure,
+                    tracking = counts.tracking,
+                    preRoll = counts.preRoll,
+                    rateLimit = counts.rateLimit,
+                    effectiveFps = (counts.accepted / elapsedSec).toFloat(),
+                )
+            }
+            qualityStatsRecorded = true
         }
         val frames = draft?.meta?.frame_count ?: 0
         // No frames committed → discard. Single condition (not
