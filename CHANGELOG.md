@@ -14,6 +14,38 @@ and commits the new section here. Until that first release PR is
 merged, the **Unreleased** section below is a hand-authored
 roll-up so a reader landing here today still has signal.
 
+## [1.3.0](https://github.com/Battleroid/mobile-gs-scan/compare/v1.2.0...v1.3.0) (2026-05-14)
+
+
+### Features
+
+* higher-tier mesh — 2DGS retrain + textured atlas bake ([357c81d](https://github.com/Battleroid/mobile-gs-scan/commit/357c81d8338843f43e240de26b38eeaa40240524))
+* standard-tier OpenMVS textured mesh + multi-file artifact route ([991b472](https://github.com/Battleroid/mobile-gs-scan/commit/991b4728adca3cac6c90d0379ef483bf2ba5709b))
+* TSDF mesh quality knobs (edited splat, alpha gate, floater prune) ([a348bf6](https://github.com/Battleroid/mobile-gs-scan/commit/a348bf6cc4fc645bd34c7dede19443396be2f13b))
+* TSDF-fusion low-tier mesh + tier selector scaffold ([39f8eb5](https://github.com/Battleroid/mobile-gs-scan/commit/39f8eb5d9f2e45077c0a6751aa39e00b53f68fcf))
+
+
+### Bug Fixes
+
+* **2dgs:** block toroidal wrap in seam-dilation step ([6d84475](https://github.com/Battleroid/mobile-gs-scan/commit/6d84475cdb243e79b6a62397449fac36004e175a))
+* **2dgs:** index ``render_median`` by position, not first-match ([87a72f5](https://github.com/Battleroid/mobile-gs-scan/commit/87a72f54e12e815c6ffb3f361980a0399a1ac1c9))
+* **2dgs:** request depth-aware rasterization mode for retraining + dome ([bc4c92a](https://github.com/Battleroid/mobile-gs-scan/commit/bc4c92abdfcfd4192c89bd579784e08898135daf))
+* **2dgs:** strict 7-tuple unpack + per-axis atlas dimensions ([4e9a168](https://github.com/Battleroid/mobile-gs-scan/commit/4e9a1683d9c9552cc1bc4466f286ec3209888e20))
+* **android:** make capture-detail hero tap open the splat viewer ([46cd3e2](https://github.com/Battleroid/mobile-gs-scan/commit/46cd3e270ce05748cdd03f9b43aedad6631ca59a))
+* honor configured voxel_size for TSDF extraction ([c23ba01](https://github.com/Battleroid/mobile-gs-scan/commit/c23ba01e361ea75e2f49e6a4a0bf500e4d16ba83))
+* **jobs:** route extract + orbit logs through ``_log_path_for_kind`` ([e62e6a5](https://github.com/Battleroid/mobile-gs-scan/commit/e62e6a55dd3d938f1ed7ac375953cb8716e03945))
+* **mesh:** clean stale standard-tier sidecars in low tier + lift texture-page index cap ([e0b5116](https://github.com/Battleroid/mobile-gs-scan/commit/e0b5116637ea27428a8ac570e5a3468a998500e0))
+* **mesh:** emit COLMAP model under workspace/sparse/ for OpenMVS ([5a2aef0](https://github.com/Battleroid/mobile-gs-scan/commit/5a2aef00b9989fd7267374cb73a5faeec8ce26ab))
+* **mesh:** fall back to raw PLY when edited file is missing on disk ([6a99fd3](https://github.com/Battleroid/mobile-gs-scan/commit/6a99fd38e62e1b8bd63b2af2682d4fb0eb371136))
+* **mesh:** tee subprocess stdout to worker + slice 4-ch render in 2DGS ([1ad73b3](https://github.com/Battleroid/mobile-gs-scan/commit/1ad73b3fd10ccd98d1cde2bbebed0f2ff0702a75))
+* **mvs:** accept PNG texture-atlas outputs from TextureMesh ([939c14a](https://github.com/Battleroid/mobile-gs-scan/commit/939c14a4c1555b6cada71601372d80e91078a084))
+* **pipeline:** stream subprocess stdout live for mesh + sfm steps ([037afff](https://github.com/Battleroid/mobile-gs-scan/commit/037afff77815fa5c8f370fe24effe4c655643bdd))
+* reject persisted inactive mesh tier in trigger endpoint ([678d51c](https://github.com/Battleroid/mobile-gs-scan/commit/678d51c3bf608bdb9a65fbb38900a2291768bd1f))
+* **scenes:** include higher tier in mesh-tex-URL gate ([8fc1fbc](https://github.com/Battleroid/mobile-gs-scan/commit/8fc1fbc4f84a5406b315329b830f7e8292208eb1))
+* **worker:** drop f-string prefix on placeholder-less lines ([7ccb092](https://github.com/Battleroid/mobile-gs-scan/commit/7ccb09256f7fdbaaa0a94ef757428535b6057579))
+* **worker:** install libopencv-dev + pin vcglib to real upstream tag ([b70ea9f](https://github.com/Battleroid/mobile-gs-scan/commit/b70ea9f7746a34f8b00bdb112c4df991bc81c0e8))
+* **worker:** symlink OpenMVS binaries onto $PATH ([2857d68](https://github.com/Battleroid/mobile-gs-scan/commit/2857d68fda7be9b258274bdd1a492448b5803c7a))
+
 ## [1.2.0](https://github.com/Battleroid/mobile-gs-scan/compare/v1.1.0...v1.2.0) (2026-05-14)
 
 
