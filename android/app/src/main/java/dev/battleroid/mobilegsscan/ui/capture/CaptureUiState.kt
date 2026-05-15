@@ -1,6 +1,8 @@
 package dev.battleroid.mobilegsscan.ui.capture
 
 import androidx.compose.runtime.Immutable
+import dev.battleroid.mobilegsscan.quality.DropCounts
+import dev.battleroid.mobilegsscan.quality.FrameQualityFilter
 
 /**
  * Snapshot the [CaptureScreen] composable renders from. Driven
@@ -36,6 +38,23 @@ data class CaptureUiState(
      *  throttled to ~2 Hz on the GL thread. Drives the centre-top
      *  ring + percentage. `null` until the first sample arrives. */
     val coverage: Coverage?,
+
+    /** Cumulative drop counts from the on-device frame-quality
+     *  filter. Drives the small chip next to the frame-count pill
+     *  and the "Hold steady" banner. */
+    val dropCounts: DropCounts = DropCounts(),
+
+    /** Effective frames-per-second derived from accepted frames
+     *  / capture-active duration. Updated on the GL thread at the
+     *  same cadence as ``frameCount``. */
+    val effectiveFps: Float = 0f,
+
+    /** Set to a non-null reason when the filter has dropped
+     *  ≥10 consecutive frames for the same user-actionable
+     *  cause; CaptureScreen surfaces a transient banner. The
+     *  activity clears this back to ``null`` after the next
+     *  accept. */
+    val streakWarning: FrameQualityFilter.DropReason? = null,
 ) {
     companion object {
         val Initial: CaptureUiState = CaptureUiState(
@@ -43,6 +62,9 @@ data class CaptureUiState(
             captureActive = false,
             frameCount = 0,
             coverage = null,
+            dropCounts = DropCounts(),
+            effectiveFps = 0f,
+            streakWarning = null,
         )
     }
 }

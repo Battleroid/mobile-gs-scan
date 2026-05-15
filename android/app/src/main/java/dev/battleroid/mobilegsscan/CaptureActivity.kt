@@ -21,6 +21,7 @@ import androidx.compose.runtime.getValue
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import com.google.ar.core.ArCoreApk
+import dev.battleroid.mobilegsscan.quality.FrameQualityFilter
 import dev.battleroid.mobilegsscan.ui.capture.ArUnsupportedDialog
 import dev.battleroid.mobilegsscan.ui.capture.CaptureDialogs
 import dev.battleroid.mobilegsscan.ui.capture.CaptureScreen
@@ -82,6 +83,13 @@ class CaptureActivity : ComponentActivity() {
         const val EXTRA_BASE_URL = "base_url"
         const val EXTRA_DRAFT_ID = "draft_id"
         private const val PLAY_SERVICES_FOR_AR_PKG = "com.google.ar.core"
+        // Consecutive-drops floor before the "Hold steady" /
+        // "Slow down" banner pops. Tuned conservatively — 10
+        // drops at ~10 fps is ~1 s of bad capture, short enough
+        // that the user feels the system responding to their
+        // movement but not so short that benign 3–4-frame
+        // motion bursts trip it.
+        private const val STREAK_WARNING_THRESHOLD = 10
     }
 
     // Modern permission-result API. ComponentActivity doesn't expose
@@ -123,6 +131,24 @@ class CaptureActivity : ComponentActivity() {
     private var userRequestedArInstall = false
 
     @Volatile private var captureGateActive = false
+
+    // Frame-quality filter — instantiated lazily on the first
+    // accepted frame (so the user can flip the master switch in
+    // Settings between sessions without restarting the activity).
+    // Set to null whenever a session is torn down so the next
+    // session reads ServerConfig afresh.
+    private var qualityFilter: FrameQualityFilter? = null
+
+    // Drop-streak tracking for the "Hold steady" banner. Counts
+    // *consecutive* user-actionable drops (motion/blur/exposure);
+    // any accept resets it back to zero.
+    private var motionStreak = 0
+    private var blurStreak = 0
+    private var exposureStreak = 0
+
+    // Effective FPS derivation. Reset on Start, advanced on
+    // every accepted frame.
+    private var captureStartMs: Long = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -378,10 +404,62 @@ class CaptureActivity : ComponentActivity() {
     private fun onStartCaptureTapped() {
         if (captureGateActive) return
         captureGateActive = true
-        state.update { it.copy(captureActive = true, frameCount = 0) }
+        captureStartMs = System.currentTimeMillis()
+        motionStreak = 0
+        blurStreak = 0
+        exposureStreak = 0
+        // Snapshot the user's current Settings into a fresh
+        // filter. We don't honour live edits mid-capture — the
+        // user types in Settings, comes back to capture, hits
+        // Start. A new filter per Start gives them a clean cold-
+        // start window (the 30-frame warmup) every time.
+        qualityFilter = FrameQualityFilter(
+            FrameQualityFilter.Config(
+                enabled = ServerConfig.frameFilterEnabled(this),
+                blurThreshold = ServerConfig.frameFilterBlur(this).toDouble(),
+                linVelMax = ServerConfig.frameFilterLinVelMax(
+                    ServerConfig.frameFilterMotion(this),
+                ),
+                angVelMaxDeg = ServerConfig.frameFilterAngVelMaxDeg(
+                    ServerConfig.frameFilterMotion(this),
+                ),
+                exposureSigma = ServerConfig.frameFilterExposureSigma(
+                    ServerConfig.frameFilterExposure(this),
+                ),
+            ),
+        )
+        state.update {
+            it.copy(
+                captureActive = true,
+                frameCount = 0,
+                dropCounts = dev.battleroid.mobilegsscan.quality.DropCounts(),
+                effectiveFps = 0f,
+                streakWarning = null,
+            )
+        }
     }
 
     private fun onFinishTapped() {
+        // Persist the on-device drop counters + effective fps
+        // into the draft *before* routing to the Finish prompt /
+        // draft-detail screen. Without this, the meta would still
+        // carry the defaults (all zeros) when DraftUploader reads
+        // it on the Upload-Now path and the server would see no
+        // quality telemetry for the capture.
+        qualityFilter?.let { filter ->
+            val counts = filter.snapshot()
+            val elapsedSec = ((System.currentTimeMillis() - captureStartMs) / 1000.0)
+                .coerceAtLeast(0.1)
+            draft?.recordQualityStats(
+                blur = counts.blur,
+                motion = counts.motion,
+                exposure = counts.exposure,
+                tracking = counts.tracking,
+                preRoll = counts.preRoll,
+                rateLimit = counts.rateLimit,
+                effectiveFps = (counts.accepted / elapsedSec).toFloat(),
+            )
+        }
         val frames = draft?.meta?.frame_count ?: 0
         // No frames committed → discard. Single condition (not
         // gated on captureGateActive) so a second back press while
@@ -519,49 +597,118 @@ class CaptureActivity : ComponentActivity() {
             coverage.draw(ar.viewMatrix(frame), ar.projectionMatrix(frame))
 
             if (!captureGateActive) return
-            val captured = ar.pollFrameData(frame) ?: return
 
-            // Record this frame's tracked feature points into the
-            // overlay for visual feedback. PointCloud is Closeable;
-            // wrap so we always release ARCore's hold.
+            // Two-stage capture: acquire the raw frame (cheap; no
+            // JPEG yet), run the on-device quality filter, only
+            // pay the YUV→JPEG cost on accept. Dropped frames
+            // never touch disk.
+            val raw = ar.acquireRawFrame(frame) ?: return
             try {
-                val pc = ar.acquirePointCloud(frame)
+                val filter = qualityFilter
+                val decision = if (filter == null) {
+                    FrameQualityFilter.Decision.Accept
+                } else {
+                    filter.evaluate(
+                        yBuffer = raw.yBuffer,
+                        width = raw.width,
+                        height = raw.height,
+                        rowStride = raw.yRowStride,
+                        pixelStride = raw.yPixelStride,
+                        pose = raw.pose,
+                        timestampNs = raw.timestampNs,
+                        trackingState = raw.trackingState,
+                    )
+                }
+
+                // Coverage overlay updates on every observed frame
+                // (not just accepted ones) — the user wants the dots
+                // to keep filling in even when the filter is busy
+                // rejecting motion-blurred frames during a pan.
                 try {
-                    coverage.recordObservations(pc)
-                } finally {
-                    pc.close()
+                    val pc = ar.acquirePointCloud(frame)
+                    try {
+                        coverage.recordObservations(pc)
+                    } finally {
+                        pc.close()
+                    }
+                } catch (_: Exception) {
+                    // Don't let a transient point-cloud failure
+                    // kill recording; the splat trains from JPEGs
+                    // + poses, the overlay is purely a UX layer.
                 }
-            } catch (_: Exception) {
-                // Don't let a transient point-cloud failure kill
-                // recording; the splat trains from JPEGs + poses,
-                // the overlay is purely a UX layer.
-            }
 
-            // Persist the frame to the draft directory. This runs on
-            // the GL thread which is fine for the volume we deal
-            // with (10 fps × ~150 KB JPEG = 1.5 MB/s). If we ever
-            // start dropping frames here we'd push the disk write
-            // onto a single-threaded coroutine.
-            val d = draft ?: return
-            try {
-                d.appendFrame(
-                    idx = captured.idx,
-                    jpeg = captured.jpeg,
-                    pose = captured.pose,
-                    intrinsics = captured.intrinsics,
-                )
-            } catch (e: Exception) {
-                runOnUiThread {
-                    Toast.makeText(
-                        this@CaptureActivity,
-                        "frame write failed: ${e.message}",
-                        Toast.LENGTH_SHORT,
-                    ).show()
+                when (decision) {
+                    is FrameQualityFilter.Decision.Drop -> {
+                        when (decision.reason) {
+                            FrameQualityFilter.DropReason.MOTION -> ++motionStreak
+                            FrameQualityFilter.DropReason.BLUR -> ++blurStreak
+                            FrameQualityFilter.DropReason.EXPOSURE -> ++exposureStreak
+                            else -> { /* tracking / pre-roll / etc. don't drive the streak banner */ }
+                        }
+                        maybeUpdateDropHud(filter)
+                        return
+                    }
+                    FrameQualityFilter.Decision.Accept -> {
+                        motionStreak = 0
+                        blurStreak = 0
+                        exposureStreak = 0
+                    }
                 }
-                return
+
+                // Encode + persist accepted frame. The disk write
+                // is on the GL thread which is fine for the volume
+                // we deal with (~10 fps × ~150 KB JPEG = ~1.5 MB/s).
+                val d = draft ?: return
+                val jpeg = raw.encodeJpeg(ar)
+                val idx = d.meta.frame_count
+                try {
+                    d.appendFrame(
+                        idx = idx,
+                        jpeg = jpeg,
+                        pose = raw.poseMatrix(),
+                        intrinsics = raw.intrinsics,
+                    )
+                } catch (e: Exception) {
+                    runOnUiThread {
+                        Toast.makeText(
+                            this@CaptureActivity,
+                            "frame write failed: ${e.message}",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                    }
+                    return
+                }
+                maybeUpdateCoverageHud()
+                maybeUpdateFrameCounter()
+                maybeUpdateDropHud(filter)
+            } finally {
+                raw.close()
             }
-            maybeUpdateCoverageHud()
-            maybeUpdateFrameCounter()
         }
     }
+
+    /** Push the latest filter snapshot + streak warning into the
+     *  UI state. Throttled implicitly by ``state.update`` deduping
+     *  no-op writes; recomposition cost is dominated by the chip
+     *  + banner, which is cheap. */
+    private fun maybeUpdateDropHud(filter: FrameQualityFilter?) {
+        val counts = filter?.snapshot()
+            ?: dev.battleroid.mobilegsscan.quality.DropCounts()
+        val warn: FrameQualityFilter.DropReason? = when {
+            motionStreak >= STREAK_WARNING_THRESHOLD -> FrameQualityFilter.DropReason.MOTION
+            blurStreak >= STREAK_WARNING_THRESHOLD -> FrameQualityFilter.DropReason.BLUR
+            exposureStreak >= STREAK_WARNING_THRESHOLD -> FrameQualityFilter.DropReason.EXPOSURE
+            else -> null
+        }
+        val elapsedSec = ((System.currentTimeMillis() - captureStartMs) / 1000.0).coerceAtLeast(0.1)
+        val fps = (counts.accepted / elapsedSec).toFloat()
+        state.update {
+            it.copy(
+                dropCounts = counts,
+                streakWarning = warn,
+                effectiveFps = fps,
+            )
+        }
+    }
+
 }

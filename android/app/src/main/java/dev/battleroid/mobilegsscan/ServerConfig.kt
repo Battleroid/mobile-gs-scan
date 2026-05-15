@@ -22,6 +22,11 @@ object ServerConfig {
     private const val KEY_TRAIN_ITERS = "train_iters"
     private const val KEY_OVERLAY_ALPHA = "overlay_alpha"
     private const val KEY_CAMERA_CONFIG = "camera_config"
+    private const val KEY_FRAME_FILTER_ENABLED = "frame_filter_enabled"
+    private const val KEY_FRAME_FILTER_BLUR = "frame_filter_blur"
+    private const val KEY_FRAME_FILTER_MOTION = "frame_filter_motion"
+    private const val KEY_FRAME_FILTER_EXPOSURE = "frame_filter_exposure"
+    private const val KEY_CAPTURE_PROFILE = "capture_profile"
 
     /** Sentinel value for ``cameraConfigKey`` meaning "don't apply a
      *  specific ARCore CameraConfig; let the system default win, and
@@ -69,6 +74,48 @@ object ServerConfig {
     const val DEFAULT_OVERLAY_ALPHA_PCT = 70
     const val MIN_OVERLAY_ALPHA_PCT = 20
     const val MAX_OVERLAY_ALPHA_PCT = 100
+
+    // Frame-quality filter (see ``FrameQualityFilter``). Defaults
+    // are tuned to drop *obviously* bad frames on a typical
+    // handheld sweep without rejecting marginal ones — the goal is
+    // "cleaner datasets out of the box" not "drop everything that
+    // isn't perfect." Power users can tune via the Advanced
+    // Settings section.
+    const val DEFAULT_FRAME_FILTER_ENABLED = true
+    // Absolute Laplacian-variance floor. ~80 is a reasonable
+    // catch-all for handheld captures of textured scenes; soft-
+    // contrast scenes (uniform walls) score naturally low and
+    // the relative-EMA gate inside the filter handles them.
+    const val DEFAULT_FRAME_FILTER_BLUR = 80
+    const val MIN_FRAME_FILTER_BLUR = 20
+    const val MAX_FRAME_FILTER_BLUR = 500
+    // 0–100 strictness slider. Maps inside the filter to a
+    // linear blend of (lin m/s, ang deg/s) thresholds:
+    // 0 → very lenient (1.0 m/s, 70 deg/s), 100 → very strict
+    // (0.1 m/s, 5 deg/s). Default 50 sits at the canonical
+    // 0.35 m/s, 25 deg/s.
+    const val DEFAULT_FRAME_FILTER_MOTION = 50
+    const val MIN_FRAME_FILTER_MOTION = 0
+    const val MAX_FRAME_FILTER_MOTION = 100
+    // 0–100 strictness slider. Maps to ``exposureSigma``: 0 →
+    // 5σ (very lenient), 100 → 1.5σ (very strict). Default 50
+    // sits at the canonical 3σ.
+    const val DEFAULT_FRAME_FILTER_EXPOSURE = 50
+    const val MIN_FRAME_FILTER_EXPOSURE = 0
+    const val MAX_FRAME_FILTER_EXPOSURE = 100
+
+    // Capture-profile chips. A profile bundles fps + filter
+    // strictness behind a one-tap selector. ``CUSTOM`` means the
+    // user is mixing-and-matching via the underlying sliders;
+    // selecting a named profile *snaps* the fps + filter sliders
+    // to the matching triple. Profiles are detected on reload by
+    // comparing the persisted values to the canonical triple
+    // (allowing a small tolerance), falling back to ``CUSTOM``
+    // when the triple doesn't match.
+    const val CAPTURE_PROFILE_CUSTOM = "custom"
+    const val CAPTURE_PROFILE_SMOOTH = "smooth"
+    const val CAPTURE_PROFILE_BALANCED = "balanced"
+    const val CAPTURE_PROFILE_SPARSE = "sparse"
 
     fun prefs(ctx: Context): SharedPreferences =
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -139,6 +186,77 @@ object ServerConfig {
 
     fun setCameraConfigKey(ctx: Context, key: String) {
         prefs(ctx).edit { putString(KEY_CAMERA_CONFIG, key) }
+    }
+
+    fun frameFilterEnabled(ctx: Context): Boolean =
+        prefs(ctx).getBoolean(KEY_FRAME_FILTER_ENABLED, DEFAULT_FRAME_FILTER_ENABLED)
+
+    fun setFrameFilterEnabled(ctx: Context, enabled: Boolean) {
+        prefs(ctx).edit { putBoolean(KEY_FRAME_FILTER_ENABLED, enabled) }
+    }
+
+    fun frameFilterBlur(ctx: Context): Int =
+        prefs(ctx)
+            .getInt(KEY_FRAME_FILTER_BLUR, DEFAULT_FRAME_FILTER_BLUR)
+            .coerceIn(MIN_FRAME_FILTER_BLUR, MAX_FRAME_FILTER_BLUR)
+
+    fun setFrameFilterBlur(ctx: Context, value: Int) {
+        prefs(ctx).edit {
+            putInt(KEY_FRAME_FILTER_BLUR, value.coerceIn(MIN_FRAME_FILTER_BLUR, MAX_FRAME_FILTER_BLUR))
+        }
+    }
+
+    fun frameFilterMotion(ctx: Context): Int =
+        prefs(ctx)
+            .getInt(KEY_FRAME_FILTER_MOTION, DEFAULT_FRAME_FILTER_MOTION)
+            .coerceIn(MIN_FRAME_FILTER_MOTION, MAX_FRAME_FILTER_MOTION)
+
+    fun setFrameFilterMotion(ctx: Context, value: Int) {
+        prefs(ctx).edit {
+            putInt(KEY_FRAME_FILTER_MOTION, value.coerceIn(MIN_FRAME_FILTER_MOTION, MAX_FRAME_FILTER_MOTION))
+        }
+    }
+
+    fun frameFilterExposure(ctx: Context): Int =
+        prefs(ctx)
+            .getInt(KEY_FRAME_FILTER_EXPOSURE, DEFAULT_FRAME_FILTER_EXPOSURE)
+            .coerceIn(MIN_FRAME_FILTER_EXPOSURE, MAX_FRAME_FILTER_EXPOSURE)
+
+    fun setFrameFilterExposure(ctx: Context, value: Int) {
+        prefs(ctx).edit {
+            putInt(KEY_FRAME_FILTER_EXPOSURE, value.coerceIn(MIN_FRAME_FILTER_EXPOSURE, MAX_FRAME_FILTER_EXPOSURE))
+        }
+    }
+
+    /** Translate the user-facing motion-strictness slider (0–100)
+     *  to ``FrameQualityFilter.Config`` thresholds. */
+    fun frameFilterLinVelMax(motionStrictness: Int): Double {
+        // 0 → 1.00 m/s; 100 → 0.10 m/s. Linear interpolation.
+        val t = motionStrictness.coerceIn(0, 100) / 100.0
+        return 1.0 - t * 0.90
+    }
+
+    fun frameFilterAngVelMaxDeg(motionStrictness: Int): Double {
+        // 0 → 70 deg/s; 100 → 5 deg/s.
+        val t = motionStrictness.coerceIn(0, 100) / 100.0
+        return 70.0 - t * 65.0
+    }
+
+    fun frameFilterExposureSigma(exposureStrictness: Int): Double {
+        // 0 → 5.0σ; 100 → 1.5σ. Lower sigma = stricter.
+        val t = exposureStrictness.coerceIn(0, 100) / 100.0
+        return 5.0 - t * 3.5
+    }
+
+    /** Persisted capture-profile selection. See the constants
+     *  ``CAPTURE_PROFILE_*``. Default is CUSTOM — i.e. let the
+     *  underlying sliders drive, no automatic snap. */
+    fun captureProfile(ctx: Context): String =
+        prefs(ctx).getString(KEY_CAPTURE_PROFILE, CAPTURE_PROFILE_CUSTOM)
+            ?: CAPTURE_PROFILE_CUSTOM
+
+    fun setCaptureProfile(ctx: Context, profile: String) {
+        prefs(ctx).edit { putString(KEY_CAPTURE_PROFILE, profile) }
     }
 
     /**

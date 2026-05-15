@@ -134,6 +134,35 @@ class Draft internal constructor(
         writeMeta()
     }
 
+    /** Stamp the on-device frame-quality stats into the draft's
+     *  meta.json. Called from [CaptureActivity] on Finish so the
+     *  drop counters + effective fps survive the
+     *  "Save for later" → "Upload" hand-off (the Compose state
+     *  flow doesn't outlive the activity). Forwarded to the
+     *  server's freeform ``meta`` dict by [DraftUploader]. */
+    @Synchronized
+    fun recordQualityStats(
+        blur: Int,
+        motion: Int,
+        exposure: Int,
+        tracking: Int,
+        preRoll: Int,
+        rateLimit: Int,
+        effectiveFps: Float,
+    ) {
+        _meta = _meta.copy(
+            framedrop_blur = blur,
+            framedrop_motion = motion,
+            framedrop_exposure = exposure,
+            framedrop_tracking = tracking,
+            framedrop_preroll = preRoll,
+            framedrop_ratelimit = rateLimit,
+            effective_fps = effectiveFps,
+            updated_at = nowIso(),
+        )
+        writeMeta()
+    }
+
     /** Set the per-capture train_iters override. */
     @Synchronized
     fun setTrainIters(iters: Int?) {
@@ -246,6 +275,20 @@ data class DraftMeta(
     val finalized: Boolean = false,
     val intrinsics: SerializableIntrinsics? = null,
     val train_iters: Int? = null,
+    // On-device frame-quality stats stamped when the capture
+    // gate flips off (Finish prompt → save-for-later or upload-
+    // now). Persisted in the draft's meta.json and forwarded to
+    // the server's freeform ``meta`` dict on upload so the
+    // studio's capture detail screen can render them. Defaults
+    // are 0 so drafts created before this PR round-trip
+    // cleanly.
+    val framedrop_blur: Int = 0,
+    val framedrop_motion: Int = 0,
+    val framedrop_exposure: Int = 0,
+    val framedrop_tracking: Int = 0,
+    val framedrop_preroll: Int = 0,
+    val framedrop_ratelimit: Int = 0,
+    val effective_fps: Float = 0f,
 )
 
 @Serializable

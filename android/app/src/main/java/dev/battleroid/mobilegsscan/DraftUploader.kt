@@ -69,6 +69,21 @@ class DraftUploader(
             put("source_kind", JsonPrimitive("images"))
             put("count", JsonPrimitive(total))
             meta.train_iters?.let { put("train_iters", JsonPrimitive(it)) }
+            // On-device frame-quality telemetry. The server's
+            // ``CaptureCreate.meta: dict[str, Any]`` accepts
+            // arbitrary keys; the studio's capture detail screen
+            // surfaces these so the user can see which kind of
+            // problem (motion / blur / exposure) dominated their
+            // capture. Sent unconditionally — drafts predating the
+            // filter still send zeros, which the studio can
+            // display as "filter disabled" or simply hide.
+            put("framedrop_blur", JsonPrimitive(meta.framedrop_blur))
+            put("framedrop_motion", JsonPrimitive(meta.framedrop_motion))
+            put("framedrop_exposure", JsonPrimitive(meta.framedrop_exposure))
+            put("framedrop_tracking", JsonPrimitive(meta.framedrop_tracking))
+            put("framedrop_preroll", JsonPrimitive(meta.framedrop_preroll))
+            put("framedrop_ratelimit", JsonPrimitive(meta.framedrop_ratelimit))
+            put("effective_fps", JsonPrimitive(meta.effective_fps))
         }
 
         val capture = try {

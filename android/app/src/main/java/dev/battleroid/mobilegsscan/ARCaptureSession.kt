@@ -9,11 +9,14 @@ import com.google.ar.core.Camera
 import com.google.ar.core.CameraIntrinsics
 import com.google.ar.core.Config
 import com.google.ar.core.Frame
+import com.google.ar.core.LightEstimate
 import com.google.ar.core.PointCloud
+import com.google.ar.core.Pose
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
 import com.google.ar.core.exceptions.NotYetAvailableException
 import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
 
 /**
  * Thin wrapper over an ARCore [Session] that:
@@ -23,9 +26,11 @@ import java.io.ByteArrayOutputStream
  *   - exposes [update] which advances the session by one frame and
  *     returns the resulting [Frame], so callers can run their own
  *     rendering against ARCore's camera-feed texture.
- *   - exposes [pollFrameData] which extracts the most recent tracked
- *     pose + intrinsics + JPEG-encoded RGB image from a Frame,
- *     throttled to a target frame rate.
+ *   - exposes [acquireRawFrame] which extracts the most recent
+ *     tracked pose + intrinsics + ARCore [Image] from a Frame,
+ *     throttled to a target frame rate. Two-stage: callers can
+ *     inspect the YUV / pose, decide whether to keep the frame,
+ *     and only pay for the YUV→JPEG encode on accept.
  *   - exposes [viewMatrix] / [projectionMatrix] / [acquirePointCloud]
  *     so overlay renderers can project and color world-space
  *     geometry without reaching into the underlying [Session].
@@ -81,13 +86,19 @@ class ARCaptureSession(
         val cfg = Config(this).apply {
             focusMode = Config.FocusMode.AUTO
             updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
-            lightEstimationMode = Config.LightEstimationMode.DISABLED
+            // AMBIENT_INTENSITY (rather than DISABLED) so callers
+            // can cross-check the Y-plane exposure metric against
+            // ARCore's post-auto-exposure brightness estimate.
+            // ARCore would otherwise just skip the small AE
+            // analysis the cost of which is negligible — the
+            // expensive ``ENVIRONMENTAL_HDR`` mode is the one we
+            // avoid here.
+            lightEstimationMode = Config.LightEstimationMode.AMBIENT_INTENSITY
             planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
         }
         configure(cfg)
     }
     private var lastEmitMs: Long = 0
-    private var frameIndex: Int = 0
 
     fun resume() = session.resume()
     fun pause() = session.pause()
@@ -136,8 +147,8 @@ class ARCaptureSession(
         frame.acquirePointCloud()
 
     /**
-     * Extract pose + intrinsics + JPEG from a Frame returned by
-     * [update], if and only if:
+     * Acquire pose + intrinsics + the raw ARCore [Image] from
+     * [frame], if and only if:
      *   - ARCore is currently TRACKING (so the pose is meaningful)
      *   - enough time has elapsed since the last emit to honour the
      *     [targetIntervalMs] rate limit. A non-positive interval
@@ -148,31 +159,55 @@ class ARCaptureSession(
      *   - acquireCameraImage actually has a frame ready (NotYet on
      *     the first few calls is normal).
      *
-     * Returns null in any of those cases.
+     * Returns null in any of those cases. **Caller is responsible
+     * for [RawFrame.close]** — the underlying ARCore image holds a
+     * native ref that has to be released, which is why the call
+     * site uses ``acquireRawFrame(frame)?.use { ... }``.
+     *
+     * This is the first stage of a two-stage capture: callers can
+     * inspect the Y plane (sharpness / exposure stats) and the
+     * pose deltas (motion velocity) before committing to the
+     * expensive YUV→JPEG encode in [encodeJpeg]. Dropping a frame
+     * is just letting the [RawFrame] close without calling
+     * [encodeJpeg], saving ~10–15 ms per dropped frame on top of
+     * the storage / upload savings.
      */
-    fun pollFrameData(frame: Frame): CapturedFrame? {
+    fun acquireRawFrame(frame: Frame): RawFrame? {
         val camera: Camera = frame.camera
         if (camera.trackingState != TrackingState.TRACKING) return null
 
         val now = frame.timestamp / 1_000_000L
         if (targetIntervalMs > 0 && now - lastEmitMs < targetIntervalMs) return null
 
-        val jpeg = encodeFrameJpeg(frame) ?: return null
-        val intrinsics = readIntrinsics(camera.imageIntrinsics)
-        val pose = FloatArray(16).also { camera.pose.toMatrix(it, 0) }
-
-        lastEmitMs = now
-        val idx = frameIndex++
-        return CapturedFrame(idx = idx, jpeg = jpeg, pose = pose, intrinsics = intrinsics)
-    }
-
-    private fun encodeFrameJpeg(frame: Frame): ByteArray? {
         val image: Image = try {
             frame.acquireCameraImage()
         } catch (e: NotYetAvailableException) {
             return null
         }
-        return image.use { yuvToJpeg(it, jpegQuality) }
+        lastEmitMs = now
+        val intrinsics = readIntrinsics(camera.imageIntrinsics)
+        return RawFrame(
+            image = image,
+            pose = camera.pose,
+            intrinsics = intrinsics,
+            timestampNs = frame.timestamp,
+            trackingState = camera.trackingState,
+            jpegQuality = jpegQuality,
+        )
+    }
+
+    /**
+     * Pixel-intensity estimate from ARCore's ambient-light probe
+     * for [frame]. Range nominally 0..1 (auto-exposure pre-
+     * correction); ``null`` when the estimate is unavailable
+     * (first ~3 frames after [resume], or LightEstimate state ≠
+     * VALID). Cheap to read — ARCore computes it every frame
+     * anyway under [Config.LightEstimationMode.AMBIENT_INTENSITY].
+     */
+    fun ambientPixelIntensity(frame: Frame): Float? {
+        val estimate: LightEstimate = frame.lightEstimate
+        if (estimate.state != LightEstimate.State.VALID) return null
+        return try { estimate.pixelIntensity } catch (_: Exception) { null }
     }
 
     private fun readIntrinsics(intr: CameraIntrinsics): Intrinsics {
@@ -188,6 +223,9 @@ class ARCaptureSession(
             h = dim[1],
         )
     }
+
+    internal fun yuvToJpegInternal(image: Image, quality: Int): ByteArray =
+        yuvToJpeg(image, quality)
 
     private fun yuvToJpeg(image: Image, quality: Int): ByteArray {
         // ARCore returns Y_8 + UV planes (NV21-friendly). We flatten
@@ -211,13 +249,43 @@ class ARCaptureSession(
     }
 }
 
-/** One frame ready for streaming. [pose] is a column-major 4x4 in world space. */
-data class CapturedFrame(
-    val idx: Int,
-    val jpeg: ByteArray,
-    val pose: FloatArray,
+/**
+ * Two-stage capture object held between
+ * [ARCaptureSession.acquireRawFrame] and the per-frame decision.
+ * Owns the underlying ARCore [Image] until [close] (the standard
+ * Kotlin `use` pattern). Call [encodeJpeg] to materialise the
+ * compressed bytes — skip it on a dropped frame and the YUV→JPEG
+ * cost (~10–15 ms on a 1080p frame) is avoided entirely.
+ *
+ * [pose] is the ARCore [Pose] (quaternion + translation), suitable
+ * for cheap frame-to-frame velocity math. [poseMatrix] is the
+ * column-major 4×4 the existing disk-write path wants — both are
+ * exposed so the call site doesn't pay for the matrix conversion
+ * on dropped frames.
+ */
+class RawFrame internal constructor(
+    val image: Image,
+    val pose: Pose,
     val intrinsics: Intrinsics,
-)
+    val timestampNs: Long,
+    val trackingState: TrackingState,
+    private val jpegQuality: Int,
+) : AutoCloseable {
+    val yBuffer: ByteBuffer get() = image.planes[0].buffer
+    val yRowStride: Int get() = image.planes[0].rowStride
+    val yPixelStride: Int get() = image.planes[0].pixelStride
+    val width: Int get() = image.width
+    val height: Int get() = image.height
+
+    fun poseMatrix(): FloatArray = FloatArray(16).also { pose.toMatrix(it, 0) }
+
+    fun encodeJpeg(session: ARCaptureSession): ByteArray =
+        session.yuvToJpegInternal(image, jpegQuality)
+
+    override fun close() {
+        try { image.close() } catch (_: Exception) { /* idempotent */ }
+    }
+}
 
 private inline fun <T : AutoCloseable, R> T.use(block: (T) -> R): R = try {
     block(this)
