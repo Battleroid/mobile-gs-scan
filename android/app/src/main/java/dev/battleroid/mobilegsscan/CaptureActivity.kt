@@ -598,6 +598,16 @@ class CaptureActivity : ComponentActivity() {
 
             if (!captureGateActive) return
 
+            // Pre-evaluate hook: feed the filter the current
+            // tracking state on *every* frame, even when
+            // ``acquireRawFrame`` is about to return null. Without
+            // this, the filter never observes the TRACKING →
+            // PAUSED/STOPPED transition (the upstream raw acquire
+            // already gates on TRACKING), so its pre-roll counter
+            // never arms on resume and the post-resume noisy
+            // frames sneak into the dataset.
+            qualityFilter?.notifyTrackingState(frame.camera.trackingState)
+
             // Two-stage capture: acquire the raw frame (cheap; no
             // JPEG yet), run the on-device quality filter, only
             // pay the YUV→JPEG cost on accept. Dropped frames

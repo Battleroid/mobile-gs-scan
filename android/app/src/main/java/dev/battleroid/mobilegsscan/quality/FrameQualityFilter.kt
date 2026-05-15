@@ -100,6 +100,11 @@ class FrameQualityFilter(private val cfg: Config) {
     private val trackingCount = AtomicInteger(0)
     private val preRollCount = AtomicInteger(0)
     private val rateLimitCount = AtomicInteger(0)
+    // Latched 0 → 1 the first time the native kernel is missing.
+    // This counter does NOT participate in [DropCounts.total]
+    // because the kernel-missing path *accepts* the frame; it's
+    // purely a "filter degraded" flag the HUD / telemetry can
+    // surface separately.
     private val kernelMissingCount = AtomicInteger(0)
     private val acceptCount = AtomicInteger(0)
 
@@ -125,6 +130,30 @@ class FrameQualityFilter(private val cfg: Config) {
         kernelMissing = kernelMissingCount.get(),
         accepted = acceptCount.get(),
     )
+
+    /**
+     * Notify the filter of the current ARCore tracking state on
+     * *every* frame — including frames where [ARCaptureSession.
+     * acquireRawFrame] returned null (no image yet, throttle gate,
+     * non-TRACKING). Without this, the filter only sees frames
+     * that already passed the upstream TRACKING check, so it
+     * never observes a TRACKING → PAUSED transition; the pre-roll
+     * reset path that's supposed to fire on resume then never
+     * arms, and the user gets noisy post-resume frames in the
+     * dataset.
+     *
+     * Idempotent — calling with the current state is a no-op. Cost
+     * is one compare + one assign on every call; safe to drop
+     * into the GL render thread's hot path.
+     */
+    fun notifyTrackingState(trackingState: TrackingState) {
+        if (lastTrackingState == trackingState) return
+        if (trackingState != TrackingState.TRACKING) {
+            trackingCount.incrementAndGet()
+            framesSinceTrackingResume = 0
+        }
+        lastTrackingState = trackingState
+    }
 
     /**
      * Decide whether a single frame should be accepted.
@@ -191,14 +220,17 @@ class FrameQualityFilter(private val cfg: Config) {
         }
 
         // Native kernel pass. Returns null when the .so failed to
-        // load — instead of crashing the pipeline, we count it as
-        // a one-time loss and accept anyway so capture is at least
-        // usable. The HUD's KERNEL_UNAVAILABLE counter surfaces
-        // the issue.
+        // load — instead of crashing the pipeline, we accept the
+        // frame anyway so capture is at least usable. The counter
+        // is latched at 1 so the HUD / telemetry can surface
+        // "filter degraded" once, rather than flooding the total
+        // with one bogus drop per frame (which used to make the
+        // HUD report large "dropped" totals on devices that
+        // weren't actually dropping anything).
         val stats = NativeKernels.analyze(yBuffer, width, height, rowStride, pixelStride)
             ?.let(NativeKernels.Stats::fromArray)
         if (stats == null) {
-            kernelMissingCount.incrementAndGet()
+            kernelMissingCount.compareAndSet(0, 1)
             return acceptInternal(timestampNs, pose, accumulateStats = false)
         }
 
@@ -308,10 +340,15 @@ data class DropCounts(
     val tracking: Int = 0,
     val preRoll: Int = 0,
     val rateLimit: Int = 0,
+    /** Latched 0 → 1 flag — *not* a drop count. The kernel-
+     *  missing path accepts the frame, so this would only inflate
+     *  the HUD's drop total without representing real drops. The
+     *  field is here so telemetry / debug surfaces can still
+     *  report "filter degraded" once. */
     val kernelMissing: Int = 0,
     val accepted: Int = 0,
 ) {
-    val total: Int get() = blur + motion + exposure + tracking + preRoll + rateLimit + kernelMissing
+    val total: Int get() = blur + motion + exposure + tracking + preRoll + rateLimit
 
     /** Dominant reason among "user-meaningful" drops (excludes
      *  pre-roll and tracking, which the user can't react to). */

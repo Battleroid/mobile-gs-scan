@@ -188,12 +188,24 @@ class ServerConfigActivity : ComponentActivity() {
     /** Selecting a named profile snaps fps + filter values to the
      *  canonical triple for that profile. Custom leaves the
      *  underlying sliders alone — useful when the user wants to
-     *  hand-tune from a starting point. */
+     *  hand-tune from a starting point.
+     *
+     *  Forces ``cameraConfigKey`` to ``CUSTOM`` for the three
+     *  named profiles: ARCore's CameraConfig presets pin the
+     *  hardware frame rate and ``ARCaptureSession`` disables the
+     *  app-side throttle entirely when a preset applies. With a
+     *  ``1920x1080@30`` preset still selected, the Sparse chip's
+     *  advertised 8 fps would be silently ignored — ARCore would
+     *  pace at 30 fps regardless. Forcing Custom on the camera-
+     *  config side hands pacing back to the fps slider, so the
+     *  chip's advertised rate is the rate the user actually
+     *  gets. */
     private fun onCaptureProfileChange(profile: String) {
         state.update { prev ->
             val updated = when (profile) {
                 ServerConfig.CAPTURE_PROFILE_SMOOTH -> prev.copy(
                     captureProfile = profile,
+                    cameraConfigKey = ServerConfig.CAMERA_CONFIG_CUSTOM,
                     captureFps = 30,
                     frameFilterEnabled = true,
                     frameFilterBlur = 60,    // lenient
@@ -202,6 +214,7 @@ class ServerConfigActivity : ComponentActivity() {
                 )
                 ServerConfig.CAPTURE_PROFILE_BALANCED -> prev.copy(
                     captureProfile = profile,
+                    cameraConfigKey = ServerConfig.CAMERA_CONFIG_CUSTOM,
                     captureFps = 15,
                     frameFilterEnabled = true,
                     frameFilterBlur = ServerConfig.DEFAULT_FRAME_FILTER_BLUR,
@@ -210,6 +223,7 @@ class ServerConfigActivity : ComponentActivity() {
                 )
                 ServerConfig.CAPTURE_PROFILE_SPARSE -> prev.copy(
                     captureProfile = profile,
+                    cameraConfigKey = ServerConfig.CAMERA_CONFIG_CUSTOM,
                     captureFps = 8,
                     frameFilterEnabled = true,
                     frameFilterBlur = 140,   // strict
