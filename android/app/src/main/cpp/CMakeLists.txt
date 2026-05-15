@@ -17,6 +17,21 @@ target_compile_options(pebble_native PRIVATE
     -fvisibility=hidden
 )
 
+# 16 KB page-size alignment. Android 15 (API 35) added a runtime
+# warning for apps whose native libs aren't aligned to 16 KB
+# LOAD segments — the OS is moving toward 16 KB page-size devices
+# (Pixel 8+ in the dev preview, broader rollout planned). NDK r27
+# enabled this by default at the toolchain level, but only when
+# the project explicitly opts in via this linker flag; without
+# it the LOAD segments still land at the legacy 4 KB boundary
+# and the user sees an "Android App Compatibility" dialog at
+# launch listing libpebble_native.so. Setting it here makes the
+# build forward-compatible without bumping minSdk.
+target_link_options(pebble_native PRIVATE
+    "-Wl,-z,max-page-size=16384"
+    "-Wl,-z,common-page-size=16384"
+)
+
 # Standard NDK system libs. ``log`` is for debug __android_log_print
 # during development; ``android`` for ALOG / asset surfaces if we
 # ever need them.
