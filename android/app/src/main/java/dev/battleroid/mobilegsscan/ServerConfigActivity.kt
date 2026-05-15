@@ -96,7 +96,25 @@ class ServerConfigActivity : ComponentActivity() {
                         state.update { it.copy(overlayAlphaPct = v) }
                     },
                     onCameraConfigKeyChange = { v ->
-                        state.update { it.copy(cameraConfigKey = v) }
+                        // Picking a CameraConfig preset disables
+                        // app-side fps throttling in
+                        // ``ARCaptureSession`` (ARCore paces the
+                        // hardware itself at the preset rate),
+                        // which would silently ignore any named
+                        // capture profile's fps target. Drop the
+                        // user back to CUSTOM on the profile chip
+                        // so the contract holds: a named profile
+                        // always means its advertised fps. Staying
+                        // on the CUSTOM camera config preserves
+                        // the existing profile selection — it's
+                        // the named-preset case that breaks the
+                        // contract.
+                        state.update { prev ->
+                            val profile =
+                                if (v == ServerConfig.CAMERA_CONFIG_CUSTOM) prev.captureProfile
+                                else ServerConfig.CAPTURE_PROFILE_CUSTOM
+                            prev.copy(cameraConfigKey = v, captureProfile = profile)
+                        }
                     },
                     onCaptureProfileChange = ::onCaptureProfileChange,
                     onFrameFilterEnabledChange = { v ->

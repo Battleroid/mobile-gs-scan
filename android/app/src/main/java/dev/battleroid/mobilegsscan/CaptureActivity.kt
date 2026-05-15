@@ -649,10 +649,33 @@ class CaptureActivity : ComponentActivity() {
 
                 when (decision) {
                     is FrameQualityFilter.Decision.Drop -> {
+                        // Track *consecutive* drops of the same
+                        // reason — a drop for a different reason
+                        // breaks the streak. Without this, nine
+                        // motion drops followed by a blur drop
+                        // and then a motion drop would push
+                        // ``motionStreak`` over the threshold and
+                        // surface a misleading "Hold steady"
+                        // banner, even though the user only had
+                        // 1 + 1 consecutive motion drops at the
+                        // end. Resetting the non-matching
+                        // counters keeps the banner honest.
                         when (decision.reason) {
-                            FrameQualityFilter.DropReason.MOTION -> ++motionStreak
-                            FrameQualityFilter.DropReason.BLUR -> ++blurStreak
-                            FrameQualityFilter.DropReason.EXPOSURE -> ++exposureStreak
+                            FrameQualityFilter.DropReason.MOTION -> {
+                                ++motionStreak
+                                blurStreak = 0
+                                exposureStreak = 0
+                            }
+                            FrameQualityFilter.DropReason.BLUR -> {
+                                ++blurStreak
+                                motionStreak = 0
+                                exposureStreak = 0
+                            }
+                            FrameQualityFilter.DropReason.EXPOSURE -> {
+                                ++exposureStreak
+                                motionStreak = 0
+                                blurStreak = 0
+                            }
                             else -> { /* tracking / pre-roll / etc. don't drive the streak banner */ }
                         }
                         maybeUpdateDropHud(filter)
