@@ -147,6 +147,39 @@ fun CaptureScreen(
                 )
             }
 
+            // Drop-count chip — only shown while capturing so the
+            // user doesn't see "0 drops" idle clutter. Sits under
+            // the frame-count pill on the right side; the chip
+            // collapses entirely when the filter is disabled or
+            // has dropped nothing.
+            if (state.captureActive && state.dropCounts.total > 0) {
+                DropCountChip(
+                    counts = state.dropCounts,
+                    effectiveFps = state.effectiveFps,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .windowInsetsPadding(
+                            WindowInsets.safeDrawing.only(WindowInsetsSides.Top)
+                        )
+                        .padding(top = 64.dp, end = 16.dp),
+                )
+            }
+
+            // Transient "Hold steady" / "Slow down" / "Lighting
+            // change" banner when a single drop reason has
+            // dominated 10+ consecutive frames. Surfacing this
+            // turns the filter from invisible into something the
+            // user can react to — the same motion that's getting
+            // dropped is the motion they can intentionally slow.
+            state.streakWarning?.let { reason ->
+                StreakBanner(
+                    reason = reason,
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .padding(horizontal = 24.dp),
+                )
+            }
+
             if (!state.captureActive) {
                 StartHintCard(
                     modifier = Modifier
@@ -292,6 +325,99 @@ private fun CoverageRing(
             topLeft = Offset(pad, pad),
             size = arcSize,
             style = Stroke(width = stroke, cap = StrokeCap.Round),
+        )
+    }
+}
+
+/**
+ * Compact pill showing live frame-quality stats: how many frames
+ * the on-device filter has rejected (broken down by dominant
+ * cause) and the resulting effective fps. Hidden when the filter
+ * is disabled or hasn't dropped anything yet — the screen stays
+ * uncluttered for the common case where the user is moving
+ * carefully and almost every frame lands.
+ *
+ * Tinted by the dominant drop reason (motion=tomato, blur=amber,
+ * exposure=blue) so a glance is enough to know what's going
+ * wrong, without having to read the numbers.
+ */
+@Composable
+private fun DropCountChip(
+    counts: dev.battleroid.mobilegsscan.quality.DropCounts,
+    effectiveFps: Float,
+    modifier: Modifier = Modifier,
+) {
+    val pebble = MaterialTheme.pebble
+    val dom = counts.dominantReason()
+    val tint = when (dom) {
+        dev.battleroid.mobilegsscan.quality.FrameQualityFilter.DropReason.MOTION -> pebble.accent
+        dev.battleroid.mobilegsscan.quality.FrameQualityFilter.DropReason.BLUR -> pebble.accent2
+        dev.battleroid.mobilegsscan.quality.FrameQualityFilter.DropReason.EXPOSURE -> pebble.accent3
+        else -> Color.White.copy(alpha = 0.7f)
+    }
+    GlassPill(modifier = modifier) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .size(7.dp)
+                    .clip(CircleShape)
+                    .background(tint),
+            )
+            Spacer(Modifier.size(8.dp))
+            Text(
+                text = buildString {
+                    append("−")
+                    append(counts.total)
+                    append("  ·  ")
+                    append(String.format("%.1f", effectiveFps))
+                    append(" fps")
+                },
+                style = MaterialTheme.typography.labelMedium,
+                color = Color.White,
+            )
+        }
+    }
+}
+
+/**
+ * Transient banner that pops when the same drop reason has fired
+ * 10+ times in a row — the user is doing the same thing wrong
+ * repeatedly, and they need to know.
+ *
+ * Reason → coaching:
+ *   MOTION   → "Hold steady" (camera is shaking / panning too fast)
+ *   BLUR     → "Refocus" (auto-focus is hunting, or the user is too
+ *               close to the subject)
+ *   EXPOSURE → "Lighting change — pause briefly" (auto-exposure is
+ *               adjusting; the AE settle takes a second or two)
+ *
+ * The activity clears ``streakWarning`` after the next accept,
+ * so the banner self-dismisses without timer logic in this
+ * composable.
+ */
+@Composable
+private fun StreakBanner(
+    reason: dev.battleroid.mobilegsscan.quality.FrameQualityFilter.DropReason,
+    modifier: Modifier = Modifier,
+) {
+    val pebble = MaterialTheme.pebble
+    val text = when (reason) {
+        dev.battleroid.mobilegsscan.quality.FrameQualityFilter.DropReason.MOTION ->
+            "Hold steady — too much motion"
+        dev.battleroid.mobilegsscan.quality.FrameQualityFilter.DropReason.BLUR ->
+            "Refocus — frames look soft"
+        dev.battleroid.mobilegsscan.quality.FrameQualityFilter.DropReason.EXPOSURE ->
+            "Lighting change — pause briefly"
+        else -> return // tracking / pre-roll / rate-limit aren't user-actionable
+    }
+    GlassPill(
+        modifier = modifier,
+        shape = RoundedCornerShape(999.dp),
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelLarge,
+            color = pebble.accent,
         )
     }
 }

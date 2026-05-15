@@ -34,6 +34,11 @@ data class SettingsUiState(
      *  supported configs); ``Failed`` carries a user-facing reason
      *  ("Grant camera access first", "ARCore not installed", …). */
     val cameraProbeStatus: CameraProbeStatus,
+    val captureProfile: String,
+    val frameFilterEnabled: Boolean,
+    val frameFilterBlur: Int,
+    val frameFilterMotion: Int,
+    val frameFilterExposure: Int,
 ) {
     companion object {
         /** Empty seed; the activity overwrites every field from
@@ -51,6 +56,11 @@ data class SettingsUiState(
             cameraConfigKey = ServerConfig.CAMERA_CONFIG_CUSTOM,
             cameraConfigs = emptyList(),
             cameraProbeStatus = CameraProbeStatus.Pending,
+            captureProfile = ServerConfig.CAPTURE_PROFILE_CUSTOM,
+            frameFilterEnabled = ServerConfig.DEFAULT_FRAME_FILTER_ENABLED,
+            frameFilterBlur = ServerConfig.DEFAULT_FRAME_FILTER_BLUR,
+            frameFilterMotion = ServerConfig.DEFAULT_FRAME_FILTER_MOTION,
+            frameFilterExposure = ServerConfig.DEFAULT_FRAME_FILTER_EXPOSURE,
         )
     }
 }

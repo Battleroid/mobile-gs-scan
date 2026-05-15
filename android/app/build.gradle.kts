@@ -74,6 +74,33 @@ android {
         buildConfigField(
             "String", "APP_BUILD_SHA", "\"$appBuildSha\"",
         )
+
+        // Native frame-quality kernel — see ``app/src/main/cpp``.
+        // Limited to the two ABIs that cover real-world Android
+        // hardware in this app's target audience: arm64 phones
+        // (ARCore-capable mid/high-tier) and the x86_64 emulator
+        // images we use for CI smoke tests. Skipping armeabi-v7a
+        // (32-bit ARM is deprecated for ARCore on API 28+) and
+        // x86 keeps the APK size bounded.
+        ndk {
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
+        externalNativeBuild {
+            cmake {
+                arguments += "-DANDROID_STL=c++_static"
+                cppFlags += listOf("-fexceptions", "-frtti")
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            // Pinned CMake version installed via sdkmanager;
+            // matches the version available on every modern AGP
+            // (8.1+) release.
+            version = "3.22.1"
+        }
     }
 
     buildTypes {

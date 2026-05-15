@@ -29,6 +29,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -75,6 +77,11 @@ fun SettingsScreen(
     onTrainItersChange: (Int) -> Unit,
     onOverlayAlphaPctChange: (Int) -> Unit,
     onCameraConfigKeyChange: (String) -> Unit,
+    onCaptureProfileChange: (String) -> Unit,
+    onFrameFilterEnabledChange: (Boolean) -> Unit,
+    onFrameFilterBlurChange: (Int) -> Unit,
+    onFrameFilterMotionChange: (Int) -> Unit,
+    onFrameFilterExposureChange: (Int) -> Unit,
     onSaveClick: () -> Unit,
     onBackClick: () -> Unit,
     onProfileClick: () -> Unit,
@@ -124,6 +131,20 @@ fun SettingsScreen(
                         focusedContainerColor = pebble.surface,
                         unfocusedContainerColor = pebble.surface,
                     ),
+                )
+            }
+
+            Section(
+                eyebrow = "camera",
+                title = "Capture profile",
+                hint = "Smooth keeps every captured frame; Balanced and " +
+                    "Sparse let the on-device quality filter drop blurry / " +
+                    "shaky / overexposed frames so the studio trains on " +
+                    "cleaner data. Pick Custom to mix and match below.",
+            ) {
+                CaptureProfileRow(
+                    selected = state.captureProfile,
+                    onChange = onCaptureProfileChange,
                 )
             }
 
@@ -215,6 +236,70 @@ fun SettingsScreen(
                     onValueChange = onOverlayAlphaPctChange,
                     suffix = "%",
                 )
+            }
+
+            // Frame-quality filter — bundled under "advanced" so
+            // most users only see the Capture profile chips
+            // above. The master switch hides the threshold sliders
+            // when off so the section collapses to a single
+            // toggle. Tweaking these is rarely necessary; the
+            // canonical use case is the user has noticed a
+            // specific failure mode (banded shadows, heavy hand
+            // motion in a tight space) that the profile presets
+            // don't handle well and wants to nudge.
+            Section(
+                eyebrow = "advanced",
+                title = "Frame-quality filter",
+                hint = "drops blurry / shaky / overexposed frames before " +
+                    "they reach the studio. usually you'll set strictness " +
+                    "via the Capture profile chips above; tweak here only " +
+                    "if you have a specific failure mode to target.",
+            ) {
+                FilterToggleRow(
+                    enabled = state.frameFilterEnabled,
+                    onChange = onFrameFilterEnabledChange,
+                )
+                if (state.frameFilterEnabled) {
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        text = "Sharpness floor",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = pebble.inkMuted,
+                    )
+                    IntSliderRow(
+                        value = state.frameFilterBlur,
+                        valueRange = ServerConfig.MIN_FRAME_FILTER_BLUR..
+                            ServerConfig.MAX_FRAME_FILTER_BLUR,
+                        onValueChange = onFrameFilterBlurChange,
+                        suffix = "",
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "Motion strictness",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = pebble.inkMuted,
+                    )
+                    IntSliderRow(
+                        value = state.frameFilterMotion,
+                        valueRange = ServerConfig.MIN_FRAME_FILTER_MOTION..
+                            ServerConfig.MAX_FRAME_FILTER_MOTION,
+                        onValueChange = onFrameFilterMotionChange,
+                        suffix = "%",
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "Exposure strictness",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = pebble.inkMuted,
+                    )
+                    IntSliderRow(
+                        value = state.frameFilterExposure,
+                        valueRange = ServerConfig.MIN_FRAME_FILTER_EXPOSURE..
+                            ServerConfig.MAX_FRAME_FILTER_EXPOSURE,
+                        onValueChange = onFrameFilterExposureChange,
+                        suffix = "%",
+                    )
+                }
             }
 
             Spacer(Modifier.height(8.dp))
@@ -713,6 +798,11 @@ private fun SettingsScreenPreview() {
                 cameraConfigKey = ServerConfig.CAMERA_CONFIG_CUSTOM,
                 cameraConfigs = emptyList(),
                 cameraProbeStatus = CameraProbeStatus.Ok,
+                captureProfile = ServerConfig.CAPTURE_PROFILE_BALANCED,
+                frameFilterEnabled = true,
+                frameFilterBlur = ServerConfig.DEFAULT_FRAME_FILTER_BLUR,
+                frameFilterMotion = ServerConfig.DEFAULT_FRAME_FILTER_MOTION,
+                frameFilterExposure = ServerConfig.DEFAULT_FRAME_FILTER_EXPOSURE,
             ),
             onStudioUrlChange = {},
             onCaptureFpsChange = {},
@@ -720,9 +810,100 @@ private fun SettingsScreenPreview() {
             onTrainItersChange = {},
             onOverlayAlphaPctChange = {},
             onCameraConfigKeyChange = {},
+            onCaptureProfileChange = {},
+            onFrameFilterEnabledChange = {},
+            onFrameFilterBlurChange = {},
+            onFrameFilterMotionChange = {},
+            onFrameFilterExposureChange = {},
             onSaveClick = {},
             onBackClick = {},
             onProfileClick = {},
+        )
+    }
+}
+
+/**
+ * One-tap capture-profile chip row. Selecting a profile is
+ * intentionally *just* a marker — the activity translates that
+ * marker into the underlying fps + filter values when it commits
+ * the form (see ``ServerConfigActivity.applyProfile``). Custom
+ * means "leave the underlying sliders alone."
+ */
+@Composable
+private fun CaptureProfileRow(
+    selected: String,
+    onChange: (String) -> Unit,
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            PresetCell(
+                modifier = Modifier.weight(1f),
+                label = "Smooth",
+                sub = "30 fps, lenient",
+                selected = selected == ServerConfig.CAPTURE_PROFILE_SMOOTH,
+                onClick = { onChange(ServerConfig.CAPTURE_PROFILE_SMOOTH) },
+            )
+            PresetCell(
+                modifier = Modifier.weight(1f),
+                label = "Balanced",
+                sub = "15 fps, default",
+                selected = selected == ServerConfig.CAPTURE_PROFILE_BALANCED,
+                onClick = { onChange(ServerConfig.CAPTURE_PROFILE_BALANCED) },
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            PresetCell(
+                modifier = Modifier.weight(1f),
+                label = "Sparse",
+                sub = "8 fps, strict",
+                selected = selected == ServerConfig.CAPTURE_PROFILE_SPARSE,
+                onClick = { onChange(ServerConfig.CAPTURE_PROFILE_SPARSE) },
+            )
+            PresetCell(
+                modifier = Modifier.weight(1f),
+                label = "Custom",
+                sub = "use sliders",
+                selected = selected == ServerConfig.CAPTURE_PROFILE_CUSTOM,
+                onClick = { onChange(ServerConfig.CAPTURE_PROFILE_CUSTOM) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun FilterToggleRow(
+    enabled: Boolean,
+    onChange: (Boolean) -> Unit,
+) {
+    val pebble = MaterialTheme.pebble
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(
+            text = if (enabled) "Filter is on" else "Filter is off",
+            style = MaterialTheme.typography.labelLarge,
+            color = pebble.ink,
+        )
+        Switch(
+            checked = enabled,
+            onCheckedChange = onChange,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = pebble.accent,
+                checkedTrackColor = pebble.accent.copy(alpha = 0.35f),
+                uncheckedThumbColor = pebble.inkMuted,
+                uncheckedTrackColor = pebble.rule,
+            ),
         )
     }
 }

@@ -68,6 +68,11 @@ class ServerConfigActivity : ComponentActivity() {
             cameraConfigKey = ServerConfig.cameraConfigKey(this),
             cameraConfigs = emptyList(),
             cameraProbeStatus = CameraProbeStatus.Pending,
+            captureProfile = ServerConfig.captureProfile(this),
+            frameFilterEnabled = ServerConfig.frameFilterEnabled(this),
+            frameFilterBlur = ServerConfig.frameFilterBlur(this),
+            frameFilterMotion = ServerConfig.frameFilterMotion(this),
+            frameFilterExposure = ServerConfig.frameFilterExposure(this),
         )
 
         runCameraConfigProbe()
@@ -78,14 +83,65 @@ class ServerConfigActivity : ComponentActivity() {
                 SettingsScreen(
                     state = current,
                     onStudioUrlChange = { v -> state.update { it.copy(studioUrl = v) } },
-                    onCaptureFpsChange = { v -> state.update { it.copy(captureFps = v) } },
+                    onCaptureFpsChange = { v ->
+                        // Editing fps via the slider drops the
+                        // user out of any named profile — the
+                        // values no longer match a canonical
+                        // triple.
+                        state.update { it.copy(captureFps = v, captureProfile = ServerConfig.CAPTURE_PROFILE_CUSTOM) }
+                    },
                     onJpegQualityChange = { v -> state.update { it.copy(jpegQuality = v) } },
                     onTrainItersChange = { v -> state.update { it.copy(trainIters = v) } },
                     onOverlayAlphaPctChange = { v ->
                         state.update { it.copy(overlayAlphaPct = v) }
                     },
                     onCameraConfigKeyChange = { v ->
-                        state.update { it.copy(cameraConfigKey = v) }
+                        // Picking a CameraConfig preset disables
+                        // app-side fps throttling in
+                        // ``ARCaptureSession`` (ARCore paces the
+                        // hardware itself at the preset rate),
+                        // which would silently ignore any named
+                        // capture profile's fps target. Drop the
+                        // user back to CUSTOM on the profile chip
+                        // so the contract holds: a named profile
+                        // always means its advertised fps. Staying
+                        // on the CUSTOM camera config preserves
+                        // the existing profile selection — it's
+                        // the named-preset case that breaks the
+                        // contract.
+                        state.update { prev ->
+                            val profile =
+                                if (v == ServerConfig.CAMERA_CONFIG_CUSTOM) prev.captureProfile
+                                else ServerConfig.CAPTURE_PROFILE_CUSTOM
+                            prev.copy(cameraConfigKey = v, captureProfile = profile)
+                        }
+                    },
+                    onCaptureProfileChange = ::onCaptureProfileChange,
+                    onFrameFilterEnabledChange = { v ->
+                        // Flipping the master switch breaks any
+                        // named profile's contract — Balanced
+                        // with filter-off is a different runtime
+                        // than the chip advertises. Force CUSTOM
+                        // so the chip row reflects what's
+                        // actually about to happen at capture
+                        // time, matching the same pattern the
+                        // per-threshold sliders + camera-config
+                        // edits already use.
+                        state.update {
+                            it.copy(
+                                frameFilterEnabled = v,
+                                captureProfile = ServerConfig.CAPTURE_PROFILE_CUSTOM,
+                            )
+                        }
+                    },
+                    onFrameFilterBlurChange = { v ->
+                        state.update { it.copy(frameFilterBlur = v, captureProfile = ServerConfig.CAPTURE_PROFILE_CUSTOM) }
+                    },
+                    onFrameFilterMotionChange = { v ->
+                        state.update { it.copy(frameFilterMotion = v, captureProfile = ServerConfig.CAPTURE_PROFILE_CUSTOM) }
+                    },
+                    onFrameFilterExposureChange = { v ->
+                        state.update { it.copy(frameFilterExposure = v, captureProfile = ServerConfig.CAPTURE_PROFILE_CUSTOM) }
                     },
                     onSaveClick = ::onSave,
                     onBackClick = { finish() },
@@ -161,6 +217,57 @@ class ServerConfigActivity : ComponentActivity() {
         startActivity(android.content.Intent(this, ProfileActivity::class.java))
     }
 
+    /** Selecting a named profile snaps fps + filter values to the
+     *  canonical triple for that profile. Custom leaves the
+     *  underlying sliders alone — useful when the user wants to
+     *  hand-tune from a starting point.
+     *
+     *  Forces ``cameraConfigKey`` to ``CUSTOM`` for the three
+     *  named profiles: ARCore's CameraConfig presets pin the
+     *  hardware frame rate and ``ARCaptureSession`` disables the
+     *  app-side throttle entirely when a preset applies. With a
+     *  ``1920x1080@30`` preset still selected, the Sparse chip's
+     *  advertised 8 fps would be silently ignored — ARCore would
+     *  pace at 30 fps regardless. Forcing Custom on the camera-
+     *  config side hands pacing back to the fps slider, so the
+     *  chip's advertised rate is the rate the user actually
+     *  gets. */
+    private fun onCaptureProfileChange(profile: String) {
+        state.update { prev ->
+            val updated = when (profile) {
+                ServerConfig.CAPTURE_PROFILE_SMOOTH -> prev.copy(
+                    captureProfile = profile,
+                    cameraConfigKey = ServerConfig.CAMERA_CONFIG_CUSTOM,
+                    captureFps = 30,
+                    frameFilterEnabled = true,
+                    frameFilterBlur = 60,    // lenient
+                    frameFilterMotion = 30,  // lenient
+                    frameFilterExposure = 30,
+                )
+                ServerConfig.CAPTURE_PROFILE_BALANCED -> prev.copy(
+                    captureProfile = profile,
+                    cameraConfigKey = ServerConfig.CAMERA_CONFIG_CUSTOM,
+                    captureFps = 15,
+                    frameFilterEnabled = true,
+                    frameFilterBlur = ServerConfig.DEFAULT_FRAME_FILTER_BLUR,
+                    frameFilterMotion = ServerConfig.DEFAULT_FRAME_FILTER_MOTION,
+                    frameFilterExposure = ServerConfig.DEFAULT_FRAME_FILTER_EXPOSURE,
+                )
+                ServerConfig.CAPTURE_PROFILE_SPARSE -> prev.copy(
+                    captureProfile = profile,
+                    cameraConfigKey = ServerConfig.CAMERA_CONFIG_CUSTOM,
+                    captureFps = 8,
+                    frameFilterEnabled = true,
+                    frameFilterBlur = 140,   // strict
+                    frameFilterMotion = 75,  // strict
+                    frameFilterExposure = 70,
+                )
+                else -> prev.copy(captureProfile = ServerConfig.CAPTURE_PROFILE_CUSTOM)
+            }
+            updated
+        }
+    }
+
     private fun onSave() {
         val s = state.value
         val url = s.studioUrl.trim()
@@ -174,6 +281,11 @@ class ServerConfigActivity : ComponentActivity() {
         ServerConfig.setCaptureTrainIters(this, s.trainIters)
         ServerConfig.setCoverageOverlayAlphaPct(this, s.overlayAlphaPct)
         ServerConfig.setCameraConfigKey(this, s.cameraConfigKey)
+        ServerConfig.setCaptureProfile(this, s.captureProfile)
+        ServerConfig.setFrameFilterEnabled(this, s.frameFilterEnabled)
+        ServerConfig.setFrameFilterBlur(this, s.frameFilterBlur)
+        ServerConfig.setFrameFilterMotion(this, s.frameFilterMotion)
+        ServerConfig.setFrameFilterExposure(this, s.frameFilterExposure)
         val saved = ServerConfig.studioUrl(this).orEmpty()
         if (saved != url) {
             // setStudioUrl prepends https:// when no scheme was
