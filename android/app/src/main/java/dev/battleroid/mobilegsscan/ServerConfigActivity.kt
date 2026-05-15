@@ -118,7 +118,21 @@ class ServerConfigActivity : ComponentActivity() {
                     },
                     onCaptureProfileChange = ::onCaptureProfileChange,
                     onFrameFilterEnabledChange = { v ->
-                        state.update { it.copy(frameFilterEnabled = v) }
+                        // Flipping the master switch breaks any
+                        // named profile's contract — Balanced
+                        // with filter-off is a different runtime
+                        // than the chip advertises. Force CUSTOM
+                        // so the chip row reflects what's
+                        // actually about to happen at capture
+                        // time, matching the same pattern the
+                        // per-threshold sliders + camera-config
+                        // edits already use.
+                        state.update {
+                            it.copy(
+                                frameFilterEnabled = v,
+                                captureProfile = ServerConfig.CAPTURE_PROFILE_CUSTOM,
+                            )
+                        }
                     },
                     onFrameFilterBlurChange = { v ->
                         state.update { it.copy(frameFilterBlur = v, captureProfile = ServerConfig.CAPTURE_PROFILE_CUSTOM) }

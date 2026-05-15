@@ -676,7 +676,23 @@ class CaptureActivity : ComponentActivity() {
                                 motionStreak = 0
                                 blurStreak = 0
                             }
-                            else -> { /* tracking / pre-roll / etc. don't drive the streak banner */ }
+                            else -> {
+                                // Tracking / pre-roll / rate-
+                                // limit drops aren't user-
+                                // actionable, but they still
+                                // break a streak of actionable
+                                // drops — a "9 motion drops,
+                                // one pre-roll drop, one more
+                                // motion drop" run shouldn't
+                                // surface the Hold-steady
+                                // banner. Reset all three so
+                                // only *truly* consecutive
+                                // actionable drops cross the
+                                // threshold.
+                                motionStreak = 0
+                                blurStreak = 0
+                                exposureStreak = 0
+                            }
                         }
                         maybeUpdateDropHud(filter)
                         return
