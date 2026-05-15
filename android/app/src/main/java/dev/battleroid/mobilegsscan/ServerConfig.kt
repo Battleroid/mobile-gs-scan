@@ -229,23 +229,37 @@ object ServerConfig {
     }
 
     /** Translate the user-facing motion-strictness slider (0–100)
-     *  to ``FrameQualityFilter.Config`` thresholds. */
+     *  to ``FrameQualityFilter.Config`` thresholds.
+     *
+     *  Piecewise-linear with the *default* slider value (50)
+     *  pegged at the canonical mid threshold the Plan-agent
+     *  design specified — 0.35 m/s linear and 25 deg/s angular.
+     *  Plain (0, 1.0) → (100, 0.1) interpolation would put 50
+     *  at 0.55 m/s, which is much too lenient — handheld shake
+     *  on a slow pan often exceeds 0.4 m/s and would land in
+     *  the dataset under that mapping. Two-segment math keeps
+     *  the curve sane at both endpoints + at the default. */
     fun frameFilterLinVelMax(motionStrictness: Int): Double {
-        // 0 → 1.00 m/s; 100 → 0.10 m/s. Linear interpolation.
         val t = motionStrictness.coerceIn(0, 100) / 100.0
-        return 1.0 - t * 0.90
+        // (0, 1.0) → (0.5, 0.35) → (1, 0.1)
+        return if (t <= 0.5) 1.0 - 1.30 * t
+        else 0.35 - 0.50 * (t - 0.5)
     }
 
     fun frameFilterAngVelMaxDeg(motionStrictness: Int): Double {
-        // 0 → 70 deg/s; 100 → 5 deg/s.
         val t = motionStrictness.coerceIn(0, 100) / 100.0
-        return 70.0 - t * 65.0
+        // (0, 70) → (0.5, 25) → (1, 5)
+        return if (t <= 0.5) 70.0 - 90.0 * t
+        else 25.0 - 40.0 * (t - 0.5)
     }
 
     fun frameFilterExposureSigma(exposureStrictness: Int): Double {
-        // 0 → 5.0σ; 100 → 1.5σ. Lower sigma = stricter.
         val t = exposureStrictness.coerceIn(0, 100) / 100.0
-        return 5.0 - t * 3.5
+        // (0, 5.0) → (0.5, 3.0) → (1, 1.5). Lower sigma is
+        // stricter — the default 50 lands at the 3σ rule the
+        // filter docstring cites as canonical.
+        return if (t <= 0.5) 5.0 - 4.0 * t
+        else 3.0 - 3.0 * (t - 0.5)
     }
 
     /** Persisted capture-profile selection. See the constants
